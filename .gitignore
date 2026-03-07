@@ -1,25 +1,99 @@
-﻿# Local env files
+﻿# =========================
+# SISTEMA / EDITOR
+# =========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# =========================
+# ARQUIVOS DE AMBIENTE
+# =========================
 .env
 .env.*
 !.env.example
 
-# Python venv
-scripts/.venv/
+# =========================
+# PYTHON - GERAL
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Logs
-*.log
+# Ambientes virtuais
+.venv/
+venv/
+env/
+ENV/
 
-# Local runtime/data
-mysql-data/
-.tmp/
-
+# =========================
+# BACKEND - automacao_ofertas
+# =========================
+automacao_ofertas/.env
+automacao_ofertas/.env.*
+!automacao_ofertas/.env.example
 
 automacao_ofertas/.venv/
 automacao_ofertas/__pycache__/
-automacao_ofertas/.env
-automacao_ofertas/*.log
-automacao_ofertas/data/*.csv
+automacao_ofertas/**/*.pyc
+automacao_ofertas/**/*.pyo
+automacao_ofertas/**/*.pyd
 
+# Arquivos sensíveis / checklist local
+automacao_ofertas/APIS_E_CHAVES_CHECKLIST.txt
+
+# Dados gerados localmente
+automacao_ofertas/data/*.csv
+automacao_ofertas/data/*.xlsx
+automacao_ofertas/data/*.json
+
+# =========================
+# SCRIPTS
+# =========================
+scripts/.env
+scripts/.env.*
+!scripts/.env.example
+
+scripts/__pycache__/
+scripts/**/*.pyc
+scripts/**/*.pyo
+scripts/**/*.pyd
+
+# CSVs gerados/importados localmente
+scripts/ofertas.csv
+
+# =========================
+# FRONT / PHP
+# =========================
 public_html/.env
-.vscode/
-*.log
+public_html/.env.*
+
+# Config local sensível
+public_html/inc/config.local.php
+
+# Uploads / arquivos gerados dinamicamente
+public_html/generated/
+public_html/uploads/
+public_html/cache/
+
+# =========================
+# NODE / FRONT BUILD
+# =========================
+node_modules/
+dist/
+build/
+.next/
+coverage/
+
+# =========================
+# ARQUIVOS DE EXECUÇÃO LOCAL
+# =========================
+*.sqlite
+*.db
+*.bak
+*.tmp
