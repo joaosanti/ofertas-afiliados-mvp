@@ -63,6 +63,30 @@ def _meta_page_id() -> str:
     return page_id
 
 
+def _meta_page_token() -> str:
+    user_token = _meta_token()
+    page_id = _meta_page_id()
+
+    with httpx.Client(timeout=20) as client:
+        response = client.get(
+            f"{_meta_api_base()}/me/accounts",
+            params={"access_token": user_token},
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    for item in data.get("data", []):
+        if str(item.get("id")) == page_id:
+            page_token = (item.get("access_token") or "").strip()
+            if page_token:
+                return page_token
+
+    raise ValueError(
+        "Nao foi possivel derivar o token da pagina no /me/accounts. "
+        "Verifique META_PAGE_ID e as permissoes do META_ACCESS_TOKEN."
+    )
+
+
 def _meta_instagram_account_id() -> str:
     account_id = (os.getenv("META_INSTAGRAM_BUSINESS_ACCOUNT_ID") or "").strip()
     if not account_id:
@@ -311,7 +335,7 @@ def publish_facebook_post(message: str, link: str | None = None) -> dict[str, An
     if not message:
         raise ValueError("A mensagem do post do Facebook nao pode ficar vazia.")
 
-    payload = {"message": message, "access_token": _meta_token()}
+    payload = {"message": message, "access_token": _meta_page_token()}
     if link:
         payload["link"] = link.strip()
 

@@ -95,6 +95,10 @@ class DashboardSettingsPayload(BaseModel):
     auto_social_platform: str | None = None
     auto_social_mode: str | None = None
     auto_social_limit: int | None = None
+    auto_story_enabled: bool | None = None
+    auto_story_times: str | None = None
+    auto_story_platform: str | None = None
+    auto_story_limit: int | None = None
 
 
 class DashboardJobRunPayload(BaseModel):
@@ -214,6 +218,10 @@ def _env_settings_snapshot() -> dict:
         "auto_social_platform": (os.getenv("AUTO_SOCIAL_PLATFORM") or "facebook").strip().lower(),
         "auto_social_mode": (os.getenv("AUTO_SOCIAL_MODE") or "feed").strip().lower(),
         "auto_social_limit": max(1, int((os.getenv("AUTO_SOCIAL_LIMIT") or "3").strip() or "3")),
+        "auto_story_enabled": _bool_env("AUTO_STORY_ENABLED", False),
+        "auto_story_times": os.getenv("AUTO_STORY_TIMES") or "",
+        "auto_story_platform": (os.getenv("AUTO_STORY_PLATFORM") or "instagram").strip().lower(),
+        "auto_story_limit": max(1, int((os.getenv("AUTO_STORY_LIMIT") or "1").strip() or "1")),
     }
 
 
@@ -399,7 +407,54 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1) -> dic
 
         items = []
         errors = []
-        if platform == "instagram" and mode == "feed":
+        if platform in {"both", "facebook_instagram"} and mode == "feed":
+            for item in previews:
+                combined_item = {
+                    "offer_id": item["offer_id"],
+                    "slug": item["slug"],
+                    "title": item["title"],
+                }
+                success_for_item = False
+
+                try:
+                    facebook_result = publish_facebook_post(
+                        message=item["facebook_payload"]["message"],
+                        link=item["facebook_payload"]["link"],
+                    )
+                    combined_item["facebook_result"] = facebook_result["result"]
+                    success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "facebook",
+                            "error": str(exc),
+                        }
+                    )
+
+                try:
+                    created = create_instagram_media_container(
+                        image_url=item["instagram_payload"]["image_url"],
+                        caption=item["instagram_payload"]["caption"],
+                    )
+                    published = publish_instagram_container(created["result"]["id"])
+                    combined_item["instagram_creation_id"] = created["result"]["id"]
+                    combined_item["instagram_result"] = published["result"]
+                    success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram",
+                            "error": str(exc),
+                        }
+                    )
+
+                if success_for_item:
+                    items.append(combined_item)
+        elif platform == "instagram" and mode == "feed":
             for item in previews:
                 try:
                     created = create_instagram_media_container(
@@ -442,6 +497,8 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1) -> dic
             "platform": platform,
             "mode": mode,
             "count": len(items),
+            "facebook_count": len([item for item in items if item.get("facebook_result")]),
+            "instagram_count": len([item for item in items if item.get("instagram_result") or item.get("creation_id")]),
             "items": items,
             "errors": errors,
         }
@@ -608,11 +665,22 @@ def dashboard_api_automation_import_run_now(payload: DashboardJobRunPayload, _: 
 def dashboard_api_automation_social_run_now(payload: DashboardJobRunPayload, _: str = Depends(require_manager_auth)):
     settings = _env_settings_snapshot()
     platform = payload.platform or settings.get("auto_social_platform") or "facebook"
-    mode = payload.mode or settings.get("auto_social_mode") or "feed"
+    mode = "feed"
     limit = int(payload.limit or settings.get("auto_social_limit") or 1)
     result = execute_social_run(platform, mode, limit)
     if scheduler is not None:
         scheduler._record_result("social", status="success" if not result.get("errors") else "error", result=result)
+    return result
+
+
+@app.post("/dashboard/api/automation/story/run-now")
+def dashboard_api_automation_story_run_now(payload: DashboardJobRunPayload, _: str = Depends(require_manager_auth)):
+    settings = _env_settings_snapshot()
+    platform = payload.platform or settings.get("auto_story_platform") or "instagram"
+    limit = int(payload.limit or settings.get("auto_story_limit") or 1)
+    result = execute_social_run(platform, "story", limit)
+    if scheduler is not None:
+        scheduler._record_result("story", status="success" if not result.get("errors") else "error", result=result)
     return result
 
 
@@ -646,6 +714,14 @@ def dashboard_api_settings_save(payload: DashboardSettingsPayload, _: str = Depe
         updates["AUTO_SOCIAL_MODE"] = payload.auto_social_mode.strip().lower() or "feed"
     if payload.auto_social_limit is not None:
         updates["AUTO_SOCIAL_LIMIT"] = str(max(1, min(int(payload.auto_social_limit), 20)))
+    if payload.auto_story_enabled is not None:
+        updates["AUTO_STORY_ENABLED"] = "true" if payload.auto_story_enabled else "false"
+    if payload.auto_story_times is not None:
+        updates["AUTO_STORY_TIMES"] = payload.auto_story_times.strip()
+    if payload.auto_story_platform is not None:
+        updates["AUTO_STORY_PLATFORM"] = payload.auto_story_platform.strip().lower() or "instagram"
+    if payload.auto_story_limit is not None:
+        updates["AUTO_STORY_LIMIT"] = str(max(1, min(int(payload.auto_story_limit), 20)))
 
     if not updates:
         return {"ok": True, "message": "Nenhuma alteracao recebida.", "settings": _env_settings_snapshot(), "reauth_required": False}
@@ -655,6 +731,7 @@ def dashboard_api_settings_save(payload: DashboardSettingsPayload, _: str = Depe
     if scheduler is not None:
         scheduler._refresh_next_run("import")
         scheduler._refresh_next_run("social")
+        scheduler._refresh_next_run("story")
 
     return {
         "ok": True,

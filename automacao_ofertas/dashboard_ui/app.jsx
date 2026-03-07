@@ -9,6 +9,7 @@ const IMPORT_OPTIONS = [
 
 const SOCIAL_OPTIONS = [
   { key: "facebook:feed", label: "Facebook Feed", note: "Posta direto na pagina do projeto." },
+  { key: "both:feed", label: "Facebook + Instagram Feed", note: "Publica a mesma oferta nos dois canais." },
   { key: "instagram:feed", label: "Instagram Feed", note: "Publica no feed do Instagram via Graph API." },
   { key: "instagram:story", label: "Instagram Story", note: "Usa a arte gerada automaticamente." },
 ];
@@ -214,7 +215,7 @@ function App() {
   const [importLoading, setImportLoading] = useState(false);
   const [socialLoading, setSocialLoading] = useState(false);
   const [runLoading, setRunLoading] = useState({ import: false, social: false, batch: false });
-  const [jobRunLoading, setJobRunLoading] = useState({ import: false, social: false });
+  const [jobRunLoading, setJobRunLoading] = useState({ import: false, social: false, story: false });
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [nowTs, setNowTs] = useState(Date.now());
   const [importForm, setImportForm] = useState({
@@ -236,6 +237,10 @@ function App() {
     auto_social_platform: "facebook",
     auto_social_mode: "feed",
     auto_social_limit: 3,
+    auto_story_enabled: false,
+    auto_story_times: "07:05,13:05,19:05",
+    auto_story_platform: "instagram",
+    auto_story_limit: 1,
   });
 
   const socialSplit = useMemo(() => {
@@ -269,6 +274,10 @@ function App() {
       auto_social_platform: settings.auto_social_platform || "facebook",
       auto_social_mode: settings.auto_social_mode || "feed",
       auto_social_limit: Number(settings.auto_social_limit || 3),
+      auto_story_enabled: Boolean(settings.auto_story_enabled),
+      auto_story_times: settings.auto_story_times || "",
+      auto_story_platform: settings.auto_story_platform || "instagram",
+      auto_story_limit: Number(settings.auto_story_limit || 1),
     }));
   }, [snapshot?.settings]);
 
@@ -384,12 +393,22 @@ function App() {
   async function handleRunJobNow(jobKey) {
     setJobRunLoading((state) => ({ ...state, [jobKey]: true }));
     try {
-      const url = jobKey === "import" ? "/dashboard/api/automation/import/run-now" : "/dashboard/api/automation/social/run-now";
+      const url = jobKey === "import"
+        ? "/dashboard/api/automation/import/run-now"
+        : jobKey === "story"
+          ? "/dashboard/api/automation/story/run-now"
+          : "/dashboard/api/automation/social/run-now";
       const payload = jobKey === "import"
         ? { providers: settingsForm.auto_import_providers }
+        : jobKey === "story"
+          ? {
+              platform: settingsForm.auto_story_platform,
+              mode: "story",
+              limit: Number(settingsForm.auto_story_limit || 1),
+            }
         : {
             platform: settingsForm.auto_social_platform,
-            mode: settingsForm.auto_social_mode,
+            mode: "feed",
             limit: Number(settingsForm.auto_social_limit || 1),
           };
       const data = await fetchJson(url, {
@@ -401,7 +420,9 @@ function App() {
         type: "success",
         message: jobKey === "import"
           ? `Importacao manual concluida: ${(data.items || []).reduce((sum, item) => sum + Number(item.processed || item.imported || 0), 0)} processado(s), ${(data.items || []).reduce((sum, item) => sum + Number(item.created || 0), 0)} criado(s), ${(data.items || []).reduce((sum, item) => sum + Number(item.updated || 0), 0)} atualizado(s), ${data.error || 0} erro(s).`
-          : `Social manual concluido: ${data.count || 0} publicacao(oes).`,
+          : jobKey === "story"
+            ? `Stories manuais concluidos: ${data.count || 0} publicacao(oes).`
+            : `Social manual concluido: ${data.count || 0} publicacao(oes).`,
       });
       await Promise.all([loadSnapshot(), loadSocialPreview(Number(socialForm.limit))]);
     } catch (error) {
@@ -437,6 +458,10 @@ function App() {
         auto_social_platform: settingsForm.auto_social_platform,
         auto_social_mode: settingsForm.auto_social_mode,
         auto_social_limit: Number(settingsForm.auto_social_limit || 1),
+        auto_story_enabled: settingsForm.auto_story_enabled,
+        auto_story_times: settingsForm.auto_story_times,
+        auto_story_platform: settingsForm.auto_story_platform,
+        auto_story_limit: Number(settingsForm.auto_story_limit || 1),
       };
       const data = await fetchJson("/dashboard/api/settings", {
         method: "POST",
@@ -560,12 +585,12 @@ function App() {
               </div>
             </div>
             <div className="status-grid">
-              {["import", "social"].map((jobKey) => {
+              {["import", "social", "story"].map((jobKey) => {
                 const job = automation?.jobs?.[jobKey] || {};
                 return (
                   <article className={`status-card ${job.last_status === "error" ? "is-error" : job.last_status === "success" ? "is-success" : ""}`} key={jobKey}>
                     <div className="status-card-head">
-                      <h4>{jobKey === "import" ? "Job de importacao" : "Job social"}</h4>
+                      <h4>{jobKey === "import" ? "Job de importacao" : jobKey === "story" ? "Job de stories" : "Job de feed"}</h4>
                       <span className={`badge ${job.enabled ? "is-success" : "is-neutral"}`}>{job.enabled ? "Ativo" : "Desligado"}</span>
                     </div>
                     <p>{jobKey === "import" ? `Provedores: ${(job.providers || []).join(", ") || "nenhum"}` : `Canal: ${job.platform || "-"} / ${job.mode || "-"} / limite ${job.limit || 0}`}</p>
@@ -651,11 +676,11 @@ function App() {
                   <label>Auto social</label>
                   <label className="check-chip">
                     <input type="checkbox" checked={settingsForm.auto_social_enabled} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_enabled: e.target.checked }))} />
-                    Ativar postagem automatica
+                    Ativar feed automatico
                   </label>
                 </div>
                 <div className="field">
-                  <label>Horarios do social</label>
+                  <label>Horarios do feed</label>
                   <input type="text" value={settingsForm.auto_social_times} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_times: e.target.value }))} />
                   <small>Ex: 07:00,13:00,19:00</small>
                 </div>
@@ -663,22 +688,52 @@ function App() {
 
               <div className="field-grid" style={{ marginTop: 12 }}>
                 <div className="field">
-                  <label>Canal automatico</label>
+                  <label>Canal automatico do feed</label>
                   <select value={settingsForm.auto_social_platform} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_platform: e.target.value }))}>
                     <option value="facebook">facebook</option>
+                    <option value="both">facebook + instagram</option>
                     <option value="instagram">instagram</option>
                   </select>
                 </div>
                 <div className="field">
                   <label>Modo automatico</label>
-                  <select value={settingsForm.auto_social_mode} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_mode: e.target.value }))}>
-                    <option value="feed">feed</option>
-                    <option value="story">story</option>
-                  </select>
+                  <input type="text" value="feed" disabled />
                 </div>
                 <div className="field">
                   <label>Quantidade por rodada</label>
                   <input type="number" min="1" max="10" value={settingsForm.auto_social_limit} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_limit: Number(e.target.value || 1) }))} />
+                </div>
+              </div>
+
+              <div className="field-grid" style={{ marginTop: 12 }}>
+                <div className="field">
+                  <label>Auto stories</label>
+                  <label className="check-chip">
+                    <input type="checkbox" checked={settingsForm.auto_story_enabled} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_enabled: e.target.checked }))} />
+                    Ativar stories automaticos
+                  </label>
+                </div>
+                <div className="field">
+                  <label>Horarios dos stories</label>
+                  <input type="text" value={settingsForm.auto_story_times} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_times: e.target.value }))} />
+                  <small>Ex: 07:05,13:05,19:05</small>
+                </div>
+              </div>
+
+              <div className="field-grid" style={{ marginTop: 12 }}>
+                <div className="field">
+                  <label>Canal automatico dos stories</label>
+                  <select value={settingsForm.auto_story_platform} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_platform: e.target.value }))}>
+                    <option value="instagram">instagram</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Modo dos stories</label>
+                  <input type="text" value="story" disabled />
+                </div>
+                <div className="field">
+                  <label>Quantidade por rodada</label>
+                  <input type="number" min="1" max="10" value={settingsForm.auto_story_limit} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_limit: Number(e.target.value || 1) }))} />
                 </div>
               </div>
             </div>

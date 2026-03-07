@@ -82,11 +82,23 @@ class AutomationScheduler:
     def social_limit(self) -> int:
         return _int_env("AUTO_SOCIAL_LIMIT", 3)
 
+    def story_platform(self) -> str:
+        return (os.getenv("AUTO_STORY_PLATFORM") or "instagram").strip().lower()
+
+    def story_mode(self) -> str:
+        return "story"
+
+    def story_limit(self) -> int:
+        return _int_env("AUTO_STORY_LIMIT", 1)
+
     def import_times(self) -> list[str]:
         return _parse_times(os.getenv("AUTO_IMPORT_TIMES") or "")
 
     def social_times(self) -> list[str]:
         return _parse_times(os.getenv("AUTO_SOCIAL_TIMES") or "")
+
+    def story_times(self) -> list[str]:
+        return _parse_times(os.getenv("AUTO_STORY_TIMES") or "")
 
     def _job_status(self, job_key: str, now: datetime) -> dict[str, Any]:
         if job_key == "import":
@@ -103,16 +115,33 @@ class AutomationScheduler:
                 "last_result": None,
                 "next_run_at": _local_iso(_next_time_from_schedule(times, now)) if enabled and times else _local_iso(now + timedelta(minutes=interval)) if enabled else None,
             }
-        enabled = _bool_env("AUTO_SOCIAL_ENABLED", False)
-        times = self.social_times()
-        interval = _int_env("AUTO_SOCIAL_INTERVAL_MINUTES", 240)
+        if job_key == "social":
+            enabled = _bool_env("AUTO_SOCIAL_ENABLED", False)
+            times = self.social_times()
+            interval = _int_env("AUTO_SOCIAL_INTERVAL_MINUTES", 240)
+            return {
+                "enabled": enabled,
+                "interval_minutes": interval,
+                "times": times,
+                "platform": self.social_platform(),
+                "mode": "feed",
+                "limit": self.social_limit(),
+                "last_run_at": None,
+                "last_status": None,
+                "last_result": None,
+                "next_run_at": _local_iso(_next_time_from_schedule(times, now)) if enabled and times else _local_iso(now + timedelta(minutes=interval)) if enabled else None,
+            }
+
+        enabled = _bool_env("AUTO_STORY_ENABLED", False)
+        times = self.story_times()
+        interval = _int_env("AUTO_STORY_INTERVAL_MINUTES", 240)
         return {
             "enabled": enabled,
             "interval_minutes": interval,
             "times": times,
-            "platform": self.social_platform(),
-            "mode": self.social_mode(),
-            "limit": self.social_limit(),
+            "platform": self.story_platform(),
+            "mode": self.story_mode(),
+            "limit": self.story_limit(),
             "last_run_at": None,
             "last_status": None,
             "last_result": None,
@@ -127,6 +156,7 @@ class AutomationScheduler:
             "jobs": {
                 "import": self._job_status("import", now),
                 "social": self._job_status("social", now),
+                "story": self._job_status("story", now),
             },
         }
 
@@ -156,6 +186,7 @@ class AutomationScheduler:
                 "jobs": {
                     "import": dict(self._status["jobs"]["import"]),
                     "social": dict(self._status["jobs"]["social"]),
+                    "story": dict(self._status["jobs"]["story"]),
                 },
             }
 
@@ -208,15 +239,32 @@ class AutomationScheduler:
                 if _bool_env("AUTO_SOCIAL_ENABLED", False):
                     if self.social_times():
                         if self._should_run_by_time("social", now):
-                            result = self._social_runner(self.social_platform(), self.social_mode(), self.social_limit())
+                            result = self._social_runner(self.social_platform(), "feed", self.social_limit())
                             self._record_result("social", status="success", result=result)
                     else:
                         last_run = self.snapshot()["jobs"]["social"]["last_run_at"]
                         interval = _int_env("AUTO_SOCIAL_INTERVAL_MINUTES", 240)
                         if not last_run or datetime.fromisoformat(last_run.replace("Z", "")) <= now - timedelta(minutes=interval):
-                            result = self._social_runner(self.social_platform(), self.social_mode(), self.social_limit())
+                            result = self._social_runner(self.social_platform(), "feed", self.social_limit())
                             self._record_result("social", status="success", result=result)
+
+                if _bool_env("AUTO_STORY_ENABLED", False):
+                    if self.story_times():
+                        if self._should_run_by_time("story", now):
+                            result = self._social_runner(self.story_platform(), "story", self.story_limit())
+                            self._record_result("story", status="success", result=result)
+                    else:
+                        last_run = self.snapshot()["jobs"]["story"]["last_run_at"]
+                        interval = _int_env("AUTO_STORY_INTERVAL_MINUTES", 240)
+                        if not last_run or datetime.fromisoformat(last_run.replace("Z", "")) <= now - timedelta(minutes=interval):
+                            result = self._social_runner(self.story_platform(), "story", self.story_limit())
+                            self._record_result("story", status="success", result=result)
             except Exception as exc:  # noqa: BLE001
-                target = "social" if _bool_env("AUTO_SOCIAL_ENABLED", False) else "import"
+                if _bool_env("AUTO_STORY_ENABLED", False):
+                    target = "story"
+                elif _bool_env("AUTO_SOCIAL_ENABLED", False):
+                    target = "social"
+                else:
+                    target = "import"
                 self._record_result(target, status="error", result={"error": str(exc)})
             self._stop_event.wait(30)
