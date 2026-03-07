@@ -1,0 +1,25 @@
+﻿# Local env files
+.env
+.env.*
+!.env.example
+
+# Python venv
+scripts/.venv/
+
+# Logs
+*.log
+
+# Local runtime/data
+mysql-data/
+.tmp/
+
+
+automacao_ofertas/.venv/
+automacao_ofertas/__pycache__/
+automacao_ofertas/.env
+automacao_ofertas/*.log
+automacao_ofertas/data/*.csv
+
+public_html/.env
+.vscode/
+*.log

@@ -1,0 +1,12 @@
+﻿# Ambiente local
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.local
+node_modules/
+dist/
+build/
+.vscode/
+__pycache__/
+*.log

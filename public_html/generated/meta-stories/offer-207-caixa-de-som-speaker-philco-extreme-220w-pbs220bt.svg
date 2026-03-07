@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#071a45"/>
+      <stop offset="100%" stop-color="#1e58d6"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1920" fill="url(#bg)"/>
+  <circle cx="930" cy="240" r="170" fill="rgba(255,255,255,0.08)"/>
+  <circle cx="140" cy="1580" r="220" fill="rgba(255,255,255,0.05)"/>
+  <rect x="80" y="120" rx="24" ry="24" width="180" height="56" fill="#0f2d6d" /><text x="114" y="157" fill="#f4f7fb" font-family="Arial, sans-serif" font-size="28" font-weight="700">48% OFF</text>
+  <text x="80" y="220" fill="#dbe7ff" font-family="Arial, sans-serif" font-size="34" font-weight="700">ZERO PRECO</text>
+  <text x="80" y="300" fill="#f4f7fb" font-family="Arial, sans-serif" font-size="44" font-weight="700">Caixa de Som Speaker</text><text x="80" y="356" fill="#f4f7fb" font-family="Arial, sans-serif" font-size="44" font-weight="700">Philco Extreme 220W</text><text x="80" y="412" fill="#f4f7fb" font-family="Arial, sans-serif" font-size="44" font-weight="700">PBS220BT</text>
+  <text x="80" y="578" fill="#ffffff" font-family="Arial, sans-serif" font-size="80" font-weight="700">R$ 309,00</text>
+  <text x="80" y="498" fill="#b9c8e6" font-family="Arial, sans-serif" font-size="28">De R$ 599,00</text>
+  <text x="80" y="648" fill="#dbe7ff" font-family="Arial, sans-serif" font-size="34">Mercado Livre | MLB11507</text>
+  <rect x="80" y="1110" rx="28" ry="28" width="520" height="110" fill="#ffffff"/>
+  <text x="140" y="1178" fill="#0b2d78" font-family="Arial, sans-serif" font-size="40" font-weight="700">Ver oferta no site</text>
+  <text x="80" y="1310" fill="#dbe7ff" font-family="Arial, sans-serif" font-size="30">zeropreco.com.br</text>
+  <text x="80" y="1360" fill="#dbe7ff" font-family="Arial, sans-serif" font-size="26">https://zeropreco.com.br/oferta.php?slug=caixa-de-som-speaker-philco-extreme-220w-pbs220bt</text>
+  
+</svg>

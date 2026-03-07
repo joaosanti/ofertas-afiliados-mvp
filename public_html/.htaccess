@@ -1,0 +1,10 @@
+RewriteEngine On
+
+RewriteRule ^$ index.php [L]
+RewriteRule ^categoria/([a-z0-9\-]+)/?$ categoria.php?cat=$1 [L,QSA]
+RewriteRule ^oferta/([a-z0-9\-]+)/?$ oferta.php?slug=$1 [L,QSA]
+RewriteRule ^sobre/?$ sobre.php [L,QSA]
+RewriteRule ^contato/?$ contato.php [L,QSA]
+RewriteRule ^privacidade/?$ privacidade.php [L,QSA]
+RewriteRule ^termos/?$ termos.php [L,QSA]
+RewriteRule ^sitemap\.xml$ sitemap.php [L,QSA]
