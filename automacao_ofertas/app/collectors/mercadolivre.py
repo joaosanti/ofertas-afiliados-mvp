@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
+from app.integrations.mercadolivre_oauth import refresh_token as oauth_refresh_token
 
 MELI_API_URL = "https://api.mercadolibre.com"
 ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
@@ -59,6 +60,67 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _write_env_updates(updates: dict[str, str]) -> None:
+    if not ENV_PATH.exists():
+        return
+
+    content = ENV_PATH.read_text(encoding="utf-8").splitlines()
+    remaining = dict(updates)
+    output: list[str] = []
+
+    for line in content:
+        replaced = False
+        for key, value in list(remaining.items()):
+            if line.startswith(f"{key}="):
+                output.append(f"{key}={value}")
+                remaining.pop(key, None)
+                replaced = True
+                break
+        if not replaced:
+            output.append(line)
+
+    for key, value in remaining.items():
+        output.append(f"{key}={value}")
+
+    ENV_PATH.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    for key, value in updates.items():
+        os.environ[key] = value
+
+
+def _refresh_access_token_if_needed() -> str:
+    access_token = os.getenv("MELI_ACCESS_TOKEN", "").strip()
+    refresh_token = os.getenv("MELI_REFRESH_TOKEN", "").strip()
+    if not refresh_token:
+        return access_token
+
+    if not access_token:
+        tokens = oauth_refresh_token(refresh_token)
+        _write_env_updates(
+            {
+                "MELI_ACCESS_TOKEN": tokens.get("access_token", ""),
+                "MELI_REFRESH_TOKEN": tokens.get("refresh_token", refresh_token),
+            }
+        )
+        return os.getenv("MELI_ACCESS_TOKEN", "").strip()
+
+    with httpx.Client(timeout=20) as client:
+        resp = client.get(
+            f"{MELI_API_URL}/users/me",
+            headers=_build_auth_headers(access_token),
+        )
+        if resp.status_code != 401:
+            return access_token
+
+    tokens = oauth_refresh_token(refresh_token)
+    _write_env_updates(
+        {
+            "MELI_ACCESS_TOKEN": tokens.get("access_token", ""),
+            "MELI_REFRESH_TOKEN": tokens.get("refresh_token", refresh_token),
+        }
+    )
+    return os.getenv("MELI_ACCESS_TOKEN", "").strip()
 
 
 def _discount_percent(price: Any, old_price: Any) -> int:
@@ -409,7 +471,7 @@ def fetch_mercadolivre_offers() -> list[dict[str, Any]]:
     if csv_offers:
         return csv_offers
 
-    access_token = os.getenv("MELI_ACCESS_TOKEN", "").strip()
+    access_token = _refresh_access_token_if_needed()
 
     with httpx.Client(timeout=20) as client:
         if access_token:
