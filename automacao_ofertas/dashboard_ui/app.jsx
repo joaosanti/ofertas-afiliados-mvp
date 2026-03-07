@@ -59,9 +59,17 @@ function summarizeJobResult(jobKey, result) {
   if (!result) return "Nenhuma execucao concluida ainda.";
   if (result.error) return `Erro: ${result.error}`;
   if (jobKey === "import") {
-    const success = Number(result.success || 0);
-    const error = Number(result.error || 0);
-    return `${success} importado(s), ${error} com erro.`;
+    if (Array.isArray(result.items)) {
+      const processed = result.items.reduce((sum, item) => sum + Number(item.processed || item.imported || 0), 0);
+      const created = result.items.reduce((sum, item) => sum + Number(item.created || 0), 0);
+      const updated = result.items.reduce((sum, item) => sum + Number(item.updated || 0), 0);
+      const errors = Number(result.error || 0);
+      return `${processed} processado(s): ${created} criado(s), ${updated} atualizado(s), ${errors} com erro.`;
+    }
+    const processed = Number(result.processed || result.imported || 0);
+    const created = Number(result.created || 0);
+    const updated = Number(result.updated || 0);
+    return `${processed} processado(s): ${created} criado(s), ${updated} atualizado(s).`;
   }
   if (jobKey === "social") {
     const count = Number(result.count || 0);
@@ -322,7 +330,13 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ providers: importForm.providers }),
       });
-      setToast({ type: data.error ? "error" : "success", message: `Importacao concluida: ${data.success} sucesso, ${data.error} erro.` });
+      const processed = (data.items || []).reduce((sum, item) => sum + Number(item.processed || item.imported || 0), 0);
+      const created = (data.items || []).reduce((sum, item) => sum + Number(item.created || 0), 0);
+      const updated = (data.items || []).reduce((sum, item) => sum + Number(item.updated || 0), 0);
+      setToast({
+        type: data.error ? "error" : "success",
+        message: `Importacao concluida: ${processed} processado(s), ${created} criado(s), ${updated} atualizado(s), ${data.error} erro(s).`,
+      });
       await loadSnapshot();
     } catch (error) {
       setToast({ type: "error", message: `Falha na importacao: ${error.message}` });
@@ -386,7 +400,7 @@ function App() {
       setToast({
         type: "success",
         message: jobKey === "import"
-          ? `Importacao manual concluida: ${data.success || 0} sucesso, ${data.error || 0} erro.`
+          ? `Importacao manual concluida: ${(data.items || []).reduce((sum, item) => sum + Number(item.processed || item.imported || 0), 0)} processado(s), ${(data.items || []).reduce((sum, item) => sum + Number(item.created || 0), 0)} criado(s), ${(data.items || []).reduce((sum, item) => sum + Number(item.updated || 0), 0)} atualizado(s), ${data.error || 0} erro(s).`
           : `Social manual concluido: ${data.count || 0} publicacao(oes).`,
       });
       await Promise.all([loadSnapshot(), loadSocialPreview(Number(socialForm.limit))]);

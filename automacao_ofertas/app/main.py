@@ -254,18 +254,30 @@ def require_manager_auth(manager_session: str | None = Cookie(default=None, alia
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessao invalida.")
 
 
-def _import_provider(db, store: str, offers: list[dict]) -> int:
-    count = 0
+def _import_provider(db, store: str, offers: list[dict]) -> dict:
+    processed = 0
+    created = 0
+    updated = 0
     for raw in offers:
         normalized = normalize_offer(raw, store, raw.get("affiliate_tag"))
-        publish_offer(db, normalized)
-        count += 1
-    return count
+        action = publish_offer(db, normalized)
+        processed += 1
+        if action == "created":
+            created += 1
+        else:
+            updated += 1
+    return {"processed": processed, "created": created, "updated": updated}
 
 
 def _raise_meta_http_error(exc: httpx.HTTPStatusError) -> HTTPException:
     detail = exc.response.text if exc.response is not None else str(exc)
     status_code = exc.response.status_code if exc.response is not None else 502
+    lowered = detail.lower()
+    if "session has expired" in lowered or "\"code\":190" in lowered or "\"error_subcode\":463" in lowered:
+        detail = (
+            "Token da Meta expirou. Gere um novo META_ACCESS_TOKEN no Graph API Explorer "
+            "e atualize o .env antes de rodar a publicacao social."
+        )
     return HTTPException(status_code=status_code, detail=detail)
 
 
@@ -324,14 +336,17 @@ def execute_import_run(providers: list[str] | None = None) -> dict:
             try:
                 fetcher = _provider_fetcher(provider_key)
                 offers = fetcher()
-                imported_count = _import_provider(db, _provider_label(provider_key), offers)
+                import_summary = _import_provider(db, _provider_label(provider_key), offers)
                 db.commit()
                 result = {
                     "provider": provider_key,
-                    "imported": imported_count,
+                    "processed": import_summary["processed"],
+                    "created": import_summary["created"],
+                    "updated": import_summary["updated"],
+                    "imported": import_summary["processed"],
                     "offers_found": len(offers),
                 }
-                record_execution_success(db, run_id, processed_count=imported_count, result=result)
+                record_execution_success(db, run_id, processed_count=import_summary["processed"], result=result)
                 results.append({"run_id": run_id, "status": "success"} | result)
             except Exception as exc:  # noqa: BLE001
                 db.rollback()
