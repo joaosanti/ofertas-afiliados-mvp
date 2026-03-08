@@ -1575,11 +1575,11 @@ function App() {
                         <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
                           <div>
                             <strong>Facebook</strong>
-                            <p style={{ marginTop: 6 }}>{item.facebook_text || "Preview indisponivel."}</p>
+                            <p style={{ marginTop: 6 }}>{item.facebook_text || item.facebook_payload?.message || item.caption || "Preview indisponivel."}</p>
                           </div>
                           <div>
                             <strong>Instagram</strong>
-                            <p style={{ marginTop: 6 }}>{item.instagram_text || "Preview indisponivel."}</p>
+                            <p style={{ marginTop: 6 }}>{item.instagram_text || item.instagram_payload?.caption || item.caption || "Preview indisponivel."}</p>
                           </div>
                         </div>
                         <div className="provider-actions" style={{ marginTop: 16 }}>

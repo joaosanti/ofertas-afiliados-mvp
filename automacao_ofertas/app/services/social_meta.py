@@ -288,7 +288,8 @@ def _story_caption_for_offer(offer: dict[str, Any]) -> str:
     parts = [f"{offer['titulo']}", f"{_money(offer['preco'])} na {store}"]
     if discount > 0:
         parts.append(f"Aprox. {discount}% OFF")
-    parts.append("Link na bio: zeropreco.com.br")
+    parts.append("Me envie uma mensagem que mando o link.")
+    parts.append("zeropreco.com.br")
     return "\n".join(parts)
 
 
@@ -357,7 +358,8 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
     filename = f"offer-{offer['id']}-{_slugify(offer['slug'])}.jpg"
     destination = ensure_stories_dir() / filename
     destination_url = _destination_url(offer)
-    destination_label = "Link na bio"
+    destination_label = "Me envie uma"
+    destination_label_secondary = "mensagem que mando o link"
 
     image = Image.new("RGB", (1080, 1920), "#0a2a67")
     draw = ImageDraw.Draw(image)
@@ -370,8 +372,10 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
     price_font = _load_font(96, bold=True)
     label_font = _load_font(30, bold=True)
     text_font = _load_font(32)
-    cta_font = _load_font(40, bold=True)
+    cta_font = _load_font(34, bold=True)
+    cta_small_font = _load_font(26, bold=True)
     micro_font = _load_font(22)
+    domain_font = _load_font(40, bold=True)
 
     draw.text((80, 120), "ZERO PRECO", font=label_font, fill="#dbe7ff")
 
@@ -407,11 +411,13 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
         draw.rounded_rectangle((120, 800, 960, 1270), radius=28, fill="#d9e5ff")
         draw.text((180, 1015), "Imagem do produto", font=cta_font, fill="#0b2d78")
 
-    draw.rounded_rectangle((80, 1360, 640, 1470), radius=28, fill="#ffffff")
-    draw.text((170, 1398), destination_label, font=cta_font, fill="#0b2d78")
+    draw.rounded_rectangle((80, 1360, 760, 1496), radius=28, fill="#ffffff")
+    draw.text((120, 1392), destination_label, font=cta_font, fill="#0b2d78")
+    draw.text((120, 1438), destination_label_secondary, font=cta_small_font, fill="#0b2d78")
 
-    draw.text((80, 1540), "Acesse zeropreco.com.br", font=text_font, fill="#dbe7ff")
-    draw.text((80, 1586), "Abra a oferta no perfil e siga para a loja parceira.", font=micro_font, fill="#dbe7ff")
+    draw.text((80, 1560), "zeropreco.com.br", font=domain_font, fill="#ffffff")
+    draw.text((80, 1616), "Me chame no direct e eu mando o link da oferta.", font=text_font, fill="#dbe7ff")
+    draw.text((80, 1660), "Abra no perfil e siga para a loja parceira.", font=micro_font, fill="#dbe7ff")
 
     coupon_text = (offer.get("cupom") or "").strip()
     if coupon_text:
