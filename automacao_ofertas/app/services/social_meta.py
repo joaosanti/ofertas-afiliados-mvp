@@ -1,43 +1,73 @@
 import html
 import os
 import re
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from sqlalchemy import text
+
+from app.services.sftp_deploy import ensure_stories_dir, story_public_url
 
 
 SELECT_TOP_OFFERS_SQL = text(
     """
     SELECT
-      id,
-      slug,
-      titulo,
-      descricao,
-      preco,
-      preco_antigo,
-      loja,
-      cupom,
-      imagem_url,
-      categoria,
-      tags,
-      destaque,
-      atualizado_em
-    FROM ofertas
-    WHERE ativo = 1
-      AND (expira_em IS NULL OR expira_em > NOW())
-      AND imagem_url IS NOT NULL
-      AND imagem_url <> ''
-    ORDER BY destaque DESC, atualizado_em DESC, preco ASC
+      o.id,
+      o.slug,
+      o.titulo,
+      o.descricao,
+      o.preco,
+      o.preco_antigo,
+      o.loja,
+      o.url_afiliado,
+      o.cupom,
+      o.imagem_url,
+      o.categoria,
+      o.tags,
+      o.destaque,
+      o.atualizado_em,
+      COUNT(c.id) AS clicks
+    FROM ofertas o
+    LEFT JOIN cliques c
+      ON c.oferta_id = o.id
+      AND c.criado_em >= NOW() - INTERVAL 30 DAY
+    WHERE o.ativo = 1
+      AND (o.expira_em IS NULL OR o.expira_em > NOW())
+      AND o.imagem_url IS NOT NULL
+      AND o.imagem_url <> ''
+    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.categoria, o.tags, o.destaque, o.atualizado_em
+    ORDER BY clicks DESC, o.destaque DESC, o.atualizado_em DESC, o.preco ASC
     LIMIT :limit
     """
 )
 
-
-def _project_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+CATEGORY_LABELS = {
+    "mlb1055": "Celulares e Smartphones",
+    "mlb1714": "Mouses",
+    "mlb135384": "Smartwatches",
+    "mlb7457": "Fones e Kits Viva Voz",
+    "mlb264715": "Escovas Eletricas",
+    "mlb120425": "Umidificadores",
+    "mlb456045": "Fritadeiras Eletricas",
+    "mlb48666": "Panelas Eletricas",
+    "mlb120373": "Panela de Arroz",
+    "mlb196208": "Fones de Ouvido",
+    "mlb3843": "Caixas Bluetooth",
+    "mlb268503": "Difusores de Aromas Eletricos",
+    "mlb11507": "Caixas Acusticas",
+    "mlb271858": "Smartbands",
+    "mlb439402": "Panelas a Vapor",
+    "mlb433422": "Escovas Alisadoras para Barba",
+    "mlb264184": "Cadeiras de Banho",
+    "mlb31682": "Panelas de Oleo",
+    "mlb107501": "Cacarolas e Caldeiroes",
+    "mlb1664": "Fones",
+    "mlb418472": "Teclados",
+}
 
 
 def _site_base_url() -> str:
@@ -94,16 +124,6 @@ def _meta_instagram_account_id() -> str:
     return account_id
 
 
-def _generated_story_dir() -> Path:
-    directory = _project_root() / "public_html" / "generated" / "meta-stories"
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
-
-
-def _story_public_url(filename: str) -> str:
-    return f"{_site_base_url()}/generated/meta-stories/{filename}"
-
-
 def _store_label(value: str) -> str:
     lowered = (value or "").strip().lower()
     mapping = {
@@ -115,11 +135,83 @@ def _store_label(value: str) -> str:
     return mapping.get(lowered, (value or "Loja").strip() or "Loja")
 
 
+def _normalize_key(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
 def _category_label(value: str) -> str:
     raw = (value or "").strip()
     if not raw or raw.lower() == "geral":
         return "ofertas"
+    mapped = CATEGORY_LABELS.get(_normalize_key(raw))
+    if mapped:
+        return mapped
     return raw.replace("-", " ").replace("_", " ")
+
+
+def _diversify_offer_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    if len(rows) <= limit:
+        return rows
+
+    selected: list[dict[str, Any]] = []
+    selected_ids: set[int] = set()
+    seen_stores: set[str] = set()
+    seen_categories: set[str] = set()
+
+    def include(row: dict[str, Any]) -> None:
+        offer_id = int(row["id"])
+        if offer_id in selected_ids or len(selected) >= limit:
+            return
+        selected.append(row)
+        selected_ids.add(offer_id)
+        seen_stores.add(_normalize_key(_store_label(row.get("loja") or "")))
+        seen_categories.add(_normalize_key(_category_label(row.get("categoria") or "")))
+
+    grouped_by_store: dict[str, list[dict[str, Any]]] = {}
+    store_order: list[str] = []
+    for row in rows:
+        store_key = _normalize_key(_store_label(row.get("loja") or ""))
+        if store_key not in grouped_by_store:
+            grouped_by_store[store_key] = []
+            store_order.append(store_key)
+        grouped_by_store[store_key].append(row)
+
+    # First round: bring one strong offer from each store before repeating.
+    while len(selected) < limit:
+        progressed = False
+        for store_key in store_order:
+            bucket = grouped_by_store.get(store_key) or []
+            while bucket and int(bucket[0]["id"]) in selected_ids:
+                bucket.pop(0)
+            if not bucket:
+                continue
+            include(bucket.pop(0))
+            progressed = True
+            if len(selected) >= limit:
+                return selected
+        if not progressed:
+            break
+
+    for row in rows:
+        store_key = _normalize_key(_store_label(row.get("loja") or ""))
+        if store_key not in seen_stores:
+            include(row)
+        if len(selected) >= limit:
+            return selected
+
+    for row in rows:
+        category_key = _normalize_key(_category_label(row.get("categoria") or ""))
+        if category_key not in seen_categories:
+            include(row)
+        if len(selected) >= limit:
+            return selected
+
+    for row in rows:
+        include(row)
+        if len(selected) >= limit:
+            return selected
+
+    return selected
 
 
 def _money(value: Any) -> str:
@@ -140,6 +232,25 @@ def _offer_url(slug: str) -> str:
 
 def _cta_url(slug: str) -> str:
     return f"{_site_base_url()}/oferta.php?slug={slug}&go=1"
+
+
+def _destination_url(offer: dict[str, Any]) -> str:
+    preferred = (offer.get("url_afiliado") or "").strip()
+    if preferred:
+        return preferred
+    return _cta_url(offer["slug"])
+
+
+def _display_url(url: str) -> str:
+    parsed = urlparse((url or "").strip())
+    host = (parsed.netloc or "").replace("www.", "")
+    path = (parsed.path or "").rstrip("/")
+    if path and path != "/":
+        compact_path = path[:28] + "..." if len(path) > 31 else path
+        return f"{host}{compact_path}"
+    if parsed.query:
+        return host or url[:36]
+    return host or url[:36]
 
 
 def _headline_for_offer(offer: dict[str, Any]) -> str:
@@ -177,12 +288,13 @@ def _story_caption_for_offer(offer: dict[str, Any]) -> str:
     parts = [f"{offer['titulo']}", f"{_money(offer['preco'])} na {store}"]
     if discount > 0:
         parts.append(f"Aprox. {discount}% OFF")
-    parts.append("Link no perfil e no Zero Preco.")
+    parts.append("Link na bio: zeropreco.com.br")
     return "\n".join(parts)
 
 
 def _slugify(value: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "-", (value or "").strip()).strip("-").lower()
+    cleaned = cleaned[:80].rstrip("-")
     return cleaned or "oferta"
 
 
@@ -226,9 +338,26 @@ def _wrap_text(value: str, limit: int) -> list[str]:
     return lines
 
 
+def _fit_remote_product_image(url: str, size: tuple[int, int]) -> Image.Image | None:
+    image_url = (url or "").strip()
+    if not image_url:
+        return None
+    try:
+        with httpx.Client(timeout=25, follow_redirects=True) as client:
+            response = client.get(image_url)
+            response.raise_for_status()
+        with Image.open(BytesIO(response.content)) as source:
+            converted = source.convert("RGB")
+            return ImageOps.fit(converted, size, method=Image.Resampling.LANCZOS)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
     filename = f"offer-{offer['id']}-{_slugify(offer['slug'])}.jpg"
-    destination = _generated_story_dir() / filename
+    destination = ensure_stories_dir() / filename
+    destination_url = _destination_url(offer)
+    destination_label = "Link na bio"
 
     image = Image.new("RGB", (1080, 1920), "#0a2a67")
     draw = ImageDraw.Draw(image)
@@ -237,46 +366,57 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
     draw.ellipse((-120, 1450, 260, 1830), fill="#12398f")
     draw.rounded_rectangle((54, 54, 1026, 1866), radius=42, outline="#2f65db", width=4)
 
-    title_font = _load_font(60, bold=True)
+    title_font = _load_font(58, bold=True)
     price_font = _load_font(96, bold=True)
     label_font = _load_font(30, bold=True)
-    text_font = _load_font(34)
+    text_font = _load_font(32)
     cta_font = _load_font(40, bold=True)
+    micro_font = _load_font(22)
 
     draw.text((80, 120), "ZERO PRECO", font=label_font, fill="#dbe7ff")
 
-    title_lines = _wrap_text(offer["titulo"], 24)[:4]
-    y = 260
+    title_lines = _wrap_text(offer["titulo"], 24)[:3]
+    y = 250
     for line in title_lines:
         draw.text((80, y), line, font=title_font, fill="#f4f7fb")
-        y += 72
+        y += 68
 
     discount = _discount_percent(offer["preco"], offer.get("preco_antigo"))
     if discount > 0:
         draw.rounded_rectangle((80, 190, 310, 260), radius=24, fill="#143b90")
         draw.text((116, 208), f"{discount}% OFF", font=label_font, fill="#f4f7fb")
 
-    draw.text((80, y + 70), _money(offer["preco"]), font=price_font, fill="#ffffff")
+    draw.text((80, y + 52), _money(offer["preco"]), font=price_font, fill="#ffffff")
     if offer.get("preco_antigo"):
-        draw.text((80, y + 180), f"De {_money(offer['preco_antigo'])}", font=text_font, fill="#b9c8e6")
+        draw.text((80, y + 162), f"De {_money(offer['preco_antigo'])}", font=text_font, fill="#b9c8e6")
 
     draw.text(
-        (80, y + 250),
+        (80, y + 226),
         f"{_store_label(offer['loja'])} | {_category_label(offer['categoria'])}",
         font=text_font,
         fill="#dbe7ff",
     )
 
-    draw.rounded_rectangle((80, 1100, 600, 1210), radius=28, fill="#ffffff")
-    draw.text((140, 1140), "Ver oferta no site", font=cta_font, fill="#0b2d78")
+    product_card_box = (80, 760, 1000, 1310)
+    draw.rounded_rectangle(product_card_box, radius=36, fill="#f8fbff")
+    product_image = _fit_remote_product_image(offer.get("imagem_url"), (840, 470))
+    if product_image is not None:
+        image.paste(product_image, (120, 800))
+        draw.rounded_rectangle((120, 800, 960, 1270), radius=28, outline="#d7e4ff", width=4)
+    else:
+        draw.rounded_rectangle((120, 800, 960, 1270), radius=28, fill="#d9e5ff")
+        draw.text((180, 1015), "Imagem do produto", font=cta_font, fill="#0b2d78")
 
-    draw.text((80, 1320), "zeropreco.com.br", font=text_font, fill="#dbe7ff")
-    draw.text((80, 1370), _offer_url(offer["slug"]), font=_load_font(20), fill="#dbe7ff")
+    draw.rounded_rectangle((80, 1360, 640, 1470), radius=28, fill="#ffffff")
+    draw.text((170, 1398), destination_label, font=cta_font, fill="#0b2d78")
+
+    draw.text((80, 1540), "Acesse zeropreco.com.br", font=text_font, fill="#dbe7ff")
+    draw.text((80, 1586), "Abra a oferta no perfil e siga para a loja parceira.", font=micro_font, fill="#dbe7ff")
 
     coupon_text = (offer.get("cupom") or "").strip()
     if coupon_text:
-        draw.rounded_rectangle((80, 980, 500, 1060), radius=20, fill="#113885")
-        draw.text((110, 1006), f"Cupom: {coupon_text[:18]}", font=label_font, fill="#f4f7fb")
+        draw.rounded_rectangle((80, 650, 500, 730), radius=20, fill="#113885")
+        draw.text((110, 676), f"Cupom: {coupon_text[:18]}", font=label_font, fill="#f4f7fb")
 
     image.save(destination, format="JPEG", quality=92, optimize=True)
     return {
@@ -284,18 +424,44 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
         "offer_id": offer["id"],
         "filename": filename,
         "file_path": str(destination),
-        "public_url": _story_public_url(filename),
+        "public_url": story_public_url(filename),
         "caption": _story_caption_for_offer(offer),
+        "destination_url": destination_url,
     }
 
 
-def build_meta_post_previews(db, limit: int = 12) -> list[dict[str, Any]]:
-    rows = db.execute(SELECT_TOP_OFFERS_SQL, {"limit": max(1, min(limit, 50))}).mappings().all()
+def build_meta_post_previews(
+    db,
+    limit: int = 12,
+    offer_ids: list[int] | None = None,
+    include_story_assets: bool = True,
+) -> list[dict[str, Any]]:
+    capped_limit = max(1, min(limit, 200))
+    fetch_limit = max(capped_limit, len(offer_ids or []), 160)
+    rows = db.execute(SELECT_TOP_OFFERS_SQL, {"limit": fetch_limit}).mappings().all()
+    if offer_ids:
+        selected_map = {int(row["id"]): row for row in rows}
+        ordered_rows = [selected_map[offer_id] for offer_id in offer_ids if int(offer_id) in selected_map]
+        rows = ordered_rows[:capped_limit]
+    else:
+        rows = _diversify_offer_rows([dict(row) for row in rows], capped_limit)
     previews: list[dict[str, Any]] = []
 
     for row in rows:
         offer = dict(row)
-        story_asset = generate_story_asset(offer)
+        if include_story_assets:
+            story_asset = generate_story_asset(offer)
+            story_payload = {
+                "image_url": story_asset["public_url"],
+                "caption": story_asset["caption"],
+                "offer_url": story_asset["destination_url"],
+            }
+        else:
+            story_payload = {
+                "image_url": offer["imagem_url"],
+                "caption": _story_caption_for_offer(offer),
+                "offer_url": _destination_url(offer),
+            }
         previews.append(
             {
                 "offer_id": offer["id"],
@@ -307,8 +473,9 @@ def build_meta_post_previews(db, limit: int = 12) -> list[dict[str, Any]]:
                 "old_price": float(offer["preco_antigo"]) if offer.get("preco_antigo") else None,
                 "coupon": offer.get("cupom"),
                 "image_url": offer["imagem_url"],
+                "clicks": int(offer.get("clicks") or 0),
                 "offer_url": _offer_url(offer["slug"]),
-                "cta_url": _cta_url(offer["slug"]),
+                "cta_url": _destination_url(offer),
                 "headline": _headline_for_offer(offer),
                 "caption": _caption_for_offer(offer),
                 "facebook_payload": {
@@ -319,11 +486,7 @@ def build_meta_post_previews(db, limit: int = 12) -> list[dict[str, Any]]:
                     "image_url": offer["imagem_url"],
                     "caption": _caption_for_offer(offer),
                 },
-                "story_payload": {
-                    "image_url": story_asset["public_url"],
-                    "caption": story_asset["caption"],
-                    "offer_url": _offer_url(offer["slug"]),
-                },
+                "story_payload": story_payload,
             }
         )
 
@@ -347,8 +510,8 @@ def publish_facebook_post(message: str, link: str | None = None) -> dict[str, An
     return {"ok": True, "platform": "facebook", "page_id": _meta_page_id(), "result": data}
 
 
-def publish_facebook_offer_batch(db, limit: int = 5) -> dict[str, Any]:
-    previews = build_meta_post_previews(db, limit=limit)
+def publish_facebook_offer_batch(db, limit: int = 5, offer_ids: list[int] | None = None) -> dict[str, Any]:
+    previews = build_meta_post_previews(db, limit=limit, offer_ids=offer_ids)
     if not previews:
         raise ValueError("Nao ha ofertas elegiveis para publicar no Facebook.")
 

@@ -552,6 +552,12 @@ input[type="number"] {
   border-radius: 26px;
 }
 
+.provider-card-accent {
+  background:
+    linear-gradient(180deg, rgba(217, 229, 255, 0.55), rgba(255, 251, 244, 0.96));
+  border: 1px solid rgba(43, 102, 255, 0.18);
+}
+
 .provider-card h4,
 .surface h4 {
   margin: 0 0 10px;
@@ -585,6 +591,33 @@ input[type="number"] {
   gap: 12px;
 }
 
+.deploy-divider {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 24px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.deploy-divider::before,
+.deploy-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(13, 35, 79, 0.12);
+}
+
+.deploy-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+
 .field {
   display: grid;
   gap: 8px;
@@ -602,7 +635,9 @@ input[type="number"] {
 }
 
 input[type="text"],
+input[type="password"],
 input[type="number"],
+textarea,
 select {
   width: 100%;
   padding: 14px 14px;
@@ -610,6 +645,12 @@ select {
   border: 1px solid rgba(13, 35, 79, 0.12);
   background: rgba(255, 255, 255, 0.9);
   color: var(--ink);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 120px;
+  font: inherit;
 }
 
 .check-grid {
@@ -644,6 +685,11 @@ select {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
+}
+
+.social-queue-card {
+  display: grid;
+  gap: 10px;
 }
 
 .meta-chip {
@@ -707,6 +753,10 @@ tr:last-child td {
   background: linear-gradient(135deg, #c03b3b, #8c2626);
 }
 
+.toast.is-info {
+  background: linear-gradient(135deg, #1f4eb9, #12346f);
+}
+
 .empty-state {
   padding: 30px;
   border-radius: 22px;
@@ -739,6 +789,32 @@ tr:last-child td {
   font-size: 0.94rem;
 }
 
+.manual-link-status {
+  border-style: solid;
+}
+
+.manual-link-countdown {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 56px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+input[type="file"] {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(13, 35, 79, 0.12);
+  background: #fff;
+  color: var(--ink);
+}
+
 .status-card-head {
   display: flex;
   align-items: center;
@@ -765,6 +841,10 @@ tr:last-child td {
   }
 
   .status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .deploy-summary {
     grid-template-columns: 1fr;
   }
 }

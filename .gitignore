@@ -80,6 +80,7 @@ public_html/inc/config.local.php
 public_html/generated/
 public_html/uploads/
 public_html/cache/
+public_html/stories/
 
 # =========================
 # NODE / FRONT BUILD

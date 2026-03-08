@@ -88,6 +88,17 @@ AUTO_SOCIAL_PLATFORM=facebook
 AUTO_SOCIAL_MODE=feed
 AUTO_SOCIAL_LIMIT=3
 AUTO_SOCIAL_TIMES=07:00,13:00,19:00
+AUTO_STORY_ENABLED=false
+AUTO_STORY_INTERVAL_MINUTES=240
+AUTO_STORY_PLATFORM=instagram
+AUTO_STORY_LIMIT=1
+AUTO_STORY_TIMES=07:05,13:05,19:05
+SFTP_HOST=
+SFTP_PORT=22
+SFTP_USERNAME=
+SFTP_PASSWORD=
+SFTP_REMOTE_PATH=
+STORIES_PUBLIC_BASE_URL=https://zeropreco.com.br/stories
 ```
 
 Preview local dos posts gerados pelo sistema:
@@ -108,7 +119,32 @@ Fluxo recomendado:
 - revisar os melhores itens
 - depois conectar a publicacao automatica pela Graph API
 
-## 7) Shopee Affiliate API (real)
+## 7) Deploy DreamHost por SFTP
+
+Preencha no `.env`:
+
+```env
+SFTP_HOST=ftp.seu-dominio.com
+SFTP_PORT=22
+SFTP_USERNAME=seu_usuario
+SFTP_PASSWORD=sua_senha
+SFTP_REMOTE_PATH=/home/usuario/seu-dominio.com/public_html
+STORIES_PUBLIC_BASE_URL=https://zeropreco.com.br/stories
+```
+
+No manager React:
+- `Salvar configuracoes` persiste os dados SFTP no `.env`
+- `Atualizar stories` envia `public_html/stories`
+- `Atualizar pagina` envia todo `public_html`
+
+Teste rapido pela API local:
+
+```powershell
+curl -X POST http://127.0.0.1:8010/dashboard/api/deploy/stories
+curl -X POST http://127.0.0.1:8010/dashboard/api/deploy/site
+```
+
+## 8) Shopee Affiliate API (real)
 1. Preencha no `.env`:
 
 ```env
@@ -140,7 +176,7 @@ Observacoes:
 - O campo `SHOPEE_PRICE_DIVISOR` fica configuravel porque a API pode devolver preco em unidade menor.
 - Se sua conta ainda nao tiver acesso liberado na API de afiliados, deixe `SHOPEE_FEED_URL` preenchido como fallback.
 
-## 8) Mercado Livre com foco em giro + preco baixo
+## 9) Mercado Livre com foco em giro + preco baixo
 
 Para puxar mais produtos com chance de clique e ticket menor, ajuste no `.env`:
 
@@ -164,7 +200,7 @@ O ranking suporta:
 - `low_price_sales`: menor preco primeiro, desempate por vendas
 - `discount_sales`: maior desconto primeiro, desempate por vendas
 
-## 9) Meli CSV (modo rapido)
+## 10) Meli CSV (modo rapido)
 
 Para importar ofertas sem depender da API publica, use CSV local.
 

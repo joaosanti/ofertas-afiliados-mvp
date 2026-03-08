@@ -2,15 +2,17 @@ import os
 import secrets
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 import httpx
-from fastapi import Cookie, Depends, FastAPI, Form, HTTPException, Request, status
+import paramiko
+from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 from app.collectors.amazon import fetch_amazon_offers
 from app.collectors.mercadolivre import fetch_mercadolivre_offers, preview_mercadolivre_offers
-from app.collectors.shopee import fetch_shopee_offers, preview_shopee_offers
+from app.collectors.shopee import fetch_shopee_offers, preview_shopee_affiliate_links, preview_shopee_offers
 from app.collectors.tiktok import fetch_tiktok_offers
 from app.database import SessionLocal
 from app.integrations.mercadolivre_oauth import build_auth_url, exchange_code, refresh_token
@@ -20,9 +22,17 @@ from app.services.dashboard_data import (
     record_execution_start,
     record_execution_success,
 )
+from app.services.category_inference import recategorize_store_offers
 from app.services.automation_scheduler import AutomationScheduler
+from app.services.manual_file_import import preview_amazon_txt_file, preview_shopee_csv_file
+from app.services.manual_link_import import preview_manual_affiliate_links
 from app.services.normalize import normalize_offer
 from app.services.publish import publish_offer
+from app.services.sftp_deploy import (
+    deploy_public_site_via_sftp,
+    deploy_stories_via_sftp,
+    sftp_settings_snapshot,
+)
 from app.services.social_meta import (
     build_meta_post_previews,
     create_instagram_media_container,
@@ -54,6 +64,7 @@ class MetaFacebookPostPayload(BaseModel):
 
 class MetaFacebookBatchPayload(BaseModel):
     limit: int = 5
+    offer_ids: list[int] | None = None
 
 
 class MetaInstagramCreatePayload(BaseModel):
@@ -78,15 +89,43 @@ class DashboardImportRunPayload(BaseModel):
     providers: list[str] | None = None
 
 
+class DashboardShopeeLinksPayload(BaseModel):
+    links: list[str]
+
+
+class DashboardManualLinkItemPayload(BaseModel):
+    provider: str
+    store: str | None = None
+    title: str
+    description: str | None = None
+    price: float | int | str = 0
+    old_price: float | int | str | None = None
+    url: str
+    canonical_url: str | None = None
+    image: str | None = None
+    category: str | None = None
+    tags: str | None = None
+    featured: int | None = None
+    affiliate_detected: bool | None = None
+    affiliate_code: str | None = None
+
+
+class DashboardManualLinksPayload(BaseModel):
+    links: list[str] | None = None
+    items: list[DashboardManualLinkItemPayload] | None = None
+
+
 class DashboardSocialRunPayload(BaseModel):
     platform: str
     mode: str = "feed"
     limit: int = 1
+    offer_ids: list[int] | None = None
 
 
 class DashboardSettingsPayload(BaseModel):
     manager_username: str | None = None
     manager_password: str | None = None
+    meta_access_token: str | None = None
     auto_import_enabled: bool | None = None
     auto_import_times: str | None = None
     auto_import_providers: list[str] | None = None
@@ -99,6 +138,17 @@ class DashboardSettingsPayload(BaseModel):
     auto_story_times: str | None = None
     auto_story_platform: str | None = None
     auto_story_limit: int | None = None
+    sftp_host: str | None = None
+    sftp_port: int | None = None
+    sftp_username: str | None = None
+    sftp_password: str | None = None
+    sftp_remote_path: str | None = None
+    stories_public_base_url: str | None = None
+
+
+class DashboardStoreRecategorizePayload(BaseModel):
+    store: str = "Shopee"
+    only_uncategorized: bool = True
 
 
 class DashboardJobRunPayload(BaseModel):
@@ -106,6 +156,10 @@ class DashboardJobRunPayload(BaseModel):
     platform: str | None = None
     mode: str | None = None
     limit: int | None = None
+
+
+class DashboardDeployPayload(BaseModel):
+    only_files: list[str] | None = None
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -210,6 +264,7 @@ def _manager_login_html(error: str | None = None) -> str:
 def _env_settings_snapshot() -> dict:
     return {
         "manager_username": _manager_credentials()[0],
+        "meta_access_token_configured": bool((os.getenv("META_ACCESS_TOKEN") or "").strip()),
         "auto_import_enabled": _bool_env("AUTO_IMPORT_ENABLED", False),
         "auto_import_times": os.getenv("AUTO_IMPORT_TIMES") or "",
         "auto_import_providers": [item.strip() for item in (os.getenv("AUTO_IMPORT_PROVIDERS") or "mercadolivre").split(",") if item.strip()],
@@ -222,6 +277,7 @@ def _env_settings_snapshot() -> dict:
         "auto_story_times": os.getenv("AUTO_STORY_TIMES") or "",
         "auto_story_platform": (os.getenv("AUTO_STORY_PLATFORM") or "instagram").strip().lower(),
         "auto_story_limit": max(1, int((os.getenv("AUTO_STORY_LIMIT") or "1").strip() or "1")),
+        "sftp": sftp_settings_snapshot(),
     }
 
 
@@ -380,10 +436,13 @@ def execute_import_run(providers: list[str] | None = None) -> dict:
         db.close()
 
 
-def execute_social_run(platform: str, mode: str = "feed", limit: int = 1) -> dict:
+def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_ids: list[int] | None = None) -> dict:
     platform = (platform or "").strip().lower()
     mode = (mode or "feed").strip().lower()
     limit = max(1, min(limit, 20))
+    selected_offer_ids = [int(item) for item in (offer_ids or []) if str(item).strip()]
+    if selected_offer_ids:
+        limit = min(limit, len(selected_offer_ids))
     db = SessionLocal()
 
     run_id = record_execution_start(
@@ -392,16 +451,16 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1) -> dic
         canal=platform,
         modo=mode,
         requested_count=limit,
-        payload={"platform": platform, "mode": mode, "limit": limit},
+        payload={"platform": platform, "mode": mode, "limit": limit, "offer_ids": selected_offer_ids},
     )
 
     try:
         if platform == "facebook" and mode == "feed":
-            result = publish_facebook_offer_batch(db, limit=limit)
+            result = publish_facebook_offer_batch(db, limit=limit, offer_ids=selected_offer_ids or None)
             record_execution_success(db, run_id, processed_count=int(result["count"]), result=result)
             return {"run_id": run_id} | result
 
-        previews = build_meta_post_previews(db, limit=limit)
+        previews = build_meta_post_previews(db, limit=limit, offer_ids=selected_offer_ids or None)
         if not previews:
             raise ValueError("Nao ha ofertas elegiveis para publicar.")
 
@@ -476,6 +535,8 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1) -> dic
         elif platform == "instagram" and mode == "story":
             for item in previews:
                 try:
+                    story_filename = item["story_payload"]["image_url"].rstrip("/").split("/")[-1]
+                    deploy_result = deploy_stories_via_sftp(only_files=[story_filename])
                     created = create_instagram_story_container(item["story_payload"]["image_url"])
                     published = publish_instagram_container(created["result"]["id"])
                     items.append(
@@ -483,6 +544,7 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1) -> dic
                             "offer_id": item["offer_id"],
                             "slug": item["slug"],
                             "title": item["title"],
+                            "story_deploy": deploy_result,
                             "creation_id": created["result"]["id"],
                             "publish_result": published["result"],
                         }
@@ -518,6 +580,48 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1) -> dic
     except httpx.HTTPError as e:
         record_execution_error(db, run_id, error_message=str(e))
         raise HTTPException(status_code=502, detail=str(e))
+    finally:
+        db.close()
+
+
+def execute_deploy_stories(only_files: list[str] | None = None) -> dict:
+    db = SessionLocal()
+    run_id = record_execution_start(
+        db,
+        tipo="deploy",
+        canal="sftp",
+        modo="stories",
+        requested_count=len(only_files or []),
+        payload={"target": "stories", "only_files": only_files or []},
+    )
+    try:
+        result = deploy_stories_via_sftp(only_files=only_files)
+        record_execution_success(db, run_id, processed_count=int(result.get("count") or 0), result=result)
+        return {"run_id": run_id} | result
+    except Exception as exc:  # noqa: BLE001
+        record_execution_error(db, run_id, error_message=str(exc))
+        raise
+    finally:
+        db.close()
+
+
+def execute_deploy_site() -> dict:
+    db = SessionLocal()
+    run_id = record_execution_start(
+        db,
+        tipo="deploy",
+        canal="sftp",
+        modo="public_html",
+        requested_count=0,
+        payload={"target": "public_html"},
+    )
+    try:
+        result = deploy_public_site_via_sftp()
+        record_execution_success(db, run_id, processed_count=int(result.get("count") or 0), result=result)
+        return {"run_id": run_id} | result
+    except Exception as exc:  # noqa: BLE001
+        record_execution_error(db, run_id, error_message=str(exc))
+        raise
     finally:
         db.close()
 
@@ -640,6 +744,13 @@ def dashboard_api_import_preview(provider: str, keyword: str, limit: int = 10, p
         return {"provider": provider_key, "keyword": keyword, "count": len(items), "items": items}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        raise HTTPException(status_code=502, detail=detail)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/dashboard/api/import/run")
@@ -647,9 +758,185 @@ def dashboard_api_import_run(payload: DashboardImportRunPayload, _: str = Depend
     return execute_import_run(payload.providers)
 
 
+@app.post("/dashboard/api/import/shopee-links/preview")
+def dashboard_api_shopee_links_preview(payload: DashboardShopeeLinksPayload, _: str = Depends(require_manager_auth)):
+    try:
+        items = preview_shopee_affiliate_links(payload.links)
+        return {"provider": "shopee_manual", "count": len(items), "items": items}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        raise HTTPException(status_code=502, detail=detail)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/dashboard/api/import/shopee-links/run")
+def dashboard_api_shopee_links_run(payload: DashboardShopeeLinksPayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        offers = preview_shopee_affiliate_links(payload.links)
+        summary = _import_provider(db, "Shopee", offers)
+        db.commit()
+        return {
+            "ok": True,
+            "provider": "shopee_manual",
+            "count": len(offers),
+            "processed": summary["processed"],
+            "created": summary["created"],
+            "updated": summary["updated"],
+            "items": [
+                {
+                    "title": item.get("title"),
+                    "price": float(item.get("price") or 0),
+                    "url": item.get("url"),
+                    "image": item.get("image"),
+                    "category": item.get("category"),
+                }
+                for item in offers
+            ],
+        }
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        db.rollback()
+        detail = e.response.text if e.response is not None else str(e)
+        raise HTTPException(status_code=502, detail=detail)
+    except httpx.HTTPError as e:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.post("/dashboard/api/import/manual-links/preview")
+def dashboard_api_manual_links_preview(payload: DashboardManualLinksPayload, _: str = Depends(require_manager_auth)):
+    try:
+        items = preview_manual_affiliate_links(payload.links or [])
+        return {"provider": "manual_links", "count": len(items), "items": items}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        raise HTTPException(status_code=502, detail=detail)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/dashboard/api/import/file/preview")
+async def dashboard_api_file_preview(
+    provider: str = Form(...),
+    upload: UploadFile = File(...),
+    _: str = Depends(require_manager_auth),
+):
+    provider_key = _normalize_provider_key(provider)
+    try:
+        content = await upload.read()
+        if provider_key == "shopee":
+            items = preview_shopee_csv_file(content, upload.filename or "")
+        elif provider_key == "amazon":
+            items = preview_amazon_txt_file(content, upload.filename or "")
+        else:
+            raise HTTPException(status_code=501, detail=f"Importacao por arquivo ainda nao implementada para {provider}.")
+        return {
+            "provider": f"{provider_key}_file",
+            "count": len(items),
+            "filename": upload.filename,
+            "items": items,
+        }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/dashboard/api/import/store/recategorize")
+def dashboard_api_store_recategorize(payload: DashboardStoreRecategorizePayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        summary = recategorize_store_offers(
+            db,
+            store=(payload.store or "Shopee").strip() or "Shopee",
+            only_uncategorized=bool(payload.only_uncategorized),
+        )
+        db.commit()
+        return {"ok": True, "store": payload.store, **summary}
+    finally:
+        db.close()
+
+
+@app.post("/dashboard/api/import/manual-links/run")
+def dashboard_api_manual_links_run(payload: DashboardManualLinksPayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        items = payload.items or []
+        if not items:
+            raise HTTPException(status_code=400, detail="Nenhum item manual recebido para importar.")
+
+        processed_items: list[dict] = []
+        for item in items:
+            raw = {
+                "title": item.title,
+                "description": item.description or "",
+                "price": float(item.price or 0),
+                "old_price": float(item.old_price) if item.old_price not in (None, "") else None,
+                "url": item.url,
+                "image": item.image or "",
+                "category": item.category or "ofertas",
+                "tags": item.tags or f"{(item.provider or 'manual').strip().lower()},manual",
+                "featured": int(item.featured or 0),
+                "affiliate_tag": item.affiliate_code or "",
+            }
+            store = (item.store or _provider_label(_normalize_provider_key(item.provider))).strip()
+            processed_items.append(raw | {"store": store})
+
+        summary = {"processed": 0, "created": 0, "updated": 0}
+        imported: list[dict[str, Any]] = []
+        for item in processed_items:
+            normalized = normalize_offer(item, item["store"], item.get("affiliate_tag"))
+            action = publish_offer(db, normalized)
+            summary["processed"] += 1
+            summary[action] += 1
+            imported.append(
+                {
+                    "title": item["title"],
+                    "store": item["store"],
+                    "price": float(item["price"] or 0),
+                    "url": item["url"],
+                    "image": item["image"],
+                    "category": item["category"],
+                }
+            )
+
+        db.commit()
+        return {
+            "ok": True,
+            "provider": "manual_links",
+            "count": len(imported),
+            "processed": summary["processed"],
+            "created": summary["created"],
+            "updated": summary["updated"],
+            "items": imported,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
 @app.post("/dashboard/api/social/run")
 def dashboard_api_social_run(payload: DashboardSocialRunPayload, _: str = Depends(require_manager_auth)):
-    return execute_social_run(payload.platform, payload.mode, payload.limit)
+    return execute_social_run(payload.platform, payload.mode, payload.limit, payload.offer_ids)
 
 
 @app.post("/dashboard/api/automation/import/run-now")
@@ -695,6 +982,8 @@ def dashboard_api_settings_save(payload: DashboardSettingsPayload, _: str = Depe
     password_changed = payload.manager_password is not None and payload.manager_password.strip() != ""
     if password_changed:
         updates["MANAGER_PASSWORD"] = payload.manager_password.strip()
+    if payload.meta_access_token is not None and payload.meta_access_token.strip() != "":
+        updates["META_ACCESS_TOKEN"] = payload.meta_access_token.strip()
 
     if payload.auto_import_enabled is not None:
         updates["AUTO_IMPORT_ENABLED"] = "true" if payload.auto_import_enabled else "false"
@@ -722,6 +1011,18 @@ def dashboard_api_settings_save(payload: DashboardSettingsPayload, _: str = Depe
         updates["AUTO_STORY_PLATFORM"] = payload.auto_story_platform.strip().lower() or "instagram"
     if payload.auto_story_limit is not None:
         updates["AUTO_STORY_LIMIT"] = str(max(1, min(int(payload.auto_story_limit), 20)))
+    if payload.sftp_host is not None:
+        updates["SFTP_HOST"] = payload.sftp_host.strip()
+    if payload.sftp_port is not None:
+        updates["SFTP_PORT"] = str(max(1, int(payload.sftp_port)))
+    if payload.sftp_username is not None:
+        updates["SFTP_USERNAME"] = payload.sftp_username.strip()
+    if payload.sftp_password is not None:
+        updates["SFTP_PASSWORD"] = payload.sftp_password.strip()
+    if payload.sftp_remote_path is not None:
+        updates["SFTP_REMOTE_PATH"] = payload.sftp_remote_path.strip()
+    if payload.stories_public_base_url is not None:
+        updates["STORIES_PUBLIC_BASE_URL"] = payload.stories_public_base_url.strip()
 
     if not updates:
         return {"ok": True, "message": "Nenhuma alteracao recebida.", "settings": _env_settings_snapshot(), "reauth_required": False}
@@ -741,11 +1042,35 @@ def dashboard_api_settings_save(payload: DashboardSettingsPayload, _: str = Depe
     }
 
 
+@app.post("/dashboard/api/deploy/stories")
+def dashboard_api_deploy_stories(payload: DashboardDeployPayload, _: str = Depends(require_manager_auth)):
+    try:
+        return execute_deploy_stories(payload.only_files)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except paramiko.SSHException as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except OSError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/dashboard/api/deploy/site")
+def dashboard_api_deploy_site(_: str = Depends(require_manager_auth)):
+    try:
+        return execute_deploy_site()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except paramiko.SSHException as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except OSError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @app.get("/social/meta/post-previews")
 def social_meta_post_previews(limit: int = 12):
     db = SessionLocal()
     try:
-        items = build_meta_post_previews(db, limit=limit)
+        items = build_meta_post_previews(db, limit=limit, include_story_assets=False)
         return {"count": len(items), "items": items}
     finally:
         db.close()
@@ -767,7 +1092,7 @@ def social_meta_facebook_publish(payload: MetaFacebookPostPayload):
 def social_meta_facebook_publish_batch(payload: MetaFacebookBatchPayload):
     db = SessionLocal()
     try:
-        return publish_facebook_offer_batch(db, limit=payload.limit)
+        return publish_facebook_offer_batch(db, limit=payload.limit, offer_ids=payload.offer_ids)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except httpx.HTTPStatusError as e:

@@ -23,6 +23,11 @@ if (preg_match('#^/oferta/([a-z0-9\-_%]+?)/?$#i', $path, $matches)) {
   return true;
 }
 
+if (in_array($path, ['/instagram', '/instagram/'], true)) {
+  require __DIR__ . '/public_html/instagram.php';
+  return true;
+}
+
 if (in_array($path, ['/sobre', '/sobre/'], true)) {
   require __DIR__ . '/public_html/sobre.php';
   return true;

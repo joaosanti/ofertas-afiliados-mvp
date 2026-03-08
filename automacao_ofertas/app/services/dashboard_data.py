@@ -5,6 +5,30 @@ from typing import Any
 from sqlalchemy import text
 
 
+CATEGORY_LABELS = {
+    "mlb1055": "Celulares e Smartphones",
+    "mlb1714": "Mouses",
+    "mlb135384": "Smartwatches",
+    "mlb7457": "Fones e Kits Viva Voz",
+    "mlb264715": "Escovas Elétricas",
+    "mlb120425": "Umidificadores",
+    "mlb456045": "Ar-Condicionado",
+    "mlb48666": "Panelas Elétricas",
+    "mlb120373": "Panela de Arroz",
+    "mlb196208": "Fones de Ouvido",
+    "mlb3843": "Caixas Bluetooth",
+    "mlb268503": "Difusores de Aromas Elétricos",
+    "mlb11507": "Caixas Acústicas",
+    "mlb271858": "Smartbands",
+    "mlb439402": "Panelas a Vapor",
+    "mlb433422": "Escovas Alisadoras para Barba",
+    "mlb264184": "Cadeiras de Banho",
+    "mlb31682": "Panelas de Óleo",
+    "mlb107501": "Caçarolas e Caldeirões",
+    "mlb1664": "Fones",
+}
+
+
 CREATE_EXECUTIONS_SQL = text(
     """
     CREATE TABLE IF NOT EXISTS automacao_execucoes (
@@ -248,6 +272,20 @@ def _rows_to_chart(rows, key_label: str = "label") -> list[dict[str, Any]]:
     return [{"label": row[key_label], "value": int(row["total"] or 0)} for row in rows]
 
 
+def _category_label(value: str | None) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return "Geral"
+    lowered = raw.lower()
+    if lowered == "geral":
+        return "Todas as categorias"
+    if lowered in CATEGORY_LABELS:
+        return CATEGORY_LABELS[lowered]
+    if lowered.startswith("mlb"):
+        return "Categoria Mercado Livre"
+    return raw.replace("-", " ").replace("_", " ").strip() or "Geral"
+
+
 def _provider_status(label: str, enabled: bool, mode: str, notes: str) -> dict[str, Any]:
     return {
         "provider": label,
@@ -316,7 +354,7 @@ def fetch_dashboard_snapshot(db) -> dict[str, Any]:
     category_rows = db.execute(CATEGORIES_SQL).mappings().all()
     top_clicked_rows = db.execute(TOP_CLICKED_SQL, {"days": 30, "limit": 10}).mappings().all()
     recent_offer_rows = db.execute(RECENT_OFFERS_SQL, {"limit": 10}).mappings().all()
-    recent_run_rows = db.execute(RECENT_RUNS_SQL, {"limit": 12}).mappings().all()
+    recent_run_rows = db.execute(RECENT_RUNS_SQL, {"limit": 5}).mappings().all()
     run_chart_rows = db.execute(RUNS_BY_DAY_SQL, {"days": 14}).mappings().all()
 
     clicks_by_day = [{"label": str(row["day"]), "value": int(row["total"] or 0)} for row in click_rows]
@@ -344,13 +382,22 @@ def fetch_dashboard_snapshot(db) -> dict[str, Any]:
         "charts": {
             "clicks_by_day": clicks_by_day,
             "offers_by_store": _rows_to_chart(store_rows),
-            "offers_by_category": _rows_to_chart(category_rows),
+            "offers_by_category": [{"label": _category_label(row["label"]), "value": int(row["total"] or 0)} for row in category_rows],
             "runs_by_day": list(runs_by_day.values()),
         },
-        "top_clicked": [dict(row) | {"clicks": int(row["clicks"] or 0), "preco": float(row["preco"] or 0)} for row in top_clicked_rows],
+        "top_clicked": [
+            dict(row)
+            | {
+                "categoria": _category_label(row["categoria"]),
+                "clicks": int(row["clicks"] or 0),
+                "preco": float(row["preco"] or 0),
+            }
+            for row in top_clicked_rows
+        ],
         "recent_offers": [
             dict(row)
             | {
+                "categoria": _category_label(row["categoria"]),
                 "preco": float(row["preco"] or 0),
                 "preco_antigo": float(row["preco_antigo"]) if row["preco_antigo"] is not None else None,
             }

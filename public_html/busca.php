@@ -1,24 +1,24 @@
 <?php
 require_once __DIR__ . '/inc/site.php';
 
-$category = $_GET['cat'] ?? 'geral';
+$query = $_GET['q'] ?? '';
 $pdo = db();
-$data = site_fetch_category_data($pdo, $category);
+$data = site_search_offers($pdo, $query, 72);
 $offers = $data['offers'];
 $stores = $data['stores'];
-$selectedStore = $data['store'];
-$categoryLabel = site_public_category_label($category);
+$categories = $data['categories'];
 $siteHeaderCurrent = 'categories';
+$siteHeaderSearchValue = trim((string) $query);
 $siteHeaderSearchPlaceholder = 'Buscar produto';
+$pageTitle = trim((string) $query) !== '' ? 'Busca por ' . trim((string) $query) : 'Buscar produtos';
 ?>
 <!doctype html>
 <html lang="pt-br">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title><?= h($categoryLabel) ?> | Zero Preço</title>
-  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-8314124298799437" crossorigin="anonymous"></script>
   <?php require __DIR__ . '/inc/site_head_analytics.php'; ?>
+  <title><?= h($pageTitle) ?> | Zero Preço</title>
   <link rel="stylesheet" href="/assets/css/style.css">
 </head>
 <body>
@@ -26,19 +26,38 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
 
   <main class="page-shell" style="padding-top:18px;">
     <div class="container">
-      <section class="section-panel" id="produtos">
-        <div class="section-heading">
+      <section class="section-panel" id="resultados">
+        <div class="search-results-head">
           <div>
-            <h2>Produtos em <?= h($categoryLabel) ?><?= $selectedStore !== '' ? ' · ' . h(site_store_label($selectedStore)) : '' ?></h2>
-            <div class="section-copy">Ofertas organizadas para abrir rápido, comparar o preço e seguir para a loja oficial.</div>
+            <h2><?= trim((string) $query) !== '' ? 'Resultados para "' . h(trim((string) $query)) . '"' : 'Buscar produtos' ?></h2>
+            <div class="section-copy">
+              <?= trim((string) $query) !== '' ? (int) $data['total'] . ' produto(s) encontrado(s) com maior chance de bater com sua busca.' : 'Digite o nome do produto para ver as ofertas mais prováveis.' ?>
+            </div>
           </div>
         </div>
 
-        <?php if ($stores): ?>
-          <div class="filters category-store-strip">
-            <?php foreach ($stores as $store): ?>
-              <span class="badge"><?= h(site_store_label($store['loja'])) ?> &bull; <?= (int) $store['total'] ?></span>
-            <?php endforeach; ?>
+        <?php if ($stores || $categories): ?>
+          <div class="search-summary-grid">
+            <?php if ($stores): ?>
+              <div class="surface search-summary-card">
+                <h4>Lojas mais presentes</h4>
+                <div class="check-grid">
+                  <?php foreach (array_slice($stores, 0, 5, true) as $label => $total): ?>
+                    <span class="meta-chip"><?= h($label) ?> · <?= (int) $total ?></span>
+                  <?php endforeach; ?>
+                </div>
+              </div>
+            <?php endif; ?>
+            <?php if ($categories): ?>
+              <div class="surface search-summary-card">
+                <h4>Categorias mais encontradas</h4>
+                <div class="check-grid">
+                  <?php foreach (array_slice($categories, 0, 6, true) as $label => $total): ?>
+                    <span class="meta-chip"><?= h($label) ?> · <?= (int) $total ?></span>
+                  <?php endforeach; ?>
+                </div>
+              </div>
+            <?php endif; ?>
           </div>
         <?php endif; ?>
 
@@ -46,16 +65,12 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
           <div class="grid">
             <?php foreach ($offers as $offer): ?>
               <?php $discount = site_discount_percent($offer['preco'], $offer['preco_antigo']); ?>
-              <?php $soldCount = site_extract_sold_count($offer['tags'] ?? ''); ?>
               <article class="card">
                 <a class="card-media" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">
                   <img src="<?= h($offer['imagem_url'] ?: '/assets/img/sem-img.png') ?>" alt="">
                   <div class="card-badges">
                     <?php if ($discount !== null): ?>
                       <span class="flag flag-sale">-<?= $discount ?>%</span>
-                    <?php endif; ?>
-                    <?php if ($soldCount > 0): ?>
-                      <span class="flag flag-top"><?= (int) $soldCount ?> vendidos</span>
                     <?php endif; ?>
                   </div>
                 </a>
@@ -68,7 +83,11 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
                       <span class="price-old"><?= h(site_money($offer['preco_antigo'])) ?></span>
                     <?php endif; ?>
                   </div>
-                  <div class="card-footer compact-footer">
+                  <div class="offer-meta-row">
+                    <span class="meta-chip"><?= h(site_public_category_label($offer['categoria'])) ?></span>
+                  </div>
+                  <div class="card-footer">
+                    <span class="meta"><?= h(site_store_label($offer['loja'])) ?></span>
                     <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Comprar no site</a>
                   </div>
                 </div>
@@ -76,7 +95,7 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
             <?php endforeach; ?>
           </div>
         <?php else: ?>
-          <div class="empty-state">Nenhuma oferta ativa nesta categoria no momento.</div>
+          <div class="empty-state">Nenhum produto encontrado para esta busca. Tente outro nome ou abra uma categoria do menu.</div>
         <?php endif; ?>
       </section>
     </div>

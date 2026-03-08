@@ -1,10 +1,15 @@
 import hashlib
 import json
 import os
+import re
 import time
+from html import unescape
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
+
+from app.services.category_inference import infer_category_label
 
 
 SHOPEE_API_URL = "https://open-api.affiliate.shopee.com.br/graphql"
@@ -33,7 +38,6 @@ query ProductOfferQuery($keyword: String!, $limit: Int!, $page: Int!, $sortType:
 }
 """.strip()
 
-
 def _safe_float(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -58,6 +62,31 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _extract_first(content: str, patterns: list[str]) -> str:
+    for pattern in patterns:
+        match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
+        if match:
+            return unescape((match.group(1) or "").strip())
+    return ""
+
+
+def _extract_all(content: str, patterns: list[str]) -> list[str]:
+    values: list[str] = []
+    for pattern in patterns:
+        values.extend(unescape((match or "").strip()) for match in re.findall(pattern, content, re.IGNORECASE | re.DOTALL))
+    return [value for value in values if value]
+
+
+def _shopee_credentials() -> tuple[str, str]:
+    credential = (
+        os.getenv("SHOPEE_API_KEY", "").strip()
+        or os.getenv("SHOPEE_APP_ID", "").strip()
+        or os.getenv("SHOPEE_PARTNER_ID", "").strip()
+    )
+    secret = os.getenv("SHOPEE_API_SECRET", "").strip() or os.getenv("SHOPEE_SECRET_KEY", "").strip()
+    return credential, secret
 
 
 def _normalize_price(value: Any) -> float:
@@ -94,6 +123,152 @@ def _iter_feed_items(data: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _normalize_manual_link(link: str) -> str:
+    raw = (link or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    return f"https://{raw.lstrip('/')}"
+
+
+def _build_browser_headers() -> dict[str, str]:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/132.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "no-cache",
+    }
+
+
+def _build_crawler_headers() -> dict[str, str]:
+    return {
+        "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "no-cache",
+    }
+
+
+def _manual_offer_from_html(source_url: str, final_url: str, html_text: str) -> dict[str, Any]:
+    title = _extract_first(
+        html_text,
+        [
+            r"<title[^>]*>(.*?)</title>",
+            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+name=["\']twitter:title["\'][^>]+content=["\']([^"\']+)["\']',
+            r'"@type":"Product","name":"([^"]+)"',
+        ],
+    )
+    title = re.sub(r"\s*\|\s*Shopee Brasil\s*$", "", title, flags=re.IGNORECASE).strip()
+    image = _extract_first(
+        html_text,
+        [
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'"@type":"Product".*?"image":"([^"]+)"',
+        ],
+    )
+    description = _extract_first(
+        html_text,
+        [
+            r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+            r'"@type":"Product","name":"[^"]+","description":"([^"]+)"',
+        ],
+    )
+    trusted_price_text = _extract_first(
+        html_text,
+        [
+            r'"price"\s*:\s*"?(\\?[\d\.,]+)"?',
+            r'"price_min"\s*:\s*"?(\\?[\d\.,]+)"?',
+            r'"priceMin"\s*:\s*"?(\\?[\d\.,]+)"?',
+            r'property=["\']product:price:amount["\'][^>]+content=["\']([\d\.,]+)["\']',
+        ],
+    )
+    old_price_text = _extract_first(
+        html_text,
+        [
+            r'"price_before_discount"\s*:\s*"?(\\?[\d\.,]+)"?',
+            r'"price_max_before_discount"\s*:\s*"?(\\?[\d\.,]+)"?',
+            r'"priceBeforeDiscount"\s*:\s*"?(\\?[\d\.,]+)"?',
+        ],
+    )
+
+    final_host = (urlparse(final_url).netloc or "").lower()
+    if "shopee" not in final_host:
+        raise ValueError("O link informado nao redirecionou para uma pagina valida da Shopee.")
+    if not title:
+        raise ValueError("Nao foi possivel extrair o titulo do produto da pagina da Shopee.")
+
+    price = _normalize_price(trusted_price_text) if trusted_price_text else 0.0
+    old_price = _normalize_price(old_price_text) if old_price_text else None
+
+    if price <= 0:
+        visible_prices = [
+            _normalize_price(value)
+            for value in _extract_all(
+                html_text,
+                [
+                    r'R\$\s*([\d\.,]+)',
+                    r'"price"\s*:\s*"?(\\?[\d\.,]+)"?',
+                    r'"price_min"\s*:\s*"?(\\?[\d\.,]+)"?',
+                    r'"priceMin"\s*:\s*"?(\\?[\d\.,]+)"?',
+                ],
+            )
+        ]
+        visible_prices = [value for value in visible_prices if value > 0]
+        if visible_prices:
+            price = min(visible_prices)
+            if old_price is None:
+                higher_prices = [value for value in visible_prices if value > price]
+                old_price = max(higher_prices) if higher_prices else None
+
+    return {
+        "title": title,
+        "description": description or f"Oferta Shopee importada manualmente de {source_url}",
+        "price": price,
+        "old_price": old_price if old_price and old_price > price else None,
+        "url": source_url,
+        "canonical_url": final_url,
+        "image": image,
+        "category": infer_category_label(title, description, source_url, final_url),
+        "tags": "shopee,manual",
+        "featured": 0,
+        "affiliate_tag": os.getenv("SHOPEE_AFFILIATE_TAG", "").strip(),
+    }
+
+
+def preview_shopee_affiliate_links(links: list[str]) -> list[dict[str, Any]]:
+    cleaned_links = [item for item in (_normalize_manual_link(link) for link in links) if item]
+    if not cleaned_links:
+        raise ValueError("Cole pelo menos um link da Shopee.")
+
+    offers: list[dict[str, Any]] = []
+    for link in cleaned_links:
+        last_error: Exception | None = None
+        for headers in (_build_crawler_headers(), _build_browser_headers()):
+            try:
+                with httpx.Client(timeout=25, headers=headers, follow_redirects=True) as client:
+                    response = client.get(link)
+                    response.raise_for_status()
+                    content_type = (response.headers.get("content-type") or "").lower()
+                    if "text/html" not in content_type and "application/xhtml" not in content_type:
+                        raise ValueError("A Shopee retornou um formato inesperado para o link informado.")
+                    offers.append(_manual_offer_from_html(link, str(response.url), response.text))
+                    last_error = None
+                    break
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+
+    return offers
+
+
 def _fetch_feed_offers() -> list[dict[str, Any]]:
     feed_url = os.getenv("SHOPEE_FEED_URL", "").strip()
     affiliate_tag = os.getenv("SHOPEE_AFFILIATE_TAG", "").strip()
@@ -116,7 +291,7 @@ def _fetch_feed_offers() -> list[dict[str, Any]]:
                 "old_price": float(item.get("old_price")) if item.get("old_price") else None,
                 "url": item.get("url", "#"),
                 "image": item.get("image", ""),
-                "category": item.get("category", "ofertas"),
+                "category": item.get("category") or infer_category_label(item.get("title"), item.get("description"), item.get("url")),
                 "tags": item.get("tags", "shopee"),
                 "featured": int(item.get("featured", 0)),
                 "affiliate_tag": affiliate_tag,
@@ -154,6 +329,13 @@ def _node_to_offer(node: dict[str, Any], keyword: str, affiliate_tag: str) -> di
     commission_rate = _safe_float(node.get("commissionRate"))
     shop_name = (node.get("shopName") or "").strip()
     sales = _safe_int(node.get("sales"))
+    category = infer_category_label(
+        keyword,
+        node.get("productName") or "",
+        node.get("productLink") or "",
+        node.get("offerLink") or "",
+        shop_name,
+    )
 
     tags = ["shopee", keyword]
     if shop_name:
@@ -170,7 +352,7 @@ def _node_to_offer(node: dict[str, Any], keyword: str, affiliate_tag: str) -> di
         "old_price": old_price if old_price and old_price > price else None,
         "url": node.get("offerLink") or node.get("productLink") or "#",
         "image": node.get("imageUrl") or node.get("image") or "",
-        "category": "ofertas",
+        "category": category,
         "tags": ",".join(dict.fromkeys(tags)),
         "featured": 0,
         "affiliate_tag": affiliate_tag,
@@ -182,12 +364,7 @@ def _node_to_offer(node: dict[str, Any], keyword: str, affiliate_tag: str) -> di
 
 
 def _fetch_api_offers(keyword_override: str | None = None, page_override: int | None = None, limit_override: int | None = None) -> list[dict[str, Any]]:
-    credential = (
-        os.getenv("SHOPEE_API_KEY", "").strip()
-        or os.getenv("SHOPEE_APP_ID", "").strip()
-        or os.getenv("SHOPEE_PARTNER_ID", "").strip()
-    )
-    secret = os.getenv("SHOPEE_API_SECRET", "").strip() or os.getenv("SHOPEE_SECRET_KEY", "").strip()
+    credential, secret = _shopee_credentials()
     affiliate_tag = os.getenv("SHOPEE_AFFILIATE_TAG", "").strip()
     api_url = os.getenv("SHOPEE_API_URL", SHOPEE_API_URL).strip() or SHOPEE_API_URL
 
@@ -225,6 +402,12 @@ def _fetch_api_offers(keyword_override: str | None = None, page_override: int | 
 
                 for error in data.get("errors", []) or []:
                     message = error.get("message") if isinstance(error, dict) else str(error)
+                    lowered = message.lower()
+                    if "open api" in lowered or "access" in lowered or "permission" in lowered or "unauthorized" in lowered:
+                        raise ValueError(
+                            "Sua conta Shopee ainda nao tem acesso liberado para a Open API de Afiliados. "
+                            "Assim que AppID e Secret forem aprovados, este coletor fica pronto para uso."
+                        )
                     raise ValueError(f"Shopee GraphQL error: {message}")
 
                 nodes = _extract_nodes(data)
@@ -257,4 +440,7 @@ def fetch_shopee_offers() -> list[dict[str, Any]]:
 
 
 def preview_shopee_offers(keyword: str, limit: int = 10, pages: int = 1) -> list[dict[str, Any]]:
+    credential, secret = _shopee_credentials()
+    if not credential or not secret:
+        raise ValueError("Shopee API ainda nao configurada. Aguarde AppID/Secret liberados ou preencha as credenciais no .env.")
     return _fetch_api_offers(keyword_override=keyword, limit_override=limit, page_override=pages)
