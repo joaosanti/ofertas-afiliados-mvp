@@ -24,7 +24,7 @@ from app.services.dashboard_data import (
 )
 from app.services.category_inference import recategorize_store_offers
 from app.services.automation_scheduler import AutomationScheduler
-from app.services.manual_file_import import preview_amazon_txt_file, preview_shopee_csv_file
+from app.services.manual_file_import import preview_amazon_txt_file, preview_mercadolivre_txt_file, preview_shopee_csv_file
 from app.services.manual_link_import import preview_manual_affiliate_links
 from app.services.normalize import normalize_offer
 from app.services.publish import publish_offer
@@ -840,6 +840,8 @@ async def dashboard_api_file_preview(
             items = preview_shopee_csv_file(content, upload.filename or "")
         elif provider_key == "amazon":
             items = preview_amazon_txt_file(content, upload.filename or "")
+        elif provider_key == "mercadolivre":
+            items = preview_mercadolivre_txt_file(content, upload.filename or "")
         else:
             raise HTTPException(status_code=501, detail=f"Importacao por arquivo ainda nao implementada para {provider}.")
         return {

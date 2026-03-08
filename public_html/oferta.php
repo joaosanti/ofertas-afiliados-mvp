@@ -30,14 +30,21 @@ $relatedOffers = site_fetch_related_offers($pdo, $offer, 4);
 $discount = site_discount_percent($offer['preco'], $offer['preco_antigo']);
 $soldCount = site_extract_sold_count($offer['tags'] ?? '');
 $offerDescription = trim((string) ($offer['descricao'] ?? ''));
+$offerDescription = preg_replace('/\s*\|\s*Comiss(?:a|ã)o:\s*[^|]+/iu', '', $offerDescription);
+$offerDescription = preg_replace('/\s*\|\s*Retorno estimado:\s*[^|]+/iu', '', $offerDescription);
 $displayDescription = preg_replace('/MLB\d+/', site_category_label($offer['categoria']), $offerDescription);
 $descriptionParts = preg_split('/[\r\n]+|[.;â€¢]+/', $offerDescription) ?: [];
 $sellingPoints = [];
 foreach ($descriptionParts as $part) {
   $clean = trim((string) $part);
   if ($clean !== '') {
+    $clean = preg_replace('/\s*\|\s*Comiss(?:a|ã)o:\s*[^|]+/iu', '', $clean);
+    $clean = preg_replace('/\s*\|\s*Retorno estimado:\s*[^|]+/iu', '', $clean);
     $clean = preg_replace('/MLB\d+/', site_category_label($offer['categoria']), $clean);
-    $sellingPoints[] = $clean;
+    $clean = trim($clean, " \t\n\r\0\x0B|");
+    if ($clean !== '') {
+      $sellingPoints[] = $clean;
+    }
   }
   if (count($sellingPoints) >= 4) {
     break;

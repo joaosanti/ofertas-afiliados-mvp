@@ -220,3 +220,35 @@ def preview_amazon_txt_file(content: bytes, filename: str = "") -> list[dict[str
             item["file_warning"] = f"{len(failed_links)} link(s) da Amazon foram ignorados por resposta invalida."
 
     return amazon_items
+
+
+def preview_mercadolivre_txt_file(content: bytes, filename: str = "") -> list[dict[str, Any]]:
+    if not content:
+        raise ValueError("Envie um arquivo TXT com links do Mercado Livre.")
+
+    links = _parse_text_links(content)
+    if not links:
+        raise ValueError("O TXT nao trouxe links validos do Mercado Livre.")
+
+    mercadolivre_items: list[dict[str, Any]] = []
+    failed_links: list[str] = []
+    for link in links:
+        try:
+            items = preview_manual_affiliate_links([link])
+        except Exception:  # noqa: BLE001
+            failed_links.append(link)
+            continue
+        mercadolivre_items.extend(item for item in items if str(item.get("provider") or "").lower() == "mercadolivre")
+
+    if not mercadolivre_items:
+        if failed_links:
+            raise ValueError("Nenhum link do Mercado Livre valido foi identificado no TXT enviado. Alguns links retornaram em formato invalido.")
+        raise ValueError("Nenhum link do Mercado Livre valido foi identificado no TXT enviado.")
+
+    for item in mercadolivre_items:
+        item["source_file"] = filename
+        item["selected"] = True
+        if failed_links:
+            item["file_warning"] = f"{len(failed_links)} link(s) do Mercado Livre foram ignorados por resposta invalida."
+
+    return mercadolivre_items

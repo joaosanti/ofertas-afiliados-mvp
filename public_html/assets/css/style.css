@@ -115,6 +115,7 @@ img { display: block; max-width: 100%; }
 
 .header-brand-row {
   flex: 0 0 auto;
+  margin-right: 12px;
 }
 
 .header-nav-row {
@@ -175,6 +176,10 @@ img { display: block; max-width: 100%; }
   flex-wrap: nowrap;
   flex: 0 1 auto;
   min-width: 0;
+}
+
+.nav-links-desktop .nav-link:first-child {
+  margin-left: 6px;
 }
 
 .nav-links-legacy {

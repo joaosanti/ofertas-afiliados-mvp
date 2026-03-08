@@ -1,4 +1,5 @@
 import re
+from collections import Counter
 from html import unescape
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -124,6 +125,8 @@ def _clean_title(title: str, provider: str) -> str:
     pattern = patterns.get(provider)
     if pattern:
         title = re.sub(pattern, "", title, flags=re.IGNORECASE).strip()
+    if provider == "amazon":
+        title = re.sub(r"^\s*Oferta:\s*", "", title, flags=re.IGNORECASE).strip()
     return title.strip()
 
 
@@ -173,6 +176,17 @@ def _extract_generic_offer(provider: str, source_url: str, final_url: str, html_
             r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
         ],
     )
+    if not image and provider == "amazon":
+        image = _extract_first(
+            html_text,
+            [
+                r'"hiRes":"([^"]+)"',
+                r'"large":"([^"]+)"',
+                r'id=["\']landingImage["\'][^>]+src=["\']([^"\']+)["\']',
+                r'id=["\']imgTagWrapperId["\'][\s\S]{0,800}?<img[^>]+src=["\']([^"\']+)["\']',
+            ],
+        )
+        image = image.replace("\\u0026", "&").replace("\\/", "/")
     description = _extract_first(
         html_text,
         [
@@ -191,7 +205,8 @@ def _extract_generic_offer(provider: str, source_url: str, final_url: str, html_
         ],
         "amazon": [
             r'priceToPay[^>]*a-offscreen[^>]*>\s*R\$\s*([\d\.,]+)',
-            r'a-price-whole">\s*([\d\.,]+).*?a-price-fraction">\s*([\d]{2})',
+            r'a-offscreen">\s*R\$\s*([\d\.,]+)',
+            r'id=["\']attach-base-product-price["\']\s+value=["\']([\d\.,]+)["\']',
             r'"priceAmount"\s*:\s*"?(\\?[\d\.,]+)"?',
             r'property=["\']product:price:amount["\'][^>]+content=["\']([\d\.,]+)["\']',
         ],
@@ -212,38 +227,55 @@ def _extract_generic_offer(provider: str, source_url: str, final_url: str, html_
         ],
     }
 
-    price_raw = _extract_first(html_text, price_patterns.get(provider, []))
-    if not price_raw and provider == "amazon":
-        pair_match = re.search(r'a-price-whole">\s*([\d\.,]+).*?a-price-fraction">\s*([\d]{2})', html_text, re.IGNORECASE | re.DOTALL)
+    price_raw = ""
+    if provider == "amazon":
+        pair_match = re.search(
+            r'a-price-whole">\s*([\d\.,]+).*?a-price-fraction">\s*([\d]{2})',
+            html_text,
+            re.IGNORECASE | re.DOTALL,
+        )
         if pair_match:
             price_raw = f"{pair_match.group(1)},{pair_match.group(2)}"
+    if not price_raw:
+        price_raw = _extract_first(html_text, price_patterns.get(provider, []))
     price = _normalize_price(price_raw)
     old_price = _normalize_price(_extract_first(html_text, old_price_patterns.get(provider, [])))
     if provider in {"amazon", "mercadolivre", "tiktok"}:
-        visible_prices = [
-            _normalize_price(value)
-            for value in _extract_all(
-                html_text,
-                [
-                    r'R\$\s*([\d\.,]+)',
-                    r'"price"\s*:\s*"?(\\?[\d\.,]+)"?',
-                    r'"priceAmount"\s*:\s*"?(\\?[\d\.,]+)"?',
-                    r'property=["\']product:price:amount["\'][^>]+content=["\']([\d\.,]+)["\']',
-                ],
-            )
+        visible_price_patterns = [
+            r'R\$\s*([\d\.,]+)',
+            r'"price"\s*:\s*"?(\\?[\d\.,]+)"?',
+            r'"priceAmount"\s*:\s*"?(\\?[\d\.,]+)"?',
+            r'property=["\']product:price:amount["\'][^>]+content=["\']([\d\.,]+)["\']',
         ]
-        visible_prices = sorted({value for value in visible_prices if value > 0})
+        if provider == "amazon":
+            visible_price_patterns = [
+                r'a-offscreen">\s*R\$\s*([\d\.,]+)',
+                r'a-price-whole">\s*([\d\.,]+).*?a-price-fraction">\s*([\d]{2})',
+                r'id=["\']attach-base-product-price["\']\s+value=["\']([\d\.,]+)["\']',
+            ]
+        visible_prices = []
+        for value in _extract_all(html_text, visible_price_patterns):
+            normalized = _normalize_price(value)
+            if normalized > 0:
+                visible_prices.append(normalized)
+        visible_price_counts = Counter(visible_prices)
+        visible_prices = list(dict.fromkeys(visible_prices))
         if visible_prices:
             if price <= 0:
-                price = visible_prices[0]
-            elif provider == "amazon":
-                nearby = [value for value in visible_prices if value <= price and value >= price * 0.75]
-                if nearby:
-                    price = min(nearby)
+                if provider == "amazon":
+                    meaningful = [value for value in visible_prices if value >= 10]
+                    if meaningful:
+                        price = meaningful[0]
+                        if price < 10 or visible_price_counts[price] == 1:
+                            price = max(meaningful, key=lambda value: (visible_price_counts[value], -meaningful.index(value)))
+                    else:
+                        price = visible_prices[0]
+                else:
+                    price = visible_prices[0]
             if old_price is None:
                 higher_prices = [value for value in visible_prices if value > price]
                 if higher_prices:
-                    old_price = max(higher_prices)
+                    old_price = higher_prices[0]
     affiliate_detected, affiliate_code = _detect_affiliate(final_url or source_url)
 
     return {

@@ -334,9 +334,9 @@ function site_pick_home_categories(PDO $pdo, $preferred = [], $limit = 4) {
 
 function site_fetch_home_data(PDO $pdo) {
   $selectionMix = site_mix_home_offers(site_fetch_selection_candidates_balanced($pdo, 12, 4), 6);
-  $meliTrending = site_fetch_store_trending($pdo, 'Mercado Livre', 6);
-  $shopeeTrending = site_fetch_store_trending($pdo, 'Shopee', 6);
-  $amazonTrending = site_fetch_store_trending($pdo, 'Amazon', 6);
+  $meliTrending = site_fetch_store_trending($pdo, 'Mercado Livre', 8);
+  $shopeeTrending = site_fetch_store_trending($pdo, 'Shopee', 8);
+  $amazonTrending = site_fetch_store_trending($pdo, 'Amazon', 8);
 
   $categoryRows = site_pick_home_categories($pdo, [
     'MLB1714',

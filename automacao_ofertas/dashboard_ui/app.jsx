@@ -1283,30 +1283,33 @@ function App() {
               </div>
 
               <div className="deploy-divider">
-                <span>Importação por arquivo</span>
+                <span>Importacao por arquivo</span>
               </div>
 
               <div className="field-grid" style={{ marginTop: 12 }}>
-                  <div className="field">
-                    <label>Marketplace do arquivo</label>
-                    <select value={fileImportProvider} onChange={(e) => setFileImportProvider(e.target.value)}>
-                      <option value="shopee">Shopee CSV</option>
-                      <option value="amazon">Amazon TXT</option>
-                    </select>
-                  </div>
-                  <div className="field" style={{ gridColumn: "span 2" }}>
-                    <label>Arquivo exportado</label>
-                    <input
-                      type="file"
-                      accept={fileImportProvider === "amazon" ? ".txt,text/plain" : ".csv,text/csv"}
-                      onChange={(e) => setFileImportFile(e.target.files?.[0] || null)}
-                    />
-                    <small>
-                      {fileImportProvider === "amazon"
-                        ? "Use um TXT com um link da Amazon por linha. Evite dois links na mesma linha para ter o preview mais estavel."
-                        : "Use o CSV exportado do painel da Shopee. O preço do arquivo vira a fonte principal do preview."}
-                    </small>
-                  </div>
+                <div className="field">
+                  <label>Marketplace do arquivo</label>
+                  <select value={fileImportProvider} onChange={(e) => setFileImportProvider(e.target.value)}>
+                    <option value="shopee">Shopee CSV</option>
+                    <option value="mercadolivre">Mercado Livre TXT</option>
+                    <option value="amazon">Amazon TXT</option>
+                  </select>
+                </div>
+                <div className="field" style={{ gridColumn: "span 2" }}>
+                  <label>Arquivo exportado</label>
+                  <input
+                    type="file"
+                    accept={fileImportProvider === "shopee" ? ".csv,text/csv" : ".txt,text/plain"}
+                    onChange={(e) => setFileImportFile(e.target.files?.[0] || null)}
+                  />
+                  <small>
+                    {fileImportProvider === "amazon"
+                      ? "Use um TXT com um link da Amazon por linha. Links encurtados amzn.to sao aceitos e recomendados. Evite dois links na mesma linha para ter o preview mais estavel."
+                      : fileImportProvider === "mercadolivre"
+                        ? "Use um TXT com um link do Mercado Livre por linha. Links completos do produto e links com rastreio de afiliado sao aceitos."
+                        : "Use o CSV exportado do painel da Shopee. O preco do arquivo vira a fonte principal do preview."}
+                  </small>
+                </div>
               </div>
               <div className="provider-actions" style={{ marginTop: 16 }}>
                 <button className="button is-secondary" onClick={handleFileImportPreview} disabled={fileImportLoading}>
@@ -1315,13 +1318,13 @@ function App() {
                 <button className="button is-primary" onClick={handleFileImportRun} disabled={runLoading.manualLinks}>
                   {runLoading.manualLinks ? "Importando arquivo..." : "Importar arquivo"}
                 </button>
-                  <button className="button is-secondary" onClick={() => handleShopeeRecategorize(false)} disabled={runLoading.batch}>
-                    {runLoading.batch ? "Corrigindo categorias..." : "Recategorizar toda Shopee"}
-                  </button>
-                  <button className="button is-ghost" onClick={() => handleShopeeRecategorize(true)} disabled={runLoading.batch}>
-                    {runLoading.batch ? "Corrigindo categorias..." : "Corrigir so 'ofertas'"}
-                  </button>
-                </div>
+                <button className="button is-secondary" onClick={() => handleShopeeRecategorize(false)} disabled={runLoading.batch}>
+                  {runLoading.batch ? "Corrigindo categorias..." : "Recategorizar toda Shopee"}
+                </button>
+                <button className="button is-ghost" onClick={() => handleShopeeRecategorize(true)} disabled={runLoading.batch}>
+                  {runLoading.batch ? "Corrigindo categorias..." : "Corrigir so 'ofertas'"}
+                </button>
+              </div>
               <div style={{ marginTop: 18 }}>
                 {!fileImportPreview?.items?.length ? (
                   <div className="empty-state">Nenhum arquivo analisado ainda.</div>
@@ -1349,7 +1352,7 @@ function App() {
                         </div>
                         <div className="field-grid">
                           <div className="field" style={{ gridColumn: "1 / -1" }}>
-                            <label>Título</label>
+                            <label>Titulo</label>
                             <input
                               type="text"
                               value={item.title || ""}
@@ -1363,7 +1366,7 @@ function App() {
                         </div>
                         <div className="field-grid" style={{ marginTop: 12 }}>
                           <div className="field">
-                            <label>Preço</label>
+                            <label>Preco</label>
                             <input
                               type="number"
                               min="0"
@@ -1388,20 +1391,23 @@ function App() {
                               })}
                             />
                           </div>
-                          <div className="field">
-                            <label>Vendas / comissão</label>
-                            <input type="text" value={[item.sales_label, item.commission_rate].filter(Boolean).join(" | ")} readOnly />
-                          </div>
+                        </div>
+                        <div className="field" style={{ marginTop: 12 }}>
+                          <label>Descricao</label>
+                          <textarea
+                            rows="3"
+                            value={item.description || ""}
+                            onChange={(e) => setFileImportPreview((current) => {
+                              if (!current?.items?.length) return current;
+                              const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, description: e.target.value } : entry);
+                              return { ...current, items };
+                            })}
+                          />
                         </div>
                         <div className="offer-meta" style={{ marginTop: 12 }}>
-                          <span className="meta-chip">{fmtMoney(item.price || 0)}</span>
-                          {item.sales_label ? <span className="meta-chip">{item.sales_label}</span> : null}
-                          {item.commission_value ? <span className="meta-chip">{item.commission_value}</span> : null}
-                        </div>
-                        <div className="list" style={{ marginTop: 14 }}>
                           {item.image ? <a className="tiny-button is-soft" href={item.image} target="_blank" rel="noreferrer">Abrir imagem</a> : null}
-                          {item.url ? <a className="tiny-button" href={item.url} target="_blank" rel="noreferrer">Abrir link afiliado</a> : null}
-                          {item.canonical_url && item.canonical_url !== item.url ? <a className="tiny-button is-soft" href={item.canonical_url} target="_blank" rel="noreferrer">Abrir produto</a> : null}
+                          {item.url ? <span className="meta-chip">link ok</span> : null}
+                          {item.file_warning ? <span className="meta-chip">{item.file_warning}</span> : null}
                         </div>
                       </div>
                     ))}
@@ -1410,38 +1416,31 @@ function App() {
               </div>
 
               <div className="deploy-divider">
-                <span>Importação manual por link</span>
+                <span>Importacao manual por link</span>
               </div>
 
-              <div className="field-grid" style={{ marginTop: 12 }}>
-                <div className="field" style={{ gridColumn: "1 / -1" }}>
-                  <label>Links afiliados manuais</label>
-                  <textarea
-                    rows="5"
-                    placeholder="Cole aqui links da Shopee, Mercado Livre, Amazon ou TikTok, um por linha"
-                    value={manualLinkText}
-                    onChange={(e) => setManualLinkText(e.target.value)}
-                  />
-                  <small>O sistema tenta identificar loja, título, foto, preço e categoria. Antes de importar, você pode corrigir qualquer campo no preview.</small>
-                </div>
+              <div className="field" style={{ marginTop: 12 }}>
+                <label>Links afiliados manuais</label>
+                <textarea
+                  rows="5"
+                  value={manualLinkText}
+                  onChange={(e) => setManualLinkText(e.target.value)}
+                  placeholder="Cole aqui links da Shopee, Mercado Livre, Amazon ou TikTok, um por linha"
+                />
+                <small>O sistema tenta identificar loja, titulo, foto, preco e categoria. Antes de importar, voce pode corrigir qualquer campo no preview.</small>
               </div>
               <div className="provider-actions" style={{ marginTop: 16 }}>
-                <button className="button is-secondary" onClick={handleManualLinksPreview} disabled={manualLinkLoading}>
-                  {manualLinkLoading ? "Lendo links..." : "Analisar links"}
+                <button className="button is-secondary" onClick={() => handleManualLinksPreview()} disabled={manualLinkLoading}>
+                  {manualLinkLoading ? "Analisando links..." : "Analisar links"}
                 </button>
                 <button className="button is-primary" onClick={handleManualLinksImport} disabled={runLoading.manualLinks}>
-                  {runLoading.manualLinks ? "Importando links..." : "Importar selecionados"}
+                  {runLoading.manualLinks ? "Importando selecionados..." : "Importar selecionados"}
                 </button>
               </div>
               {manualLinkStatus ? (
-                <div className={`status-card manual-link-status ${manualLinkStatus.type === "error" ? "is-error" : manualLinkStatus.type === "success" ? "is-success" : ""}`} style={{ marginTop: 16 }}>
-                  <div className="status-card-head">
-                    <h4>
-                      {manualLinkStatus.type === "loading" ? "Analisando links" : manualLinkStatus.type === "retry" ? "Nova tentativa agendada" : manualLinkStatus.type === "success" ? "Pronto" : "Falha no preview"}
-                    </h4>
-                    {manualLinkRetry?.active ? <span className="manual-link-countdown">{manualLinkRetry.secondsLeft}s</span> : null}
-                  </div>
-                  <p>{manualLinkStatus.message}</p>
+                <div className={`inline-note ${manualLinkStatus.type === "error" ? "is-error" : manualLinkStatus.type === "info" ? "is-info" : "is-success"}`} style={{ marginTop: 16 }}>
+                  {manualLinkStatus.message}
+                  {manualLinkRetry?.active ? ` Repetindo automaticamente em ${manualLinkRetry.secondsLeft}s.` : ""}
                 </div>
               ) : null}
               <div style={{ marginTop: 18 }}>
@@ -1454,7 +1453,7 @@ function App() {
                         <div className="panel-head" style={{ marginBottom: 12 }}>
                           <div>
                             <h4>{item.store || item.provider || "Marketplace"}</h4>
-                            <p>{item.affiliate_detected ? `Afiliado detectado${item.affiliate_code ? `: ${item.affiliate_code}` : ""}` : "Link sem rastreamento afiliado confirmado"}</p>
+                            <p>{item.affiliate_code ? `Afiliado detectado: ${item.affiliate_code}` : "Sem codigo de afiliado visivel."}</p>
                           </div>
                           <label className="check-chip">
                             <input
@@ -1485,21 +1484,13 @@ function App() {
                             <input type="text" value={item.category || ""} onChange={(e) => updateManualPreviewItem(index, "category", e.target.value)} />
                           </div>
                         </div>
-                        <div className="field-grid" style={{ marginTop: 12 }}>
-                          <div className="field" style={{ gridColumn: "1 / -1" }}>
-                            <label>Descricao</label>
-                            <textarea rows="4" value={item.description || ""} onChange={(e) => updateManualPreviewItem(index, "description", e.target.value)} />
-                          </div>
+                        <div className="field" style={{ marginTop: 12 }}>
+                          <label>Descricao</label>
+                          <textarea rows="3" value={item.description || ""} onChange={(e) => updateManualPreviewItem(index, "description", e.target.value)} />
                         </div>
                         <div className="offer-meta" style={{ marginTop: 12 }}>
-                          <span className="meta-chip">{item.provider || "manual"}</span>
-                          <span className="meta-chip">{fmtMoney(item.price || 0)}</span>
-                          {item.old_price ? <span className="meta-chip">{fmtMoney(item.old_price)}</span> : null}
-                        </div>
-                        <div className="list" style={{ marginTop: 14 }}>
                           {item.image ? <a className="tiny-button is-soft" href={item.image} target="_blank" rel="noreferrer">Abrir imagem</a> : null}
-                          {item.url ? <a className="tiny-button" href={item.url} target="_blank" rel="noreferrer">Abrir link</a> : null}
-                          {item.canonical_url && item.canonical_url !== item.url ? <a className="tiny-button is-soft" href={item.canonical_url} target="_blank" rel="noreferrer">Abrir destino final</a> : null}
+                          {item.canonical_url ? <a className="tiny-button is-soft" href={item.canonical_url} target="_blank" rel="noreferrer">Abrir produto</a> : null}
                         </div>
                       </div>
                     ))}
@@ -1507,80 +1498,27 @@ function App() {
                 )}
               </div>
             </div>
-          </section>
 
-          <section className="panel" id="social" style={{ marginTop: 18 }}>
-            <div className="panel-head">
-              <div>
-                <h3 className="panel-title">Publicação social</h3>
-                <p className="panel-subtitle">Escolha canal, quantidade e formato para disparar feed, lote ou stories.</p>
-              </div>
-              <div className="provider-actions">
-                <button className="button is-primary" onClick={handleSocialRun} disabled={runLoading.social}>
-                  {runLoading.social ? "Publicando..." : "Rodar publicação"}
-                </button>
-                <button className="ghost-button" onClick={handleFacebookBatch} disabled={runLoading.batch}>
-                  {runLoading.batch ? "Enviando lote..." : "Facebook em lote"}
-                </button>
-              </div>
-            </div>
-
-            <div className="providers-grid" style={{ marginBottom: 18 }}>
-              {SOCIAL_OPTIONS.map((item) => {
-                const [platform, mode] = item.key.split(":");
-                const currentStatus = socialStatus.find((entry) => entry.platform === platform && entry.mode === mode);
-                return (
-                  <div className="provider-card" key={item.key}>
-                    <div className="panel-head" style={{ marginBottom: 12 }}>
-                      <div>
-                        <h4>{item.label}</h4>
-                        <p>{item.note}</p>
-                      </div>
-                      <span className={`badge ${statusClass(currentStatus?.enabled, currentStatus?.mode)}`}>
-                        {currentStatus?.enabled ? "Ativo" : "Ajustar"}
-                      </span>
-                    </div>
-                    <p>{currentStatus?.notes || "Canal monitorado pelo painel."}</p>
-                    <label className="check-chip">
-                      <input
-                        type="radio"
-                        name="social-mode"
-                        checked={socialForm.selected === item.key}
-                        onChange={() => setSocialForm((state) => ({ ...state, selected: item.key }))}
-                      />
-                      Usar este modo
-                    </label>
-                  </div>
-                );
-              })}
-              <div className="provider-card provider-card-accent">
-                <div className="panel-head" style={{ marginBottom: 12 }}>
-                  <div>
-                    <h4>Deploy do site</h4>
-                    <p>Estado atual lido do `.env` ativo no backend.</p>
-                  </div>
-                  <span className={`badge ${sftpSettings.enabled ? "is-success" : "is-warning"}`}>{sftpSettings.enabled ? "DreamHost pronto" : "Configurar SFTP"}</span>
-                </div>
-                <p>{sftpSettings.remote_path ? `Destino remoto: ${sftpSettings.remote_path}` : "Preencha host, usuario, senha e destino remoto para liberar o deploy."}</p>
-                <div className="offer-meta" style={{ marginTop: 12 }}>
-                  <span className="meta-chip">{sftpSettings.host || "sem host"}</span>
-                  <span className="meta-chip">{sftpSettings.stories_public_base_url || "sem URL publica"}</span>
+            <section className="panel" id="social" style={{ marginTop: 18 }}>
+              <div className="panel-head">
+                <div>
+                  <h3 className="panel-title">Execucao social</h3>
+                  <p className="panel-subtitle">Fila pronta para Facebook e Instagram com selecao manual antes da publicacao.</p>
                 </div>
                 <div className="provider-actions">
-                  <button className="tiny-button is-soft" onClick={handleDeployStories} disabled={runLoading.deployStories}>
-                    {runLoading.deployStories ? "Enviando..." : "Atualizar stories"}
+                  <button className="button is-secondary" onClick={() => loadSocialPreview(Number(socialForm.limit))} disabled={socialLoading}>
+                    {socialLoading ? "Atualizando fila..." : "Atualizar fila"}
                   </button>
-                  <button className="tiny-button" onClick={handleDeploySite} disabled={runLoading.deploySite}>
-                    {runLoading.deploySite ? "Atualizando..." : "Atualizar pagina"}
+                  <button className="button is-primary" onClick={handleSocialRun} disabled={runLoading.social}>
+                    {runLoading.social ? "Publicando..." : "Publicar selecionados"}
+                  </button>
+                  <button className="button is-secondary" onClick={handleFacebookBatch} disabled={runLoading.batch}>
+                    {runLoading.batch ? "Rodando lote..." : "Facebook em lote"}
                   </button>
                 </div>
               </div>
-            </div>
 
-            <div className="surface">
-              <h4>Execução social</h4>
-              <p>O ranking abaixo mostra todas as ofertas ordenadas por potencial de venda. Você escolhe quais publicar e pode esconder qualquer uma para focar no restante da lista.</p>
-              <div className="field-grid" style={{ marginTop: 16 }}>
+              <div className="field-grid" style={{ marginTop: 12 }}>
                 <div className="field">
                   <label>Canal selecionado</label>
                   <select value={socialForm.selected} onChange={(e) => setSocialForm((state) => ({ ...state, selected: e.target.value }))}>
@@ -1591,54 +1529,34 @@ function App() {
                   <label>Loja</label>
                   <select value={socialFilters.store} onChange={(e) => setSocialFilters((state) => ({ ...state, store: e.target.value }))}>
                     <option value="all">Todas as lojas</option>
-                    {socialStoreOptions.map((store) => <option key={store} value={store}>{store}</option>)}
+                    {socialStoreOptions.map((item) => <option key={item} value={item}>{item}</option>)}
                   </select>
                 </div>
                 <div className="field">
                   <label>Categoria</label>
                   <select value={socialFilters.category} onChange={(e) => setSocialFilters((state) => ({ ...state, category: e.target.value }))}>
                     <option value="all">Todas as categorias</option>
-                    {socialCategoryOptions.map((category) => <option key={category} value={category}>{category}</option>)}
+                    {socialCategoryOptions.map((item) => <option key={item} value={item}>{item}</option>)}
                   </select>
                 </div>
               </div>
-              <div className="field-grid" style={{ marginTop: 12 }}>
-                <div className="field">
-                  <label>Fila pronta</label>
-                  <div className="check-grid">
-                    <span className="meta-chip">{socialCheckedIds.length} selecionada(s)</span>
-                    <span className="meta-chip">{socialQueue.length} visível(is)</span>
-                  </div>
-                </div>
-                <div className="field">
-                  <label>Split atual</label>
-                  <div className="check-grid">
-                    <span className="meta-chip">{socialSplit.platform}</span>
-                    <span className="meta-chip">{socialSplit.mode}</span>
-                  </div>
-                </div>
-                <div className="field">
-                  <label>Filtro ativo</label>
-                  <div className="check-grid">
-                    <span className="meta-chip">{socialFilters.store === "all" ? "todas as lojas" : socialFilters.store}</span>
-                    <span className="meta-chip">{socialFilters.category === "all" ? "todas as categorias" : socialFilters.category}</span>
-                  </div>
-                </div>
+
+              <div className="inline-stat" style={{ marginTop: 16 }}>
+                <span className="meta-chip">{fmtInt(socialCheckedIds.length)} selecionada(s)</span>
+                <span className="meta-chip">{fmtInt(socialQueue.length)} visivel(is)</span>
               </div>
 
               <div style={{ marginTop: 18 }}>
-                {socialLoading ? <div className="empty-state">Montando previews sociais...</div> : !socialPreview?.items?.length ? (
+                {!socialQueue.length ? (
                   <div className="empty-state">Sem preview social carregado.</div>
-                ) : !socialQueue.length ? (
-                  <div className="empty-state">A fila atual foi consumida. Clique em atualizar previews sociais para montar mais opções.</div>
                 ) : (
                   <div className="preview-grid">
-                    {socialQueue.map((item, index) => (
-                      <div className="surface social-queue-card" key={item.offer_id}>
+                    {socialQueue.slice(0, 12).map((item) => (
+                      <div className="surface" key={item.offer_id}>
                         <div className="panel-head" style={{ marginBottom: 12 }}>
                           <div>
-                            <h4>#{index + 1} {item.title}</h4>
-                            <p>{item.store || "Loja não informada"} · {item.category || "Categoria"}</p>
+                            <h4>{item.title}</h4>
+                            <p>{item.store} · {item.category || "Geral"}</p>
                           </div>
                           <label className="check-chip">
                             <input
@@ -1649,113 +1567,61 @@ function App() {
                             Selecionar
                           </label>
                         </div>
-                        <p>{item.store || "Loja não informada"}</p>
                         <div className="offer-meta" style={{ marginTop: 12 }}>
                           <span className="meta-chip">{fmtMoney(item.price)}</span>
                           <span className="meta-chip">{fmtInt(item.clicks || 0)} cliques</span>
-                          <span className="meta-chip">{item.slug}</span>
+                          {item.slug ? <span className="meta-chip">{item.slug}</span> : null}
                         </div>
-                        <div className="list" style={{ marginTop: 14 }}>
-                          {item.facebook_payload?.message ? (
-                            <div>
-                              <strong>Facebook</strong>
-                              <p className="panel-subtitle">{item.facebook_payload.message.slice(0, 180)}...</p>
-                            </div>
-                          ) : null}
-                          {item.instagram_payload?.caption ? (
-                            <div>
-                              <strong>Instagram</strong>
-                              <p className="panel-subtitle">{item.instagram_payload.caption.slice(0, 180)}...</p>
-                            </div>
-                          ) : null}
-                          {item.story_payload?.image_url ? (
-                            <a className="tiny-button is-soft" href={item.story_payload.image_url} target="_blank" rel="noreferrer">
-                              Abrir arte de story
-                            </a>
-                          ) : null}
-                          <button className="tiny-button" type="button" onClick={() => dismissSocialOffer(item.offer_id)}>
-                            Trocar por outra
-                          </button>
+                        <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
+                          <div>
+                            <strong>Facebook</strong>
+                            <p style={{ marginTop: 6 }}>{item.facebook_text || "Preview indisponivel."}</p>
+                          </div>
+                          <div>
+                            <strong>Instagram</strong>
+                            <p style={{ marginTop: 6 }}>{item.instagram_text || "Preview indisponivel."}</p>
+                          </div>
+                        </div>
+                        <div className="provider-actions" style={{ marginTop: 16 }}>
+                          {item.story_art_url ? <a className="tiny-button is-soft" href={item.story_art_url} target="_blank" rel="noreferrer">Abrir arte de story</a> : null}
+                          <button className="tiny-button is-soft" onClick={() => dismissSocialOffer(item.offer_id)}>Trocar por outra</button>
                         </div>
                       </div>
                     ))}
                   </div>
                 )}
               </div>
-            </div>
-          </section>
+            </section>
 
-          <section className="panel" id="execucoes" style={{ marginTop: 18 }}>
-            <div className="panel-head">
-              <div>
-                <h3 className="panel-title">Execucoes recentes</h3>
-                <p className="panel-subtitle">Historico operacional consolidado do backend Python.</p>
+            <section className="panel" id="execucoes" style={{ marginTop: 18 }}>
+              <div className="panel-head">
+                <div>
+                  <h3 className="panel-title">Execucoes recentes</h3>
+                  <p className="panel-subtitle">Historico operacional consolidado do backend Python.</p>
+                </div>
               </div>
-            </div>
-            {!snapshot?.recent_runs?.length ? (
-              <div className="empty-state">Ainda nao ha execucoes registradas.</div>
-            ) : (
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Tipo</th>
-                      <th>Provider / Canal</th>
-                      <th>Modo</th>
-                      <th>Status</th>
-                      <th>Solicitado</th>
-                      <th>Processado</th>
-                      <th>Inicio</th>
-                      <th>Fim</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {snapshot.recent_runs.map((run) => (
-                      <tr key={run.id}>
-                        <td>{run.tipo}</td>
-                        <td>{run.provider || run.canal || "-"}</td>
-                        <td>{run.modo || "-"}</td>
-                        <td><span className={`badge ${run.status === "success" ? "is-success" : run.status === "error" ? "is-warning" : "is-neutral"}`}>{run.status}</span></td>
-                        <td>{fmtInt(run.requested_count)}</td>
-                        <td>{fmtInt(run.processed_count)}</td>
-                        <td>{fmtDate(run.started_at)}</td>
-                        <td>{fmtDate(run.finished_at)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-
-          <section className="panel" style={{ marginTop: 18, marginBottom: 30 }}>
-            <div className="panel-head">
-              <div>
-                <h3 className="panel-title">Ofertas recentes</h3>
-                <p className="panel-subtitle">Ultimos itens publicados no site para revisao rapida da vitrine.</p>
-              </div>
-            </div>
-            {!snapshot?.recent_offers?.length ? (
-              <div className="empty-state">Nenhuma oferta recente encontrada.</div>
-            ) : (
-              <div className="offer-list">
-                {snapshot.recent_offers.map((offer) => (
-                  <div className="offer-row" key={offer.id}>
-                    <img className="offer-thumb" src={offer.imagem_url} alt={offer.titulo} />
-                    <div style={{ flex: 1 }}>
-                      <strong>{offer.titulo}</strong>
-                      <small>{offer.loja} · {offer.categoria || "Geral"} · {fmtDate(offer.data_criacao)}</small>
-                      <div className="offer-meta">
-                        <span className="meta-chip">{fmtMoney(offer.preco)}</span>
-                        <span className="meta-chip">{offer.slug}</span>
+              {!snapshot?.recent_runs?.length ? (
+                <div className="empty-state">Nenhuma execucao recente registrada.</div>
+              ) : (
+                <div className="offer-list">
+                  {snapshot.recent_runs.map((run) => (
+                    <div className="offer-row" key={run.id}>
+                      <div style={{ flex: 1 }}>
+                        <strong>{run.tipo} · {run.provider || run.canal || "-"}</strong>
+                        <small>{run.modo || "-"} · solicitado {fmtInt(run.requested_count)} · processado {fmtInt(run.processed_count)}</small>
+                        <div className="offer-meta">
+                          <span className={`badge ${run.status === "success" ? "is-success" : run.status === "error" ? "is-warning" : "is-neutral"}`}>{fmtJobStatus(run.status)}</span>
+                          <span className="meta-chip">inicio {fmtDate(run.criado_em)}</span>
+                          <span className="meta-chip">fim {fmtDate(run.finalizado_em)}</span>
+                        </div>
+                        {run.error_message ? <p style={{ marginTop: 8 }}>{run.error_message}</p> : null}
                       </div>
                     </div>
-                    <a className="tiny-button is-soft" href={`/oferta.php?slug=${offer.slug}`} target="_blank" rel="noreferrer">Abrir oferta</a>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
+                  ))}
+                </div>
+              )}
+            </section>
+            </section>
         </main>
       </div>
       <Toast toast={toast} onClose={() => setToast(null)} />
