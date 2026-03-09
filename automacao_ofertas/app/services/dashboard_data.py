@@ -331,6 +331,12 @@ def build_provider_status() -> dict[str, Any]:
                 "Publicacao validada em producao.",
             ),
             _provider_status(
+                "Facebook Reel",
+                bool((os.getenv("META_PAGE_ID") or "").strip() and (os.getenv("META_ACCESS_TOKEN") or "").strip()),
+                "Meta Graph API",
+                "Fluxo por video MP4 vertical para a pagina do Facebook.",
+            ),
+            _provider_status(
                 "Instagram Feed",
                 bool((os.getenv("META_INSTAGRAM_BUSINESS_ACCOUNT_ID") or "").strip() and (os.getenv("META_ACCESS_TOKEN") or "").strip()),
                 "Instagram Graph API",

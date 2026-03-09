@@ -9,6 +9,7 @@ const IMPORT_OPTIONS = [
 
 const SOCIAL_OPTIONS = [
   { key: "facebook:feed", label: "Facebook Feed", note: "Posta direto na pagina do projeto." },
+  { key: "facebook:reel", label: "Facebook Reel", note: "Gera um MP4 vertical e publica na pagina do Facebook." },
   { key: "both:feed", label: "Facebook + Instagram Feed", note: "Publica a mesma oferta nos dois canais." },
   { key: "instagram:feed", label: "Instagram Feed", note: "Publica no feed do Instagram via Graph API." },
   { key: "instagram:story", label: "Instagram Story", note: "Usa a arte gerada automaticamente." },
@@ -1498,6 +1499,7 @@ function App() {
                 )}
               </div>
             </div>
+            </section>
 
             <section className="panel" id="social" style={{ marginTop: 18 }}>
               <div className="panel-head">
@@ -1620,7 +1622,6 @@ function App() {
                   ))}
                 </div>
               )}
-            </section>
             </section>
         </main>
       </div>

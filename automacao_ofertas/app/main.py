@@ -37,9 +37,11 @@ from app.services.social_meta import (
     build_meta_post_previews,
     create_instagram_media_container,
     create_instagram_story_container,
+    generate_reel_asset,
     generate_story_asset,
     publish_facebook_offer_batch,
     publish_facebook_post,
+    publish_facebook_reel,
     publish_instagram_container,
 )
 
@@ -513,6 +515,38 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
 
                 if success_for_item:
                     items.append(combined_item)
+        elif platform == "facebook" and mode == "reel":
+            for item in previews:
+                try:
+                    offer = {
+                        "id": item["offer_id"],
+                        "slug": item["slug"],
+                        "titulo": item["title"],
+                        "preco": item["price"],
+                        "preco_antigo": item.get("old_price"),
+                        "loja": item["store"],
+                        "categoria": item["category"],
+                        "imagem_url": item["image_url"],
+                        "url_afiliado": item.get("cta_url"),
+                        "cupom": item.get("coupon"),
+                    }
+                    reel_asset = generate_reel_asset(offer)
+                    published = publish_facebook_reel(
+                        video_path=reel_asset["file_path"],
+                        description=item["reel_payload"]["caption"],
+                    )
+                    items.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "slug": item["slug"],
+                            "title": item["title"],
+                            "reel_file": reel_asset["filename"],
+                            "video_id": published["video_id"],
+                            "publish_result": published["result"],
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append({"offer_id": item["offer_id"], "title": item["title"], "error": str(exc)})
         elif platform == "instagram" and mode == "feed":
             for item in previews:
                 try:
@@ -561,6 +595,7 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
             "count": len(items),
             "facebook_count": len([item for item in items if item.get("facebook_result")]),
             "instagram_count": len([item for item in items if item.get("instagram_result") or item.get("creation_id")]),
+            "facebook_reel_count": len([item for item in items if item.get("video_id")]),
             "items": items,
             "errors": errors,
         }

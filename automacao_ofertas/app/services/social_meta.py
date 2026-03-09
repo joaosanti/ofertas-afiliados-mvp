@@ -7,6 +7,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+import imageio.v2 as imageio
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from sqlalchemy import text
 
@@ -436,6 +438,48 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def generate_reel_asset(offer: dict[str, Any], *, duration_seconds: int = 6, fps: int = 24) -> dict[str, Any]:
+    story_asset = generate_story_asset(offer)
+    source_path = Path(story_asset["file_path"])
+    if not source_path.is_file():
+        raise ValueError("Arte base do reel nao foi gerada.")
+
+    filename = source_path.stem + "-reel.mp4"
+    destination = source_path.with_name(filename)
+    total_frames = max(1, duration_seconds * fps)
+
+    with Image.open(source_path) as source_image:
+        base_image = source_image.convert("RGB")
+        width, height = base_image.size
+        writer = imageio.get_writer(
+            str(destination),
+            fps=fps,
+            codec="libx264",
+            pixelformat="yuv420p",
+            macro_block_size=None,
+        )
+        try:
+            for frame_index in range(total_frames):
+                progress = frame_index / max(total_frames - 1, 1)
+                zoom = 1.0 + (0.035 * progress)
+                resized = base_image.resize((int(width * zoom), int(height * zoom)), Image.Resampling.LANCZOS)
+                frame = ImageOps.fit(resized, (width, height), method=Image.Resampling.LANCZOS, centering=(0.5, 0.4))
+                writer.append_data(np.asarray(frame))
+        finally:
+            writer.close()
+
+    return {
+        "ok": True,
+        "offer_id": offer["id"],
+        "filename": filename,
+        "file_path": str(destination),
+        "public_url": story_public_url(filename),
+        "caption": _story_caption_for_offer(offer),
+        "destination_url": story_asset["destination_url"],
+        "poster_url": story_asset["public_url"],
+    }
+
+
 def build_meta_post_previews(
     db,
     limit: int = 12,
@@ -493,6 +537,10 @@ def build_meta_post_previews(
                     "caption": _caption_for_offer(offer),
                 },
                 "story_payload": story_payload,
+                "reel_payload": {
+                    "caption": _story_caption_for_offer(offer),
+                    "offer_url": _destination_url(offer),
+                },
             }
         )
 
@@ -537,6 +585,67 @@ def publish_facebook_offer_batch(db, limit: int = 5, offer_ids: list[int] | None
         )
 
     return {"ok": True, "platform": "facebook", "page_id": _meta_page_id(), "count": len(published), "items": published}
+
+
+def publish_facebook_reel(video_path: str, description: str) -> dict[str, Any]:
+    normalized_path = Path(video_path)
+    if not normalized_path.is_file():
+        raise ValueError("Arquivo de reel nao encontrado para upload.")
+
+    page_id = _meta_page_id()
+    access_token = _meta_page_token()
+    file_size = normalized_path.stat().st_size
+    if file_size <= 0:
+        raise ValueError("Arquivo de reel vazio.")
+
+    with httpx.Client(timeout=90) as client:
+        start_response = client.post(
+            f"{_meta_api_base()}/{page_id}/video_reels",
+            data={
+                "upload_phase": "start",
+                "access_token": access_token,
+            },
+        )
+        start_response.raise_for_status()
+        start_data = start_response.json()
+
+        video_id = (start_data.get("video_id") or "").strip()
+        upload_url = (start_data.get("upload_url") or "").strip()
+        if not video_id or not upload_url:
+            raise ValueError(f"Resposta inesperada da Meta ao iniciar reel: {start_data}")
+
+        with normalized_path.open("rb") as video_file:
+            upload_response = client.post(
+                upload_url,
+                headers={
+                    "Authorization": f"OAuth {access_token}",
+                    "offset": "0",
+                    "file_size": str(file_size),
+                },
+                content=video_file.read(),
+            )
+        upload_response.raise_for_status()
+
+        finish_response = client.post(
+            f"{_meta_api_base()}/{page_id}/video_reels",
+            data={
+                "upload_phase": "finish",
+                "video_id": video_id,
+                "video_state": "PUBLISHED",
+                "description": (description or "").strip(),
+                "access_token": access_token,
+            },
+        )
+        finish_response.raise_for_status()
+        finish_data = finish_response.json()
+
+    return {
+        "ok": True,
+        "platform": "facebook_reel",
+        "page_id": page_id,
+        "video_id": video_id,
+        "result": finish_data,
+    }
 
 
 def create_instagram_media_container(image_url: str, caption: str) -> dict[str, Any]:
