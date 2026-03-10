@@ -18,6 +18,7 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Zero Preço | Comparador moderno com links afiliados</title>
   <meta name="description" content="Seleção diária de ofertas e vitrines por marketplace com acesso rápido ao produto certo.">
+  <link rel="icon" type="image/png" href="/assets/img/logo-zp.png">
   <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-8314124298799437" crossorigin="anonymous"></script>
   <?php require __DIR__ . '/inc/site_head_analytics.php'; ?>
   <link rel="stylesheet" href="/assets/css/style.css">
@@ -31,7 +32,6 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
         <div class="section-heading">
           <div>
             <h2>Seleção do dia</h2>
-            <div class="section-copy">As ofertas mais fortes do momento, balanceadas entre as lojas com melhor chance de saída.</div>
           </div>
         </div>
 
@@ -67,9 +67,8 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
         <div class="section-heading">
           <div>
             <h2>Shopee em alta agora</h2>
-            <div class="section-copy">Produtos da Shopee priorizados por potencial de compra e força da oferta.</div>
           </div>
-          <a class="cta-link" href="/categoria.php?cat=geral&amp;store=Shopee">Ver catálogo completo</a>
+          <a class="cta-link" href="/categoria.php?cat=geral&amp;store=Shopee">Shopee</a>
         </div>
 
         <?php if ($shopeeTrending): ?>
@@ -111,9 +110,8 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
         <div class="section-heading">
           <div>
             <h2>Mercado Livre em alta agora</h2>
-            <div class="section-copy">Produtos do Mercado Livre ordenados pelos sinais mais fortes de venda e saída.</div>
           </div>
-          <a class="cta-link" href="/categoria.php?cat=geral&amp;store=Mercado%20Livre">Ver catálogo completo</a>
+          <a class="cta-link" href="/categoria.php?cat=geral&amp;store=Mercado%20Livre">Mercado Livre</a>
         </div>
 
         <?php if ($meliTrending): ?>
@@ -155,9 +153,8 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
         <div class="section-heading">
           <div>
             <h2>Amazon em alta agora</h2>
-            <div class="section-copy">Seleção da Amazon com ofertas fortes para clique rápido e compra direta.</div>
           </div>
-          <a class="cta-link" href="/categoria.php?cat=geral&amp;store=Amazon">Ver catálogo completo</a>
+          <a class="cta-link" href="/categoria.php?cat=geral&amp;store=Amazon">Amazon</a>
         </div>
 
         <?php if ($amazonTrending): ?>
@@ -242,3 +239,7 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
   <?php require __DIR__ . '/inc/site_footer_scripts.php'; ?>
 </body>
 </html>
+
+
+
+

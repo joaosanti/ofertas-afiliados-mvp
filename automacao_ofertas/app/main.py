@@ -3,9 +3,11 @@ import secrets
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import paramiko
+from sqlalchemy.exc import OperationalError
 from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
@@ -26,6 +28,7 @@ from app.services.category_inference import recategorize_store_offers
 from app.services.automation_scheduler import AutomationScheduler
 from app.services.manual_file_import import preview_amazon_txt_file, preview_mercadolivre_txt_file, preview_shopee_csv_file
 from app.services.manual_link_import import preview_manual_affiliate_links
+from app.services.manual_page_import import preview_amazon_saved_html, preview_page_url
 from app.services.normalize import normalize_offer
 from app.services.publish import publish_offer
 from app.services.sftp_deploy import (
@@ -49,6 +52,51 @@ app = FastAPI(title="Automacao de Ofertas")
 UI_DIR = Path(__file__).resolve().parents[1] / "dashboard_ui"
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 scheduler: AutomationScheduler | None = None
+
+
+def _database_error_message(exc: Exception) -> str:
+    raw_url = (os.getenv("DATABASE_URL") or "").strip()
+    if not raw_url:
+        return "DATABASE_URL nao configurada."
+
+    parsed = urlsplit(raw_url)
+    host = parsed.hostname or "host-desconhecido"
+    port = parsed.port or 3306
+    username = parsed.username or "usuario-desconhecido"
+    detail = str(getattr(exc, "orig", exc))
+    return (
+        "Falha ao conectar no banco de dados. "
+        f"Verifique usuario/senha e permissao do host para '{username}' em {host}:{port}. "
+        f"Detalhe original: {detail}"
+    )
+
+
+def _empty_dashboard_snapshot(error_message: str) -> dict[str, Any]:
+    return {
+        "overview": {
+            "active_offers": 0,
+            "featured_offers": 0,
+            "tracked_stores": 0,
+            "clicks_7d": 0,
+            "clicks_30d": 0,
+            "average_price": 0,
+            "import_runs_7d": 0,
+            "social_posts_7d": 0,
+        },
+        "charts": {
+            "clicks_by_day": [],
+            "offers_by_store": [],
+            "offers_by_category": [],
+            "runs_by_day": [],
+        },
+        "tables": {
+            "top_clicked": [],
+            "recent_offers": [],
+            "recent_runs": [],
+        },
+        "providers": {"imports": [], "social": []},
+        "database": {"ok": False, "error": error_message},
+    }
 
 
 class MeliCodePayload(BaseModel):
@@ -106,15 +154,24 @@ class DashboardManualLinkItemPayload(BaseModel):
     canonical_url: str | None = None
     image: str | None = None
     category: str | None = None
+    coupon: str | None = None
     tags: str | None = None
     featured: int | None = None
     affiliate_detected: bool | None = None
     affiliate_code: str | None = None
+    item_id: str | None = None
+    product_id: str | None = None
 
 
 class DashboardManualLinksPayload(BaseModel):
     links: list[str] | None = None
     items: list[DashboardManualLinkItemPayload] | None = None
+
+
+class DashboardManualPagePayload(BaseModel):
+    provider: str | None = None
+    url: str
+    limit: int = 10
 
 
 class DashboardSocialRunPayload(BaseModel):
@@ -462,7 +519,12 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
             record_execution_success(db, run_id, processed_count=int(result["count"]), result=result)
             return {"run_id": run_id} | result
 
-        previews = build_meta_post_previews(db, limit=limit, offer_ids=selected_offer_ids or None)
+        previews = build_meta_post_previews(
+            db,
+            limit=limit,
+            offer_ids=selected_offer_ids or None,
+            include_story_assets=(platform == "instagram" and mode == "story"),
+        )
         if not previews:
             raise ValueError("Nao ha ofertas elegiveis para publicar.")
 
@@ -736,6 +798,14 @@ def manager_logout():
     return response
 
 
+@app.get("/favicon.ico")
+def dashboard_favicon():
+    favicon_path = UI_DIR / "logo-zp.png"
+    if not favicon_path.exists():
+        raise HTTPException(status_code=404, detail="Favicon nao encontrado.")
+    return FileResponse(favicon_path)
+
+
 @app.get("/manager-assets/{asset_path:path}")
 def manager_ui_assets(asset_path: str, _: str = Depends(require_manager_auth)):
     asset = (UI_DIR / asset_path).resolve()
@@ -754,7 +824,10 @@ def manager_ui_assets(asset_path: str, _: str = Depends(require_manager_auth)):
 def dashboard_api_overview(_: str = Depends(require_manager_auth)):
     db = SessionLocal()
     try:
-        snapshot = fetch_dashboard_snapshot(db)
+        try:
+            snapshot = fetch_dashboard_snapshot(db)
+        except OperationalError as exc:
+            snapshot = _empty_dashboard_snapshot(_database_error_message(exc))
         snapshot["automation"] = scheduler.snapshot() if scheduler is not None else None
         snapshot["manager"] = {
             "auth_enabled": _manager_auth_enabled(),
@@ -862,6 +935,27 @@ def dashboard_api_manual_links_preview(payload: DashboardManualLinksPayload, _: 
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/dashboard/api/import/manual-page/preview")
+def dashboard_api_manual_page_preview(payload: DashboardManualPagePayload, _: str = Depends(require_manager_auth)):
+    try:
+        provider, items = preview_page_url(payload.url, payload.limit)
+        return {
+            "provider": f"{provider}_page",
+            "count": len(items),
+            "url": payload.url,
+            "items": items,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        raise HTTPException(status_code=502, detail=detail)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/dashboard/api/import/file/preview")
 async def dashboard_api_file_preview(
     provider: str = Form(...),
@@ -875,6 +969,8 @@ async def dashboard_api_file_preview(
             items = preview_shopee_csv_file(content, upload.filename or "")
         elif provider_key == "amazon":
             items = preview_amazon_txt_file(content, upload.filename or "")
+        elif provider_key == "amazon_html":
+            items = preview_amazon_saved_html(content, upload.filename or "")
         elif provider_key == "mercadolivre":
             items = preview_mercadolivre_txt_file(content, upload.filename or "")
         else:
@@ -923,12 +1019,15 @@ def dashboard_api_manual_links_run(payload: DashboardManualLinksPayload, _: str 
                 "description": item.description or "",
                 "price": float(item.price or 0),
                 "old_price": float(item.old_price) if item.old_price not in (None, "") else None,
-                "url": item.url,
+                "url": item.canonical_url or item.url,
                 "image": item.image or "",
                 "category": item.category or "ofertas",
+                "coupon": item.coupon or None,
                 "tags": item.tags or f"{(item.provider or 'manual').strip().lower()},manual",
                 "featured": int(item.featured or 0),
                 "affiliate_tag": item.affiliate_code or "",
+                "item_id": item.item_id or None,
+                "product_id": item.product_id or None,
             }
             store = (item.store or _provider_label(_normalize_provider_key(item.provider))).strip()
             processed_items.append(raw | {"store": store})
@@ -1104,11 +1203,18 @@ def dashboard_api_deploy_site(_: str = Depends(require_manager_auth)):
 
 
 @app.get("/social/meta/post-previews")
-def social_meta_post_previews(limit: int = 12):
+def social_meta_post_previews(limit: int = 12, q: str = ""):
     db = SessionLocal()
     try:
-        items = build_meta_post_previews(db, limit=limit, include_story_assets=False)
-        return {"count": len(items), "items": items}
+        try:
+            items = build_meta_post_previews(db, limit=limit, include_story_assets=False, search_query=q)
+            return {"count": len(items), "items": items}
+        except OperationalError as exc:
+            return {
+                "count": 0,
+                "items": [],
+                "database": {"ok": False, "error": _database_error_message(exc)},
+            }
     finally:
         db.close()
 

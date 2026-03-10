@@ -15,6 +15,15 @@ const SOCIAL_OPTIONS = [
   { key: "instagram:story", label: "Instagram Story", note: "Usa a arte gerada automaticamente." },
 ];
 
+const NAV_ITEMS = [
+  { id: "painel", label: "Painel", note: "Resumo geral do projeto, métricas e atalhos rápidos." },
+  { id: "configuracoes", label: "Configurações", note: "Automação, credenciais, horários e parâmetros do manager." },
+  { id: "importadores", label: "Importadores", note: "Prévia, importação por página, arquivo e links manuais." },
+  { id: "social", label: "Execução social", note: "Fila de Facebook e Instagram com seleção manual." },
+  { id: "analytics", label: "Analytics", note: "Cliques, categorias, lojas e produtos mais fortes." },
+  { id: "execucoes", label: "Execuções", note: "Histórico operacional consolidado do backend Python." },
+];
+
 function fmtMoney(value) {
   const numeric = Number(value || 0);
   return numeric.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
@@ -31,6 +40,12 @@ function fmtDate(value) {
   } catch {
     return value;
   }
+}
+
+function truncateText(value, max = 88) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.length > max ? `${text.slice(0, max - 1)}...` : text;
 }
 
 function fmtCountdown(value, nowTs) {
@@ -85,6 +100,19 @@ function statusClass(enabled, mode) {
   if (enabled) return "is-success";
   if ((mode || "").toLowerCase().includes("futuro")) return "is-neutral";
   return "is-warning";
+}
+
+function humanizeImportError(message) {
+  const text = String(message || "").trim();
+  if (!text) return "Falha ao processar requisicao.";
+  const lowered = text.toLowerCase();
+  if (lowered.includes("mercado livre bloqueou") || lowered.includes("negative_traffic") || lowered.includes("forbidden")) {
+    return "Mercado Livre bloqueado temporariamente. Aguarde alguns minutos e tente de novo.";
+  }
+  if (lowered.includes("amazon bloqueou")) {
+    return "Amazon bloqueou a leitura automatica desta pagina agora.";
+  }
+  return text;
 }
 
 async function fetchJson(url, options) {
@@ -267,12 +295,16 @@ function App() {
   });
   const [manualLinkText, setManualLinkText] = useState("");
   const [manualLinkRetry, setManualLinkRetry] = useState(null);
+  const [manualPageForm, setManualPageForm] = useState({ provider: "mercadolivre", url: "", limit: 10 });
+  const [manualPagePreview, setManualPagePreview] = useState(null);
+  const [manualPageLoading, setManualPageLoading] = useState(false);
   const [fileImportProvider, setFileImportProvider] = useState("shopee");
   const [fileImportFile, setFileImportFile] = useState(null);
   const [fileImportPreview, setFileImportPreview] = useState(null);
   const [fileImportLoading, setFileImportLoading] = useState(false);
-  const [socialForm, setSocialForm] = useState({ selected: "facebook:feed", limit: 3 });
+  const [socialForm, setSocialForm] = useState({ selected: "facebook:feed", limit: 120, query: "" });
   const [socialFilters, setSocialFilters] = useState({ store: "all", category: "all" });
+  const [activeSection, setActiveSection] = useState("painel");
   const [settingsForm, setSettingsForm] = useState({
     manager_username: "admin",
     manager_password: "",
@@ -315,9 +347,15 @@ function App() {
     () => socialCandidates.filter((item) => {
       const matchStore = socialFilters.store === "all" || item.store === socialFilters.store;
       const matchCategory = socialFilters.category === "all" || item.category === socialFilters.category;
-      return matchStore && matchCategory;
+      const query = (socialForm.query || "").trim().toLowerCase();
+      const haystack = [item.title, item.store, item.category, item.slug]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      const matchQuery = !query || haystack.includes(query);
+      return matchStore && matchCategory && matchQuery;
     }),
-    [socialCandidates, socialFilters]
+    [socialCandidates, socialFilters, socialForm.query]
   );
   const balancedSocialCandidates = useMemo(
     () => balanceSocialItems(filteredSocialCandidates, socialFilters.store),
@@ -368,10 +406,15 @@ function App() {
     }));
   }, [snapshot?.settings]);
 
-  async function loadSocialPreview(limit = socialForm.limit) {
+  async function loadSocialPreview(limit = socialForm.limit, query = socialForm.query) {
     setSocialLoading(true);
     try {
-      setSocialPreview(await fetchJson(`/social/meta/post-previews?limit=${Math.max(24, Number(limit || 5), 36)}`));
+      const params = new URLSearchParams({
+        limit: String(Math.max(36, Number(limit || 120))),
+      });
+      const normalizedQuery = String(query || "").trim();
+      if (normalizedQuery) params.set("q", normalizedQuery);
+      setSocialPreview(await fetchJson(`/social/meta/post-previews?${params.toString()}`));
     } catch (error) {
       setToast({ type: "error", message: `Falha ao montar previews sociais: ${error.message}` });
     } finally {
@@ -510,15 +553,15 @@ function App() {
         setManualLinkRetry({ active: true, ready: false, attempt: retryAttempt, secondsLeft: 30 });
         setManualLinkStatus({
           type: "retry",
-          message: `A primeira tentativa falhou. O sistema vai tentar de novo em 30s. Erro atual: ${error.message}`,
+          message: `A primeira tentativa falhou. O sistema vai tentar de novo em 30s. Erro atual: ${humanizeImportError(error.message)}`,
         });
         setToast({ type: "info", message: "Primeira tentativa falhou. Nova tentativa automatica agendada para 30s." });
       } else {
         setManualLinkStatus({
           type: "error",
-          message: `Preview manual por link falhou mesmo apos a nova tentativa. Detalhe: ${error.message}`,
+          message: `Preview manual por link falhou mesmo apos a nova tentativa. Detalhe: ${humanizeImportError(error.message)}`,
         });
-        setToast({ type: "error", message: `Preview manual por link falhou: ${error.message}` });
+        setToast({ type: "error", message: `Preview manual por link falhou: ${humanizeImportError(error.message)}` });
       }
     } finally {
       setManualLinkLoading(false);
@@ -574,7 +617,7 @@ function App() {
       });
       setToast({ type: "success", message: `${data.count} item(ns) carregado(s) do arquivo ${data.filename || ""}.` });
     } catch (error) {
-      setToast({ type: "error", message: `Preview por arquivo falhou: ${error.message}` });
+      setToast({ type: "error", message: `Preview por arquivo falhou: ${humanizeImportError(error.message)}` });
     } finally {
       setFileImportLoading(false);
     }
@@ -596,6 +639,52 @@ function App() {
       await loadSnapshot();
     } catch (error) {
       setToast({ type: "error", message: `Importacao por arquivo falhou: ${error.message}` });
+    } finally {
+      setRunLoading((state) => ({ ...state, manualLinks: false }));
+    }
+  }
+
+  async function handleManualPagePreview() {
+    const url = String(manualPageForm.url || "").trim();
+    if (!url) {
+      setToast({ type: "error", message: "Informe a URL da pagina do Mercado Livre." });
+      return;
+    }
+    setManualPageLoading(true);
+    try {
+      const data = await fetchJson("/dashboard/api/import/manual-page/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: manualPageForm.provider, url, limit: Number(manualPageForm.limit || 10) }),
+      });
+      setManualPagePreview({
+        ...data,
+        items: (data.items || []).map((item) => ({ ...item, selected: true })),
+      });
+      setToast({ type: "success", message: `${data.count} item(ns) carregado(s) da pagina de ${manualPageForm.provider === "amazon" ? "Amazon" : "Mercado Livre"}.` });
+    } catch (error) {
+      setToast({ type: "error", message: `Preview da pagina ${manualPageForm.provider === "amazon" ? "Amazon" : "Mercado Livre"} falhou: ${humanizeImportError(error.message)}` });
+    } finally {
+      setManualPageLoading(false);
+    }
+  }
+
+  async function handleManualPageImport() {
+    setRunLoading((state) => ({ ...state, manualLinks: true }));
+    try {
+      const items = (manualPagePreview?.items || []).filter((item) => item.selected);
+      if (!items.length) {
+        throw new Error("Selecione ao menos um item da pagina para importar.");
+      }
+      const data = await fetchJson("/dashboard/api/import/manual-links/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+      setToast({ type: "success", message: `Importacao da pagina: ${data.processed} processado(s), ${data.created} criado(s), ${data.updated} atualizado(s).` });
+      await loadSnapshot();
+    } catch (error) {
+      setToast({ type: "error", message: `Importacao da pagina falhou: ${error.message}` });
     } finally {
       setRunLoading((state) => ({ ...state, manualLinks: false }));
     }
@@ -649,7 +738,7 @@ function App() {
       const errorCount = Number((data.errors || []).length);
       setToast({ type: errorCount ? "error" : "success", message: `Publicacao ${payload.platform}/${payload.mode}: ${data.count} concluido(s), ${errorCount} erro(s).` });
       setSocialHiddenIds((current) => [...new Set([...current, ...selectedIds])]);
-      await Promise.all([loadSnapshot(), loadSocialPreview(20)]);
+      await Promise.all([loadSnapshot(), loadSocialPreview(socialForm.limit, socialForm.query)]);
     } catch (error) {
       setToast({ type: "error", message: `Falha na publicacao social: ${error.message}` });
     } finally {
@@ -671,7 +760,7 @@ function App() {
       });
       setToast({ type: "success", message: `Facebook em lote: ${data.count} publicacao(oes) concluida(s).` });
       setSocialHiddenIds((current) => [...new Set([...current, ...selectedIds])]);
-      await Promise.all([loadSnapshot(), loadSocialPreview(20)]);
+      await Promise.all([loadSnapshot(), loadSocialPreview(socialForm.limit, socialForm.query)]);
     } catch (error) {
       setToast({ type: "error", message: `Falha no lote do Facebook: ${error.message}` });
     } finally {
@@ -818,6 +907,7 @@ function App() {
   const manager = snapshot?.manager || {};
   const sftpSettings = snapshot?.settings?.sftp || {};
   const metaTokenConfigured = Boolean(snapshot?.settings?.meta_access_token_configured);
+  const activeNavItem = NAV_ITEMS.find((item) => item.id === activeSection) || NAV_ITEMS[0];
 
   function toggleSocialSelection(offerId) {
     setSocialCheckedIds((current) => (
@@ -836,47 +926,51 @@ function App() {
       <div className="app-shell">
         <aside className="sidebar">
           <div className="brand">
-            <div className="brand-mark">ZP</div>
+            <div className="brand-mark">
+              <img src="/manager-assets/logo-zp.png" alt="Zero Preço" className="brand-logo" />
+            </div>
             <div>
-              <h1>Zero Preco Control</h1>
-              <p>Operacao de afiliados, importacao e social em um painel so.</p>
+              <h1>Zero Preço Control</h1>
+              <p>Operação de afiliados, importação e social em um painel só.</p>
             </div>
           </div>
           <div className="sidebar-nav">
-            {[
-              ["visao-geral", "Visao geral", "KPI, health e tendencias do funil."],
-              ["importadores", "Importadores", "Rodar preview e execucao dos conectores."],
-              ["social", "Social", "Facebook, Instagram feed e stories."],
-              ["analytics", "Analytics", "Cliques, ofertas e categorias em destaque."],
-              ["execucoes", "Execucoes", "Historico operacional do backend Python."],
-            ].map(([id, label, note], index) => (
-              <button key={id} className={`nav-button ${index === 0 ? "is-active" : ""}`} onClick={() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+            {NAV_ITEMS.map(({ id, label, note }) => (
+              <button key={id} className={`nav-button ${activeSection === id ? "is-active" : ""}`} onClick={() => setActiveSection(id)}>
                 <span className="nav-label">{label}</span>
                 <span className="nav-note">{note}</span>
               </button>
             ))}
           </div>
           <div className="sidebar-card">
-            <h3>Status rapido</h3>
-            <p>Facebook feed, Facebook lote e Instagram feed ja estao validados. Story do Instagram segue visivel no painel para ajuste fino.</p>
+            <h3>Status rápido</h3>
+            <p>Facebook Feed, lote do Facebook e Instagram Feed já estão validados. Story do Instagram segue no painel para ajuste fino.</p>
           </div>
           <div className="sidebar-card">
-            <h3>Proximos pontos sugeridos</h3>
-            <p>Agendamento horario, fila por prioridade, aprovacao manual, score por CTR e alertas de erro por canal.</p>
+            <h3>Próximos pontos sugeridos</h3>
+            <p>Agendamento por horário, fila por prioridade, aprovação manual, score por CTR e alertas de erro por canal.</p>
           </div>
         </aside>
 
         <main className="main">
-          <section className="hero" id="visao-geral">
+          <section className="workspace-header">
+            <span className="hero-kicker">Zero Preço Control</span>
+            <h2>{activeNavItem.label}</h2>
+            <p>{activeNavItem.note}</p>
+          </section>
+
+          {activeSection === "painel" ? (
+            <>
+          <section className="hero" id="painel">
             <div className="hero-head">
               <div className="hero-copy">
-                <span className="hero-kicker">Painel de operacao</span>
+                <span className="hero-kicker">Painel de operação</span>
                 <h2>Gerenciador React para o backend de afiliados.</h2>
-                <p>Controle importacoes, publicacoes sociais, cliques, graficos e os provedores atuais e futuros em uma interface unica, limpa e pronta para crescer.</p>
+                <p>Controle importações, publicações sociais, cliques, gráficos e os provedores atuais e futuros em uma interface única, limpa e pronta para crescer.</p>
               </div>
               <div className="hero-actions">
                 <button className="button" onClick={loadSnapshot} disabled={loading}>{loading ? "Atualizando..." : "Atualizar dados"}</button>
-                <button className="ghost-button" onClick={() => loadSocialPreview(Number(socialForm.limit))} disabled={socialLoading}>{socialLoading ? "Montando previews..." : "Atualizar previews sociais"}</button>
+                <button className="ghost-button" onClick={() => loadSocialPreview(Number(socialForm.limit))} disabled={socialLoading}>{socialLoading ? "Montando prévias..." : "Atualizar prévias sociais"}</button>
               </div>
             </div>
           </section>
@@ -884,7 +978,7 @@ function App() {
           <div className="toolbar">
             <div className="toolbar-copy">
               <h3>Radar operacional</h3>
-              <p>Visao rapida de estoque ativo, engajamento, importacoes e social.</p>
+              <p>Visão rápida de estoque ativo, engajamento, importações e social.</p>
             </div>
             <div className="toolbar-actions">
               <span className="status-pill is-ok">API Python online</span>
@@ -903,27 +997,31 @@ function App() {
               <div className="metric-foot">{fmtInt(overview.featured_offers)} em destaque agora.</div>
             </div>
             <div className="metric-card">
-              <div className="metric-label">Cliques nos ultimos 7 dias</div>
+              <div className="metric-label">Cliques nos últimos 7 dias</div>
               <div className="metric-value">{fmtInt(overview.clicks_7d)}</div>
               <div className="metric-foot">{fmtInt(overview.clicks_30d)} acumulados em 30 dias.</div>
             </div>
             <div className="metric-card">
               <div className="metric-label">Lojas rastreadas</div>
               <div className="metric-value">{fmtInt(overview.tracked_stores)}</div>
-              <div className="metric-foot">{fmtMoney(overview.average_price)} de preco medio das ofertas ativas.</div>
+              <div className="metric-foot">{fmtMoney(overview.average_price)} de preço médio das ofertas ativas.</div>
             </div>
             <div className="metric-card">
-              <div className="metric-label">Execucoes recentes</div>
+              <div className="metric-label">Execuções recentes</div>
               <div className="metric-value">{fmtInt((overview.import_runs_7d || 0) + (overview.social_posts_7d || 0))}</div>
-              <div className="metric-foot">{fmtInt(overview.import_runs_7d)} importacoes + {fmtInt(overview.social_posts_7d)} posts sociais nos ultimos 7 dias.</div>
+              <div className="metric-foot">{fmtInt(overview.import_runs_7d)} importações + {fmtInt(overview.social_posts_7d)} posts sociais nos últimos 7 dias.</div>
             </div>
           </div>
+            </>
+          ) : null}
 
+          {activeSection === "configuracoes" ? (
+            <>
           <section className="panel" style={{ marginBottom: 18 }}>
             <div className="panel-head">
               <div>
-                <h3 className="panel-title">Automacao e agendamento</h3>
-                <p className="panel-subtitle">Jobs periodicos do backend Python para importacao e social.</p>
+                <h3 className="panel-title">Automação e agendamento</h3>
+                <p className="panel-subtitle">Jobs periódicos do backend Python para importação e social.</p>
               </div>
             </div>
             <div className="status-grid">
@@ -965,12 +1063,18 @@ function App() {
           <section className="panel" style={{ marginBottom: 18 }}>
             <div className="panel-head">
               <div>
-                <h3 className="panel-title">Configuracoes do manager</h3>
-                <p className="panel-subtitle">Troque usuario, senha e horarios fixos sem editar o .env na mao.</p>
+                <h3 className="panel-title">Configurações do manager</h3>
+                <p className="panel-subtitle">Troque usuário, senha, Meta e automações sem editar o .env na mão.</p>
               </div>
               <div className="provider-actions">
+                <button className="button is-secondary" onClick={handleDeploySite} disabled={runLoading.deploySite}>
+                  {runLoading.deploySite ? "Publicando site..." : "Publicar arquivos do site"}
+                </button>
+                <button className="button is-secondary" onClick={handleDeployStories} disabled={runLoading.deployStories}>
+                  {runLoading.deployStories ? "Publicando stories..." : "Publicar stories"}
+                </button>
                 <button className="button is-primary" onClick={handleSettingsSave} disabled={settingsLoading}>
-                  {settingsLoading ? "Salvando..." : "Salvar configuracoes"}
+                  {settingsLoading ? "Salvando..." : "Salvar configurações"}
                 </button>
               </div>
             </div>
@@ -978,7 +1082,7 @@ function App() {
             <div className="surface">
               <div className="field-grid">
                 <div className="field">
-                  <label>Usuario do manager</label>
+                  <label>Usuário do manager</label>
                   <input type="text" value={settingsForm.manager_username} onChange={(e) => setSettingsForm((state) => ({ ...state, manager_username: e.target.value }))} />
                 </div>
                 <div className="field">
@@ -986,25 +1090,29 @@ function App() {
                   <input type="password" placeholder="Deixe vazio para manter a atual" value={settingsForm.manager_password} onChange={(e) => setSettingsForm((state) => ({ ...state, manager_password: e.target.value }))} />
                 </div>
                 <div className="field">
+                  <label>Token Meta</label>
+                  <input type="password" placeholder={metaTokenConfigured ? "Token ja configurado" : "Cole um token novo"} value={settingsForm.meta_access_token} onChange={(e) => setSettingsForm((state) => ({ ...state, meta_access_token: e.target.value }))} />
+                </div>
+              </div>
+
+              <div className="field-grid" style={{ marginTop: 12 }}>
+                <div className="field">
                   <label>Auto importacao</label>
                   <label className="check-chip">
                     <input type="checkbox" checked={settingsForm.auto_import_enabled} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_import_enabled: e.target.checked }))} />
                     Ativar importacao automatica
                   </label>
                 </div>
-              </div>
-
-              <div className="field-grid" style={{ marginTop: 12 }}>
                 <div className="field">
-                  <label>Horarios de importacao</label>
+                  <label>Horarios da importacao</label>
                   <input type="text" value={settingsForm.auto_import_times} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_import_times: e.target.value }))} />
-                  <small>Use HH:MM separado por virgula. Ex: 06:30,12:30,18:30</small>
+                  <small>Ex.: 06:30,12:30,18:30</small>
                 </div>
                 <div className="field">
-                  <label>Provedores da importacao</label>
+                  <label>Provedores automaticos</label>
                   <div className="check-grid">
                     {IMPORT_OPTIONS.map((item) => (
-                      <label className="check-chip" key={`settings-${item.key}`}>
+                      <label className="check-chip" key={item.key}>
                         <input type="checkbox" checked={settingsForm.auto_import_providers.includes(item.key)} onChange={() => toggleSettingsProvider(item.key)} />
                         {item.label}
                       </label>
@@ -1015,152 +1123,112 @@ function App() {
 
               <div className="field-grid" style={{ marginTop: 12 }}>
                 <div className="field">
-                  <label>META_ACCESS_TOKEN</label>
-                  <input type="password" placeholder={metaTokenConfigured ? "Token atual salvo. Cole outro para substituir." : "Cole aqui o token novo da Meta"} value={settingsForm.meta_access_token} onChange={(e) => setSettingsForm((state) => ({ ...state, meta_access_token: e.target.value }))} />
-                  <small>{metaTokenConfigured ? "O valor atual fica oculto. Se deixar vazio, o token salvo sera mantido." : "Ainda nao ha token salvo no backend."}</small>
-                </div>
-                <div className="field">
                   <label>Auto social</label>
                   <label className="check-chip">
                     <input type="checkbox" checked={settingsForm.auto_social_enabled} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_enabled: e.target.checked }))} />
-                    Ativar feed automatico
+                    Ativar publicacao automatica
                   </label>
                 </div>
                 <div className="field">
-                  <label>Horarios do feed</label>
+                  <label>Horarios do social</label>
                   <input type="text" value={settingsForm.auto_social_times} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_times: e.target.value }))} />
-                  <small>Ex: 07:00,13:00,19:00</small>
+                </div>
+                <div className="field">
+                  <label>Canal automatico</label>
+                  <select value={settingsForm.auto_social_platform} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_platform: e.target.value }))}>
+                    <option value="facebook">Facebook</option>
+                    <option value="instagram">Instagram</option>
+                    <option value="both">Facebook + Instagram</option>
+                  </select>
                 </div>
               </div>
 
               <div className="field-grid" style={{ marginTop: 12 }}>
-                <div className="field">
-                  <label>Canal automatico do feed</label>
-                  <select value={settingsForm.auto_social_platform} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_platform: e.target.value }))}>
-                    <option value="facebook">facebook</option>
-                    <option value="both">facebook + instagram</option>
-                    <option value="instagram">instagram</option>
-                  </select>
-                </div>
                 <div className="field">
                   <label>Modo automatico</label>
-                  <input type="text" value="feed" disabled />
-                </div>
-                <div className="field">
-                  <label>Quantidade por rodada</label>
-                  <input type="number" min="1" max="10" value={settingsForm.auto_social_limit} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_limit: Number(e.target.value || 1) }))} />
-                </div>
-              </div>
-
-              <div className="field-grid" style={{ marginTop: 12 }}>
-                <div className="field">
-                  <label>Auto stories</label>
-                  <label className="check-chip">
-                    <input type="checkbox" checked={settingsForm.auto_story_enabled} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_enabled: e.target.checked }))} />
-                    Ativar stories automaticos
-                  </label>
-                </div>
-                <div className="field">
-                  <label>Horarios dos stories</label>
-                  <input type="text" value={settingsForm.auto_story_times} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_times: e.target.value }))} />
-                  <small>Ex: 07:05,13:05,19:05</small>
-                </div>
-              </div>
-
-              <div className="field-grid" style={{ marginTop: 12 }}>
-                <div className="field">
-                  <label>Canal automatico dos stories</label>
-                  <select value={settingsForm.auto_story_platform} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_platform: e.target.value }))}>
-                    <option value="instagram">instagram</option>
+                  <select value={settingsForm.auto_social_mode} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_mode: e.target.value }))}>
+                    <option value="feed">Feed</option>
+                    <option value="reel">Reel</option>
                   </select>
                 </div>
                 <div className="field">
-                  <label>Modo dos stories</label>
-                  <input type="text" value="story" disabled />
+                  <label>Limite do social</label>
+                  <input type="number" min="1" max="20" value={settingsForm.auto_social_limit} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_limit: Number(e.target.value || 1) }))} />
                 </div>
                 <div className="field">
-                  <label>Quantidade por rodada</label>
-                  <input type="number" min="1" max="10" value={settingsForm.auto_story_limit} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_limit: Number(e.target.value || 1) }))} />
+                  <label>Status do token</label>
+                  <div className="check-grid">
+                    <span className={`badge ${metaTokenConfigured ? "is-success" : "is-warning"}`}>{metaTokenConfigured ? "Token salvo" : "Token ausente"}</span>
+                  </div>
                 </div>
-              </div>
-
-              <div className="deploy-divider">
-                <span>Deploy DreamHost</span>
               </div>
 
               <div className="field-grid" style={{ marginTop: 12 }}>
                 <div className="field">
-                  <label>Host SFTP</label>
+                  <label>Auto story</label>
+                  <label className="check-chip">
+                    <input type="checkbox" checked={settingsForm.auto_story_enabled} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_enabled: e.target.checked }))} />
+                    Ativar story automatico
+                  </label>
+                </div>
+                <div className="field">
+                  <label>Horarios do story</label>
+                  <input type="text" value={settingsForm.auto_story_times} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_times: e.target.value }))} />
+                </div>
+                <div className="field">
+                  <label>Plataforma do story</label>
+                  <select value={settingsForm.auto_story_platform} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_platform: e.target.value }))}>
+                    <option value="instagram">Instagram</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="field-grid" style={{ marginTop: 12 }}>
+                <div className="field">
+                  <label>Limite do story</label>
+                  <input type="number" min="1" max="10" value={settingsForm.auto_story_limit} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_limit: Number(e.target.value || 1) }))} />
+                </div>
+                <div className="field">
+                  <label>SFTP host</label>
                   <input type="text" value={settingsForm.sftp_host} onChange={(e) => setSettingsForm((state) => ({ ...state, sftp_host: e.target.value }))} />
                 </div>
                 <div className="field">
-                  <label>Porta</label>
+                  <label>SFTP porta</label>
                   <input type="number" min="1" value={settingsForm.sftp_port} onChange={(e) => setSettingsForm((state) => ({ ...state, sftp_port: Number(e.target.value || 22) }))} />
-                </div>
-                <div className="field">
-                  <label>Usuario SFTP</label>
-                  <input type="text" value={settingsForm.sftp_username} onChange={(e) => setSettingsForm((state) => ({ ...state, sftp_username: e.target.value }))} />
                 </div>
               </div>
 
               <div className="field-grid" style={{ marginTop: 12 }}>
                 <div className="field">
-                  <label>Senha SFTP</label>
-                  <input type="password" placeholder="Deixe vazio para manter a senha atual" value={settingsForm.sftp_password} onChange={(e) => setSettingsForm((state) => ({ ...state, sftp_password: e.target.value }))} />
+                  <label>SFTP usuario</label>
+                  <input type="text" value={settingsForm.sftp_username} onChange={(e) => setSettingsForm((state) => ({ ...state, sftp_username: e.target.value }))} />
                 </div>
                 <div className="field">
-                  <label>Destino remoto</label>
+                  <label>SFTP senha</label>
+                  <input type="password" placeholder={sftpSettings.username ? "Deixe vazio para manter" : "Informe a senha"} value={settingsForm.sftp_password} onChange={(e) => setSettingsForm((state) => ({ ...state, sftp_password: e.target.value }))} />
+                </div>
+                <div className="field">
+                  <label>Pasta remota</label>
                   <input type="text" value={settingsForm.sftp_remote_path} onChange={(e) => setSettingsForm((state) => ({ ...state, sftp_remote_path: e.target.value }))} />
-                  <small>Ex: /home/usuario/zeropreco.com.br/public_html</small>
-                </div>
-                <div className="field">
-                  <label>Base publica dos stories</label>
-                  <input type="text" value={settingsForm.stories_public_base_url} onChange={(e) => setSettingsForm((state) => ({ ...state, stories_public_base_url: e.target.value }))} />
-                  <small>Ex: https://zeropreco.com.br/stories</small>
                 </div>
               </div>
 
-              <div className="deploy-summary">
-                <div className={`status-card ${sftpSettings.enabled ? "is-success" : "is-error"}`}>
-                  <div className="status-card-head">
-                    <h4>SFTP atual</h4>
-                    <span className={`badge ${sftpSettings.enabled ? "is-success" : "is-warning"}`}>{sftpSettings.enabled ? "Pronto" : "Incompleto"}</span>
-                  </div>
-                  <p>Host: {sftpSettings.host || "-"}</p>
-                  <p>Porta: {sftpSettings.port || 22}</p>
-                  <p>Usuario: {sftpSettings.username || "-"}</p>
-                  <p>Destino: {sftpSettings.remote_path || "-"}</p>
-                  <p>Stories: {sftpSettings.stories_public_base_url || "-"}</p>
-                </div>
-                <div className="status-card">
-                  <div className="status-card-head">
-                    <h4>Acoes de deploy</h4>
-                    <span className="badge is-neutral">Backend Python</span>
-                  </div>
-                  <p>Atualizar stories envia `public_html/stories`. Atualizar pagina envia todo `public_html` para o DreamHost.</p>
-                  <div className="provider-actions">
-                    <button className="button is-secondary" onClick={handleDeployStories} disabled={runLoading.deployStories}>
-                      {runLoading.deployStories ? "Enviando stories..." : "Atualizar stories"}
-                    </button>
-                    <button className="button is-primary" onClick={handleDeploySite} disabled={runLoading.deploySite}>
-                      {runLoading.deploySite ? "Atualizando pagina..." : "Atualizar pagina"}
-                    </button>
-                  </div>
-                </div>
+              <div className="field" style={{ marginTop: 12 }}>
+                <label>Base publica dos stories</label>
+                <input type="text" value={settingsForm.stories_public_base_url} onChange={(e) => setSettingsForm((state) => ({ ...state, stories_public_base_url: e.target.value }))} />
               </div>
             </div>
           </section>
+            </>
+          ) : null}
 
-          <div className="content-grid">
-            <div className="stack">
-              <section className="panel">
-                <MultiLineChart title="Linha operacional" subtitle="Importacoes, social e itens processados nos ultimos 14 dias." rows={charts.runs_by_day || []} />
-              </section>
-              <section className="panel" id="analytics">
+          {activeSection === "analytics" ? (
+          <div className="content-grid" style={{ marginBottom: 18 }}>
+            <section className="panel" id="analytics">
                 <div className="panel-head">
                   <div>
                     <h3 className="panel-title">Produtos mais clicados</h3>
-                    <p className="panel-subtitle">Baseado na tabela de cliques do site publico.</p>
+                <p className="panel-subtitle">Baseado na tabela de cliques do site público.</p>
                   </div>
                 </div>
                 {!snapshot?.top_clicked?.length ? <div className="empty-state">Sem cliques suficientes para ranking.</div> : (
@@ -1181,8 +1249,7 @@ function App() {
                     ))}
                   </div>
                 )}
-              </section>
-            </div>
+            </section>
 
             <div className="stack">
               <section className="panel">
@@ -1196,15 +1263,17 @@ function App() {
               </section>
             </div>
           </div>
+          ) : null}
 
+          {activeSection === "importadores" ? (
           <section className="panel" id="importadores" style={{ marginTop: 18 }}>
             <div className="panel-head">
               <div>
                 <h3 className="panel-title">Importadores afiliados</h3>
-                <p className="panel-subtitle">Execute preview, importacao real e acompanhe o estado dos conectores.</p>
+                <p className="panel-subtitle">Execute prévia, importação real e acompanhe o estado dos conectores.</p>
               </div>
               <div className="provider-actions">
-                <button className="button is-primary" onClick={handleImportRun} disabled={runLoading.import || !importForm.providers.length}>{runLoading.import ? "Rodando importacao..." : "Rodar importacao"}</button>
+                <button className="button is-primary" onClick={handleImportRun} disabled={runLoading.import || !importForm.providers.length}>{runLoading.import ? "Rodando importação..." : "Rodar importação"}</button>
               </div>
             </div>
 
@@ -1284,6 +1353,141 @@ function App() {
               </div>
 
               <div className="deploy-divider">
+                <span>Importacao por pagina</span>
+              </div>
+
+              <div className="field-grid" style={{ marginTop: 12 }}>
+                <div className="field">
+                  <label>Marketplace da pagina</label>
+                  <select value={manualPageForm.provider} onChange={(e) => setManualPageForm((current) => ({ ...current, provider: e.target.value }))}>
+                    <option value="mercadolivre">Mercado Livre</option>
+                    <option value="amazon">Amazon Experimental</option>
+                  </select>
+                </div>
+                <div className="field" style={{ gridColumn: "span 2" }}>
+                  <label>URL da pagina</label>
+                  <input
+                    type="text"
+                    value={manualPageForm.url}
+                    onChange={(e) => setManualPageForm((current) => ({ ...current, url: e.target.value }))}
+                    placeholder={manualPageForm.provider === "amazon" ? "Cole uma pagina de vitrine/lista da Amazon" : "Cole uma pagina de categoria/lista do Mercado Livre com links afiliados"}
+                  />
+                  <small>
+                    {manualPageForm.provider === "amazon"
+                      ? "Modo experimental. O sistema tenta extrair links de produto e aplicar o tag da URL/env. Se a Amazon bloquear, o preview falha com erro claro."
+                      : "Use pagina de categoria, busca ou vitrine do painel de afiliados. O sistema tenta preservar o `wid` afiliado vindo da listagem."}
+                  </small>
+                </div>
+                <div className="field">
+                  <label>Limite de itens</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="30"
+                    value={manualPageForm.limit}
+                    onChange={(e) => setManualPageForm((current) => ({ ...current, limit: Number(e.target.value || 1) }))}
+                  />
+                </div>
+              </div>
+              <div className="provider-actions" style={{ marginTop: 16 }}>
+                <button className="button is-secondary" onClick={handleManualPagePreview} disabled={manualPageLoading}>
+                  {manualPageLoading ? "Lendo pagina..." : manualPageForm.provider === "amazon" ? "Analisar pagina Amazon" : "Analisar pagina ML"}
+                </button>
+                <button className="button is-primary" onClick={handleManualPageImport} disabled={runLoading.manualLinks}>
+                  {runLoading.manualLinks ? "Importando pagina..." : "Importar pagina"}
+                </button>
+              </div>
+              <div style={{ marginTop: 18 }}>
+                {!manualPagePreview?.items?.length ? (
+                  <div className="empty-state">Nenhuma pagina analisada ainda.</div>
+                ) : (
+                  <div className="preview-grid">
+                    {manualPagePreview.items.map((item, index) => (
+                      <div className="surface" key={`${item.item_id || item.url || item.title}-${index}`}>
+                        <div className="panel-head" style={{ marginBottom: 12 }}>
+                          <div>
+                            <h4>{item.store || item.provider || "Mercado Livre"}</h4>
+                            <p>{item.item_id ? `wid detectado: ${item.item_id}` : "wid nao detectado"}</p>
+                          </div>
+                          <label className="check-chip">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(item.selected)}
+                              onChange={(e) => setManualPagePreview((current) => {
+                                if (!current?.items?.length) return current;
+                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, selected: e.target.checked } : entry);
+                                return { ...current, items };
+                              })}
+                            />
+                            Importar
+                          </label>
+                        </div>
+                        <div className="field-grid">
+                          <div className="field" style={{ gridColumn: "1 / -1" }}>
+                            <label>Titulo</label>
+                            <input
+                              type="text"
+                              value={item.title || ""}
+                              onChange={(e) => setManualPagePreview((current) => {
+                                if (!current?.items?.length) return current;
+                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, title: e.target.value } : entry);
+                                return { ...current, items };
+                              })}
+                            />
+                          </div>
+                        </div>
+                        <div className="field-grid" style={{ marginTop: 12 }}>
+                          <div className="field">
+                            <label>Preco</label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={item.price ?? 0}
+                              onChange={(e) => setManualPagePreview((current) => {
+                                if (!current?.items?.length) return current;
+                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, price: e.target.value } : entry);
+                                return { ...current, items };
+                              })}
+                            />
+                          </div>
+                          <div className="field">
+                            <label>Categoria</label>
+                            <input
+                              type="text"
+                              value={item.category || ""}
+                              onChange={(e) => setManualPagePreview((current) => {
+                                if (!current?.items?.length) return current;
+                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, category: e.target.value } : entry);
+                                return { ...current, items };
+                              })}
+                            />
+                          </div>
+                          <div className="field">
+                            <label>Cupom</label>
+                            <input
+                              type="text"
+                              value={item.coupon || ""}
+                              onChange={(e) => setManualPagePreview((current) => {
+                                if (!current?.items?.length) return current;
+                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, coupon: e.target.value } : entry);
+                                return { ...current, items };
+                              })}
+                            />
+                          </div>
+                        </div>
+                        <div className="offer-meta" style={{ marginTop: 12 }}>
+                          {item.canonical_url ? <a className="tiny-button is-soft" href={item.canonical_url} target="_blank" rel="noreferrer">Abrir produto</a> : null}
+                          {item.image ? <a className="tiny-button is-soft" href={item.image} target="_blank" rel="noreferrer">Abrir imagem</a> : null}
+                          {item.item_id ? <span className="meta-chip">wid ok</span> : null}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="deploy-divider">
                 <span>Importacao por arquivo</span>
               </div>
 
@@ -1294,17 +1498,20 @@ function App() {
                     <option value="shopee">Shopee CSV</option>
                     <option value="mercadolivre">Mercado Livre TXT</option>
                     <option value="amazon">Amazon TXT</option>
+                    <option value="amazon_html">Amazon HTML salvo</option>
                   </select>
                 </div>
                 <div className="field" style={{ gridColumn: "span 2" }}>
                   <label>Arquivo exportado</label>
                   <input
                     type="file"
-                    accept={fileImportProvider === "shopee" ? ".csv,text/csv" : ".txt,text/plain"}
+                    accept={fileImportProvider === "shopee" ? ".csv,text/csv" : fileImportProvider === "amazon_html" ? ".html,.htm,text/html" : ".txt,text/plain"}
                     onChange={(e) => setFileImportFile(e.target.files?.[0] || null)}
                   />
                   <small>
-                    {fileImportProvider === "amazon"
+                    {fileImportProvider === "amazon_html"
+                      ? "Salve a vitrine da Amazon no navegador como HTML e envie esse arquivo. O sistema tenta extrair os links de produto do HTML salvo sem depender da leitura direta da URL."
+                      : fileImportProvider === "amazon"
                       ? "Use um TXT com um link da Amazon por linha. Links encurtados amzn.to sao aceitos e recomendados. Evite dois links na mesma linha para ter o preview mais estavel."
                       : fileImportProvider === "mercadolivre"
                         ? "Use um TXT com um link do Mercado Livre por linha. Links completos do produto e links com rastreio de afiliado sao aceitos."
@@ -1388,6 +1595,18 @@ function App() {
                               onChange={(e) => setFileImportPreview((current) => {
                                 if (!current?.items?.length) return current;
                                 const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, category: e.target.value } : entry);
+                                return { ...current, items };
+                              })}
+                            />
+                          </div>
+                          <div className="field">
+                            <label>Cupom</label>
+                            <input
+                              type="text"
+                              value={item.coupon || ""}
+                              onChange={(e) => setFileImportPreview((current) => {
+                                if (!current?.items?.length) return current;
+                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, coupon: e.target.value } : entry);
                                 return { ...current, items };
                               })}
                             />
@@ -1484,6 +1703,10 @@ function App() {
                             <label>Categoria</label>
                             <input type="text" value={item.category || ""} onChange={(e) => updateManualPreviewItem(index, "category", e.target.value)} />
                           </div>
+                          <div className="field">
+                            <label>Cupom</label>
+                            <input type="text" value={item.coupon || ""} onChange={(e) => updateManualPreviewItem(index, "coupon", e.target.value)} />
+                          </div>
                         </div>
                         <div className="field" style={{ marginTop: 12 }}>
                           <label>Descricao</label>
@@ -1500,12 +1723,14 @@ function App() {
               </div>
             </div>
             </section>
+          ) : null}
 
+          {activeSection === "social" ? (
             <section className="panel" id="social" style={{ marginTop: 18 }}>
               <div className="panel-head">
                 <div>
-                  <h3 className="panel-title">Execucao social</h3>
-                  <p className="panel-subtitle">Fila pronta para Facebook e Instagram com selecao manual antes da publicacao.</p>
+                  <h3 className="panel-title">Execução social</h3>
+                  <p className="panel-subtitle">Fila pronta para Facebook e Instagram com seleção manual antes da publicação.</p>
                 </div>
                 <div className="provider-actions">
                   <button className="button is-secondary" onClick={() => loadSocialPreview(Number(socialForm.limit))} disabled={socialLoading}>
@@ -1520,12 +1745,37 @@ function App() {
                 </div>
               </div>
 
-              <div className="field-grid" style={{ marginTop: 12 }}>
+              <div className="field-grid social-filter-grid" style={{ marginTop: 12 }}>
                 <div className="field">
                   <label>Canal selecionado</label>
                   <select value={socialForm.selected} onChange={(e) => setSocialForm((state) => ({ ...state, selected: e.target.value }))}>
                     {SOCIAL_OPTIONS.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
                   </select>
+                </div>
+                <div className="field social-search-field">
+                  <label>Pesquisa de produto</label>
+                  <div className="social-search-row">
+                    <input
+                      type="text"
+                      value={socialForm.query}
+                      placeholder="Buscar por titulo, slug, loja ou categoria"
+                      onChange={(e) => setSocialForm((state) => ({ ...state, query: e.target.value }))}
+                    />
+                    <button className="tiny-button" onClick={() => loadSocialPreview(socialForm.limit, socialForm.query)} disabled={socialLoading}>
+                      Buscar
+                    </button>
+                  </div>
+                </div>
+                <div className="field">
+                  <label>Itens carregados</label>
+                  <input
+                    type="number"
+                    min="36"
+                    max="200"
+                    step="12"
+                    value={socialForm.limit}
+                    onChange={(e) => setSocialForm((state) => ({ ...state, limit: Number(e.target.value || 120) }))}
+                  />
                 </div>
                 <div className="field">
                   <label>Loja</label>
@@ -1546,47 +1796,48 @@ function App() {
               <div className="inline-stat" style={{ marginTop: 16 }}>
                 <span className="meta-chip">{fmtInt(socialCheckedIds.length)} selecionada(s)</span>
                 <span className="meta-chip">{fmtInt(socialQueue.length)} visivel(is)</span>
+                <span className="meta-chip">{fmtInt(socialCandidates.length)} carregada(s)</span>
+                {socialPreview?.database?.ok === false ? <span className="meta-chip">Banco indisponivel</span> : null}
               </div>
 
               <div style={{ marginTop: 18 }}>
                 {!socialQueue.length ? (
-                  <div className="empty-state">Sem preview social carregado.</div>
+                  <div className="empty-state">Sem produto para essa busca/filtro.</div>
                 ) : (
-                  <div className="preview-grid">
-                    {socialQueue.slice(0, 12).map((item) => (
-                      <div className="surface" key={item.offer_id}>
-                        <div className="panel-head" style={{ marginBottom: 12 }}>
-                          <div>
-                            <h4>{item.title}</h4>
-                            <p>{item.store} · {item.category || "Geral"}</p>
-                          </div>
-                          <label className="check-chip">
-                            <input
-                              type="checkbox"
-                              checked={socialCheckedIds.includes(item.offer_id)}
-                              onChange={() => toggleSocialSelection(item.offer_id)}
-                            />
-                            Selecionar
-                          </label>
+                  <div className="social-queue-list">
+                    {socialQueue.map((item) => (
+                      <div className="surface social-queue-item" key={item.offer_id}>
+                        <label className="check-chip social-check-cell">
+                          <input
+                            type="checkbox"
+                            checked={socialCheckedIds.includes(item.offer_id)}
+                            onChange={() => toggleSocialSelection(item.offer_id)}
+                          />
+                          <span>Selecionar</span>
+                        </label>
+                        <div className="social-thumb-wrap">
+                          {item.image_url ? <img className="offer-thumb social-offer-thumb" src={item.image_url} alt={item.title} loading="lazy" /> : <div className="offer-thumb social-offer-thumb" />}
                         </div>
-                        <div className="offer-meta" style={{ marginTop: 12 }}>
-                          <span className="meta-chip">{fmtMoney(item.price)}</span>
-                          <span className="meta-chip">{fmtInt(item.clicks || 0)} cliques</span>
-                          {item.slug ? <span className="meta-chip">{item.slug}</span> : null}
-                        </div>
-                        <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
-                          <div>
-                            <strong>Facebook</strong>
-                            <p style={{ marginTop: 6 }}>{item.facebook_text || item.facebook_payload?.message || item.caption || "Preview indisponivel."}</p>
+                        <div className="social-main-cell">
+                          <div className="social-item-title-row">
+                            <strong>{truncateText(item.title, 110)}</strong>
                           </div>
-                          <div>
-                            <strong>Instagram</strong>
-                            <p style={{ marginTop: 6 }}>{item.instagram_text || item.instagram_payload?.caption || item.caption || "Preview indisponivel."}</p>
+                          <div className="social-item-subtitle">{item.store || "Loja"} | {item.category || "Geral"}</div>
+                          <div className="offer-meta">
+                            <span className="meta-chip">{fmtMoney(item.price)}</span>
+                            <span className="meta-chip">{fmtInt(item.clicks || 0)} cliques</span>
+                            {item.old_price ? <span className="meta-chip">de {fmtMoney(item.old_price)}</span> : null}
+                            {item.coupon ? <span className="meta-chip">cupom: {item.coupon}</span> : null}
                           </div>
+                          {item.coupon ? <div className="social-item-subtitle">Cupom disponivel: <strong>{item.coupon}</strong></div> : null}
                         </div>
-                        <div className="provider-actions" style={{ marginTop: 16 }}>
-                          {item.story_art_url ? <a className="tiny-button is-soft" href={item.story_art_url} target="_blank" rel="noreferrer">Abrir arte de story</a> : null}
-                          <button className="tiny-button is-soft" onClick={() => dismissSocialOffer(item.offer_id)}>Trocar por outra</button>
+                        <div className="social-links-cell">
+                          {item.offer_url ? <a className="tiny-button is-soft" href={item.offer_url} target="_blank" rel="noreferrer">Oferta</a> : null}
+                          {item.cta_url ? <a className="tiny-button is-soft" href={item.cta_url} target="_blank" rel="noreferrer">Link afiliado</a> : null}
+                          {item.image_url ? <a className="tiny-button is-soft" href={item.image_url} target="_blank" rel="noreferrer">Imagem</a> : null}
+                        </div>
+                        <div className="social-actions-cell">
+                          <button className="tiny-button is-soft" onClick={() => dismissSocialOffer(item.offer_id)}>Ocultar</button>
                         </div>
                       </div>
                     ))}
@@ -1594,16 +1845,18 @@ function App() {
                 )}
               </div>
             </section>
+          ) : null}
 
+          {activeSection === "execucoes" ? (
             <section className="panel" id="execucoes" style={{ marginTop: 18 }}>
               <div className="panel-head">
                 <div>
-                  <h3 className="panel-title">Execucoes recentes</h3>
-                  <p className="panel-subtitle">Historico operacional consolidado do backend Python.</p>
+                  <h3 className="panel-title">Execuções recentes</h3>
+                  <p className="panel-subtitle">Histórico operacional consolidado do backend Python.</p>
                 </div>
               </div>
               {!snapshot?.recent_runs?.length ? (
-                <div className="empty-state">Nenhuma execucao recente registrada.</div>
+                <div className="empty-state">Nenhuma execução recente registrada.</div>
               ) : (
                 <div className="offer-list">
                   {snapshot.recent_runs.map((run) => (
@@ -1623,6 +1876,7 @@ function App() {
                 </div>
               )}
             </section>
+          ) : null}
         </main>
       </div>
       <Toast toast={toast} onClose={() => setToast(null)} />

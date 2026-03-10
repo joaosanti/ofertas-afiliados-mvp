@@ -225,7 +225,7 @@ function site_fetch_selection_candidates(PDO $pdo, $limit = 24) {
     WHERE o.ativo = 1
       AND (o.expira_em IS NULL OR o.expira_em > NOW())
     GROUP BY o.id
-    ORDER BY home_score DESC, o.atualizado_em DESC, o.criado_em DESC
+    ORDER BY o.destaque DESC, home_score DESC, o.atualizado_em DESC, o.criado_em DESC
     LIMIT {$limit}
   ");
 
@@ -262,7 +262,7 @@ function site_fetch_selection_candidates_balanced(PDO $pdo, $perStore = 12, $max
       AND (o.expira_em IS NULL OR o.expira_em > NOW())
       AND o.loja = ?
     GROUP BY o.id
-    ORDER BY home_score DESC, o.atualizado_em DESC, o.criado_em DESC
+    ORDER BY o.destaque DESC, home_score DESC, o.atualizado_em DESC, o.criado_em DESC
     LIMIT {$perStore}
   ");
 

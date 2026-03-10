@@ -105,6 +105,7 @@ if ($shareImage === '') {
   <meta name="twitter:title" content="<?= h($shareTitle) ?>">
   <meta name="twitter:description" content="<?= h($shareDescription) ?>">
   <meta name="twitter:image" content="<?= h($shareImage) ?>">
+  <link rel="icon" type="image/png" href="/assets/img/logo-zp.png">
   <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-8314124298799437" crossorigin="anonymous"></script>
   <?php require __DIR__ . '/inc/site_head_analytics.php'; ?>
   <link rel="stylesheet" href="/assets/css/style.css">
@@ -253,3 +254,5 @@ if ($shareImage === '') {
   <?php require __DIR__ . '/inc/site_footer_scripts.php'; ?>
 </body>
 </html>
+
+

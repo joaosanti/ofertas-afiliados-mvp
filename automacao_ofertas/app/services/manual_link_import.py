@@ -1,4 +1,5 @@
 import re
+import time
 from collections import Counter
 from html import unescape
 from typing import Any
@@ -157,6 +158,21 @@ def _detect_affiliate(url: str) -> tuple[bool, str | None]:
 
 
 def _extract_generic_offer(provider: str, source_url: str, final_url: str, html_text: str) -> dict[str, Any]:
+    if provider == "mercadolivre":
+        final_lower = (final_url or "").lower()
+        html_lower = (html_text or "").lower()
+        blocked_markers = (
+            "registrationtype=negative_traffic",
+            "negative_traffic",
+            "account-verification-main",
+            "mercadolivre.com/jms/mlb/lgz/login",
+            "mercadolivre.com.br/registration",
+            "\"error\":\"forbidden\"",
+            "\"message\":\"forbidden\"",
+        )
+        if any(marker in final_lower or marker in html_lower for marker in blocked_markers):
+            raise ValueError("Mercado Livre bloqueou temporariamente a leitura desta pagina/link. Tente novamente mais tarde.")
+
     title = _extract_first(
         html_text,
         [
@@ -276,6 +292,10 @@ def _extract_generic_offer(provider: str, source_url: str, final_url: str, html_
                 higher_prices = [value for value in visible_prices if value > price]
                 if higher_prices:
                     old_price = higher_prices[0]
+    if provider == "mercadolivre":
+        normalized_title = (title or "").strip().lower()
+        if normalized_title in {"mercado livre", "mercadolivre"} or price <= 0:
+            raise ValueError("Mercado Livre nao retornou os dados do produto. Isso normalmente acontece quando a pagina foi bloqueada temporariamente.")
     affiliate_detected, affiliate_code = _detect_affiliate(final_url or source_url)
 
     return {
@@ -317,17 +337,21 @@ def _fetch_html_with_fallback(link: str) -> tuple[str, str]:
 def _fetch_best_html_for_provider(link: str, provider: str) -> tuple[str, str]:
     headers_order = (_crawler_headers(), _browser_headers()) if provider in {"amazon", "shopee"} else (_browser_headers(), _crawler_headers())
     last_error: Exception | None = None
-    for headers in headers_order:
-        try:
-            with httpx.Client(timeout=25, headers=headers, follow_redirects=True) as client:
-                response = client.get(link)
-                response.raise_for_status()
-                content_type = (response.headers.get("content-type") or "").lower()
-                if "text/html" not in content_type and "application/xhtml" not in content_type and not _looks_like_html(response.text):
-                    raise ValueError("O link retornou um formato inesperado.")
-                return str(response.url), response.text
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
+    attempts = 2 if provider == "mercadolivre" else 1
+    for attempt in range(attempts):
+        for headers in headers_order:
+            try:
+                with httpx.Client(timeout=25, headers=headers, follow_redirects=True) as client:
+                    response = client.get(link)
+                    response.raise_for_status()
+                    content_type = (response.headers.get("content-type") or "").lower()
+                    if "text/html" not in content_type and "application/xhtml" not in content_type and not _looks_like_html(response.text):
+                        raise ValueError("O link retornou um formato inesperado.")
+                    return str(response.url), response.text
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+        if provider == "mercadolivre" and attempt + 1 < attempts:
+            time.sleep(2)
     if last_error is not None:
         raise last_error
     raise ValueError("Falha ao abrir o link informado.")

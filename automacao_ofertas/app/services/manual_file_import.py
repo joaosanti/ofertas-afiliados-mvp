@@ -114,6 +114,7 @@ def preview_shopee_csv_file(content: bytes, filename: str = "") -> list[dict[str
         sales_label = _parse_sales_label(row.get("Sales"))
         commission_rate = _normalize_text(row.get("Commission Rate"))
         commission_value = _normalize_text(row.get("Commission"))
+        coupon = _normalize_text(row.get("Coupon")) or _normalize_text(row.get("coupon")) or _normalize_text(row.get("Voucher")) or _normalize_text(row.get("voucher"))
         offer_link = _normalize_text(row.get("Offer Link"))
         product_link = _normalize_text(row.get("Product Link"))
         category = infer_category_label(
@@ -160,6 +161,7 @@ def preview_shopee_csv_file(content: bytes, filename: str = "") -> list[dict[str
                 "category": category,
                 "tags": tags,
                 "featured": 0,
+                "coupon": coupon or None,
                 "affiliate_detected": bool(offer_link),
                 "affiliate_code": affiliate_code or None,
                 "selected": True,

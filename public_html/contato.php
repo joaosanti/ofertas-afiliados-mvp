@@ -1,5 +1,8 @@
 <?php
 require_once __DIR__ . '/inc/site.php';
+$siteLogoWebPath = '/assets/img/logo-zp.png';
+$siteLogoFilePath = __DIR__ . '/assets/img/logo-zp.png';
+$siteHasLogo = is_file($siteLogoFilePath);
 ?>
 <!doctype html>
 <html lang="pt-br">
@@ -23,7 +26,13 @@ require_once __DIR__ . '/inc/site.php';
     <div class="container">
       <div class="main-nav">
         <a class="brand" href="/">
-          <span class="brand-badge">ZP</span>
+          <?php if ($siteHasLogo): ?>
+            <span class="brand-media">
+              <img class="brand-logo" src="<?= h($siteLogoWebPath) ?>" alt="Zero PreÃ§o">
+            </span>
+          <?php else: ?>
+            <span class="brand-badge">ZP</span>
+          <?php endif; ?>
           <span class="brand-copy">
             <strong>Zero Preço</strong>
             <span>Achados reais, sem enrolação</span>

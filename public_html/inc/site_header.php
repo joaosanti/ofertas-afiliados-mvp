@@ -3,6 +3,9 @@ $siteHeaderCurrent = $siteHeaderCurrent ?? '';
 $siteHeaderSearchValue = $siteHeaderSearchValue ?? '';
 $siteHeaderSearchPlaceholder = $siteHeaderSearchPlaceholder ?? 'Buscar produto';
 $siteHeaderMenuCategories = $siteHeaderMenuCategories ?? null;
+$siteHeaderLogoWebPath = '/assets/img/logo-zp.png';
+$siteHeaderLogoFilePath = __DIR__ . '/../assets/img/logo-zp.png';
+$siteHeaderHasLogo = is_file($siteHeaderLogoFilePath);
 
 if ($siteHeaderMenuCategories === null) {
     $siteHeaderPdo = isset($pdo) && $pdo instanceof PDO ? $pdo : db();
@@ -25,7 +28,13 @@ $siteHeaderNavItems = [
   <div class="container">
     <div class="header-brand-row">
       <a class="brand brand-mark-only" href="/" aria-label="Zero Preço">
-        <span class="brand-badge">ZP</span>
+        <?php if ($siteHeaderHasLogo): ?>
+          <span class="brand-media">
+            <img class="brand-logo" src="<?= h($siteHeaderLogoWebPath) ?>" alt="Zero PreÃ§o">
+          </span>
+        <?php else: ?>
+          <span class="brand-badge">ZP</span>
+        <?php endif; ?>
       </a>
 
       <form class="header-search-form header-search-form-mobile search-box-form" action="/busca.php" method="get" autocomplete="off">

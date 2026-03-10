@@ -1,5 +1,6 @@
 ﻿import csv
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,46 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _clean_coupon_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"\s+", " ", text).strip(" -:")
+    if len(text) < 3:
+        return None
+    return text[:80]
+
+
+def _extract_coupon_from_payload(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            key_normalized = str(key or "").strip().lower()
+            if "coupon" in key_normalized or "cupom" in key_normalized:
+                if isinstance(value, str):
+                    cleaned = _clean_coupon_text(value)
+                    if cleaned:
+                        return cleaned
+                if isinstance(value, (list, tuple)):
+                    for entry in value:
+                        cleaned = _clean_coupon_text(entry)
+                        if cleaned:
+                            return cleaned
+                if isinstance(value, dict):
+                    nested = _extract_coupon_from_payload(value)
+                    if nested:
+                        return nested
+            if isinstance(value, (dict, list, tuple)):
+                nested = _extract_coupon_from_payload(value)
+                if nested:
+                    return nested
+    elif isinstance(payload, (list, tuple)):
+        for entry in payload:
+            nested = _extract_coupon_from_payload(entry)
+            if nested:
+                return nested
+    return None
 
 
 def _write_env_updates(updates: dict[str, str]) -> None:
@@ -265,6 +306,7 @@ def _fetch_public_search_offers(client: httpx.Client) -> list[dict[str, Any]]:
                         "tags": _tags_with_metadata(f"mercadolivre,{term}", item.get("sold_quantity")),
                         "featured": 0,
                         "sold_quantity": int(item.get("sold_quantity") or 0),
+                        "coupon": _extract_coupon_from_payload(item),
                         "item_id": item.get("id"),
                         "product_id": item.get("catalog_product_id"),
                         "affiliate_tag": affiliate_tag,
@@ -309,6 +351,7 @@ def preview_mercadolivre_offers(keyword: str, limit: int = 10, pages: int = 1) -
                         "tags": _tags_with_metadata(f"mercadolivre,{keyword}", item.get("sold_quantity")),
                         "featured": 0,
                         "sold_quantity": int(item.get("sold_quantity") or 0),
+                        "coupon": _extract_coupon_from_payload(item),
                         "item_id": item.get("id"),
                         "product_id": item.get("catalog_product_id"),
                         "affiliate_tag": affiliate_tag,
@@ -363,6 +406,7 @@ def _fetch_authorized_seller_offers(client: httpx.Client, access_token: str) -> 
                 "tags": _tags_with_metadata("mercadolivre,auth", item.get("sold_quantity")),
                 "featured": 0,
                 "sold_quantity": int(item.get("sold_quantity") or 0),
+                "coupon": _extract_coupon_from_payload(item),
                 "item_id": item.get("id"),
                 "product_id": item.get("catalog_product_id"),
                 "affiliate_tag": affiliate_tag,

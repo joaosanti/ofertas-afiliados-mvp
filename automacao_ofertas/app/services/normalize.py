@@ -1,5 +1,5 @@
 import os
-from urllib.parse import quote_plus, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse, urlunparse
 
 from app.schemas import NormalizedOffer
 
@@ -32,7 +32,9 @@ def ensure_affiliate_link(url: str, store: str, tag: str | None = None, item_id:
     if not tag:
         return url
 
-    if store.strip().lower() == "mercado livre":
+    normalized_store = store.strip().lower()
+
+    if normalized_store == "mercado livre":
         template = os.getenv("MERCADOLIVRE_AFFILIATE_URL_TEMPLATE", "").strip()
         if template:
             return (
@@ -53,6 +55,12 @@ def ensure_affiliate_link(url: str, store: str, tag: str | None = None, item_id:
             return urlunparse(parsed._replace(query=query, fragment=fragment))
 
         return url
+
+    if normalized_store == "amazon":
+        parsed = urlparse(url)
+        query_items = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key.lower() != "tag"]
+        query_items.append(("tag", tag))
+        return urlunparse(parsed._replace(query=urlencode(query_items), fragment=""))
 
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}aff={tag}"

@@ -79,6 +79,46 @@ def _extract_all(content: str, patterns: list[str]) -> list[str]:
     return [value for value in values if value]
 
 
+def _clean_coupon_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"\s+", " ", text).strip(" -:")
+    if len(text) < 3:
+        return None
+    return text[:80]
+
+
+def _extract_coupon_from_payload(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            key_normalized = str(key or "").strip().lower()
+            if any(token in key_normalized for token in ("coupon", "cupom", "voucher")):
+                if isinstance(value, str):
+                    cleaned = _clean_coupon_text(value)
+                    if cleaned:
+                        return cleaned
+                if isinstance(value, (list, tuple)):
+                    for entry in value:
+                        cleaned = _clean_coupon_text(entry)
+                        if cleaned:
+                            return cleaned
+                if isinstance(value, dict):
+                    nested = _extract_coupon_from_payload(value)
+                    if nested:
+                        return nested
+            if isinstance(value, (dict, list, tuple)):
+                nested = _extract_coupon_from_payload(value)
+                if nested:
+                    return nested
+    elif isinstance(payload, (list, tuple)):
+        for entry in payload:
+            nested = _extract_coupon_from_payload(entry)
+            if nested:
+                return nested
+    return None
+
+
 def _shopee_credentials() -> tuple[str, str]:
     credential = (
         os.getenv("SHOPEE_API_KEY", "").strip()
@@ -197,6 +237,17 @@ def _manual_offer_from_html(source_url: str, final_url: str, html_text: str) -> 
             r'"priceBeforeDiscount"\s*:\s*"?(\\?[\d\.,]+)"?',
         ],
     )
+    coupon_text = _extract_first(
+        html_text,
+        [
+            r'"voucher_code"\s*:\s*"([^"]+)"',
+            r'"coupon_code"\s*:\s*"([^"]+)"',
+            r'"voucherCode"\s*:\s*"([^"]+)"',
+            r'"couponCode"\s*:\s*"([^"]+)"',
+            r'Cupom[:\s]+([A-Z0-9_-]{3,})',
+            r'Voucher[:\s]+([A-Z0-9_-]{3,})',
+        ],
+    )
 
     final_host = (urlparse(final_url).netloc or "").lower()
     if "shopee" not in final_host:
@@ -238,6 +289,7 @@ def _manual_offer_from_html(source_url: str, final_url: str, html_text: str) -> 
         "category": infer_category_label(title, description, source_url, final_url),
         "tags": "shopee,manual",
         "featured": 0,
+        "coupon": _clean_coupon_text(coupon_text),
         "affiliate_tag": os.getenv("SHOPEE_AFFILIATE_TAG", "").strip(),
     }
 
@@ -294,6 +346,7 @@ def _fetch_feed_offers() -> list[dict[str, Any]]:
                 "category": item.get("category") or infer_category_label(item.get("title"), item.get("description"), item.get("url")),
                 "tags": item.get("tags", "shopee"),
                 "featured": int(item.get("featured", 0)),
+                "coupon": _extract_coupon_from_payload(item),
                 "affiliate_tag": affiliate_tag,
             }
         )
@@ -355,6 +408,7 @@ def _node_to_offer(node: dict[str, Any], keyword: str, affiliate_tag: str) -> di
         "category": category,
         "tags": ",".join(dict.fromkeys(tags)),
         "featured": 0,
+        "coupon": _extract_coupon_from_payload(node),
         "affiliate_tag": affiliate_tag,
         "product_id": str(node.get("productId") or "") or None,
         "shop_id": str(node.get("shopId") or "") or None,

@@ -10,7 +10,7 @@ import httpx
 import imageio.v2 as imageio
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from app.services.sftp_deploy import ensure_stories_dir, story_public_url
 
@@ -41,11 +41,50 @@ SELECT_TOP_OFFERS_SQL = text(
       AND (o.expira_em IS NULL OR o.expira_em > NOW())
       AND o.imagem_url IS NOT NULL
       AND o.imagem_url <> ''
+      AND (
+        :search_query = ''
+        OR o.titulo LIKE :search_like
+        OR o.slug LIKE :search_like
+        OR o.loja LIKE :search_like
+        OR o.categoria LIKE :search_like
+      )
     GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.categoria, o.tags, o.destaque, o.atualizado_em
     ORDER BY clicks DESC, o.destaque DESC, o.atualizado_em DESC, o.preco ASC
     LIMIT :limit
     """
 )
+
+SELECT_OFFERS_BY_IDS_SQL = text(
+    """
+    SELECT
+      o.id,
+      o.slug,
+      o.titulo,
+      o.descricao,
+      o.preco,
+      o.preco_antigo,
+      o.loja,
+      o.url_afiliado,
+      o.cupom,
+      o.imagem_url,
+      o.categoria,
+      o.tags,
+      o.destaque,
+      o.atualizado_em,
+      COUNT(c.id) AS clicks
+    FROM ofertas o
+    LEFT JOIN cliques c
+      ON c.oferta_id = o.id
+      AND c.criado_em >= NOW() - INTERVAL 30 DAY
+    WHERE o.ativo = 1
+      AND (o.expira_em IS NULL OR o.expira_em > NOW())
+      AND o.imagem_url IS NOT NULL
+      AND o.imagem_url <> ''
+      AND o.id IN :offer_ids
+    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.categoria, o.tags, o.destaque, o.atualizado_em
+    ORDER BY clicks DESC, o.destaque DESC, o.atualizado_em DESC, o.preco ASC
+    """
+).bindparams(bindparam("offer_ids", expanding=True))
 
 CATEGORY_LABELS = {
     "mlb1055": "Celulares e Smartphones",
@@ -159,6 +198,10 @@ def _diversify_offer_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[s
     selected_ids: set[int] = set()
     seen_stores: set[str] = set()
     seen_categories: set[str] = set()
+    preferred_store_targets = {
+        _normalize_key("Amazon"): 2 if limit >= 6 else 1,
+        _normalize_key("Shopee"): 2 if limit >= 6 else 1,
+    }
 
     def include(row: dict[str, Any]) -> None:
         offer_id = int(row["id"])
@@ -177,6 +220,18 @@ def _diversify_offer_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[s
             grouped_by_store[store_key] = []
             store_order.append(store_key)
         grouped_by_store[store_key].append(row)
+
+    # Guarantee minimum presence for Amazon and Shopee when inventory exists.
+    for store_key, target in preferred_store_targets.items():
+        bucket = grouped_by_store.get(store_key) or []
+        picked = 0
+        while bucket and picked < target and len(selected) < limit:
+            while bucket and int(bucket[0]["id"]) in selected_ids:
+                bucket.pop(0)
+            if not bucket:
+                break
+            include(bucket.pop(0))
+            picked += 1
 
     # First round: bring one strong offer from each store before repeating.
     while len(selected) < limit:
@@ -265,6 +320,8 @@ def _caption_for_offer(offer: dict[str, Any]) -> str:
     category = _category_label(offer["categoria"])
     discount = _discount_percent(offer["preco"], offer.get("preco_antigo"))
     coupon = (offer.get("cupom") or "").strip()
+    destination_url = _destination_url(offer)
+    has_direct_store_link = bool((offer.get("url_afiliado") or "").strip())
 
     lead = f"{offer['titulo']}\n{price} na {store}"
     details = [f"Categoria: {category}"]
@@ -276,8 +333,8 @@ def _caption_for_offer(offer: dict[str, Any]) -> str:
     lines = [
         lead,
         " | ".join(details),
-        "Veja a oferta completa no Zero Preco.",
-        _offer_url(offer["slug"]),
+        "Abrir direto na loja:" if has_direct_store_link else "Veja o produto no site:",
+        destination_url,
         "",
         "#ofertas #promocao #zeropreco",
     ]
@@ -287,11 +344,16 @@ def _caption_for_offer(offer: dict[str, Any]) -> str:
 def _story_caption_for_offer(offer: dict[str, Any]) -> str:
     store = _store_label(offer["loja"])
     discount = _discount_percent(offer["preco"], offer.get("preco_antigo"))
+    coupon = (offer.get("cupom") or "").strip()
+    destination_url = _destination_url(offer)
+    has_direct_store_link = bool((offer.get("url_afiliado") or "").strip())
     parts = [f"{offer['titulo']}", f"{_money(offer['preco'])} na {store}"]
     if discount > 0:
         parts.append(f"Aprox. {discount}% OFF")
-    parts.append("Me envie uma mensagem que mando o link.")
-    parts.append("zeropreco.com.br")
+    if coupon:
+        parts.append(f"Cupom: {coupon}")
+    parts.append("Abrir direto na loja:" if has_direct_store_link else "Ver produto no site:")
+    parts.append(destination_url)
     return "\n".join(parts)
 
 
@@ -360,8 +422,10 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
     filename = f"offer-{offer['id']}-{_slugify(offer['slug'])}.jpg"
     destination = ensure_stories_dir() / filename
     destination_url = _destination_url(offer)
-    destination_label = "Me envie uma"
-    destination_label_secondary = "mensagem que mando o link"
+    destination_host = _display_url(destination_url)
+    has_direct_store_link = bool((offer.get("url_afiliado") or "").strip())
+    destination_label = "Abrir na loja" if has_direct_store_link else "Ver no site"
+    destination_label_secondary = "Link direto deste produto" if has_direct_store_link else "Pagina do produto no Zero Preco"
 
     image = Image.new("RGB", (1080, 1920), "#0a2a67")
     draw = ImageDraw.Draw(image)
@@ -417,9 +481,14 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
     draw.text((120, 1392), destination_label, font=cta_font, fill="#0b2d78")
     draw.text((120, 1438), destination_label_secondary, font=cta_small_font, fill="#0b2d78")
 
-    draw.text((80, 1560), "zeropreco.com.br", font=domain_font, fill="#ffffff")
-    draw.text((80, 1616), "Me chame no direct e eu mando o link da oferta.", font=text_font, fill="#dbe7ff")
-    draw.text((80, 1660), "Abra no perfil e siga para a loja parceira.", font=micro_font, fill="#dbe7ff")
+    draw.text((80, 1560), destination_host, font=domain_font, fill="#ffffff")
+    draw.text(
+        (80, 1616),
+        "Siga para a loja parceira." if has_direct_store_link else "Abra a pagina do produto no site.",
+        font=text_font,
+        fill="#dbe7ff",
+    )
+    draw.text((80, 1660), "Use o link publicado junto da oferta.", font=micro_font, fill="#dbe7ff")
 
     coupon_text = (offer.get("cupom") or "").strip()
     if coupon_text:
@@ -485,16 +554,29 @@ def build_meta_post_previews(
     limit: int = 12,
     offer_ids: list[int] | None = None,
     include_story_assets: bool = True,
+    search_query: str | None = None,
 ) -> list[dict[str, Any]]:
     capped_limit = max(1, min(limit, 200))
     fetch_limit = max(capped_limit, len(offer_ids or []), 160)
-    rows = db.execute(SELECT_TOP_OFFERS_SQL, {"limit": fetch_limit}).mappings().all()
+    normalized_query = (search_query or "").strip()
     if offer_ids:
+        rows = db.execute(
+            SELECT_OFFERS_BY_IDS_SQL,
+            {"offer_ids": [int(offer_id) for offer_id in offer_ids]},
+        ).mappings().all()
         selected_map = {int(row["id"]): row for row in rows}
-        ordered_rows = [selected_map[offer_id] for offer_id in offer_ids if int(offer_id) in selected_map]
-        rows = ordered_rows[:capped_limit]
+        rows = [dict(selected_map[offer_id]) for offer_id in offer_ids if int(offer_id) in selected_map][:capped_limit]
     else:
-        rows = _diversify_offer_rows([dict(row) for row in rows], capped_limit)
+        params = {
+            "limit": fetch_limit,
+            "search_query": normalized_query,
+            "search_like": f"%{normalized_query}%",
+        }
+        rows = db.execute(SELECT_TOP_OFFERS_SQL, params).mappings().all()
+        if normalized_query:
+            rows = [dict(row) for row in rows[:capped_limit]]
+        else:
+            rows = _diversify_offer_rows([dict(row) for row in rows], capped_limit)
     previews: list[dict[str, Any]] = []
 
     for row in rows:
@@ -530,7 +612,7 @@ def build_meta_post_previews(
                 "caption": _caption_for_offer(offer),
                 "facebook_payload": {
                     "message": _caption_for_offer(offer),
-                    "link": _offer_url(offer["slug"]),
+                    "link": _destination_url(offer),
                 },
                 "instagram_payload": {
                     "image_url": offer["imagem_url"],
@@ -565,7 +647,7 @@ def publish_facebook_post(message: str, link: str | None = None) -> dict[str, An
 
 
 def publish_facebook_offer_batch(db, limit: int = 5, offer_ids: list[int] | None = None) -> dict[str, Any]:
-    previews = build_meta_post_previews(db, limit=limit, offer_ids=offer_ids)
+    previews = build_meta_post_previews(db, limit=limit, offer_ids=offer_ids, include_story_assets=False)
     if not previews:
         raise ValueError("Nao ha ofertas elegiveis para publicar no Facebook.")
 

@@ -36,6 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Admin - Login</title>
+  <link rel="icon" type="image/png" href="/assets/img/logo-zp.png">
   <link rel="stylesheet" href="/assets/css/style.css">
   <style>
     .panel { max-width: 420px; margin: 40px auto; background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 18px; }
@@ -77,3 +78,5 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </main>
 </body>
 </html>
+
+
