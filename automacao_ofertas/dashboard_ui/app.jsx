@@ -115,8 +115,42 @@ function humanizeImportError(message) {
   return text;
 }
 
+function defaultPreviewSelection(item) {
+  if (item?.import_allowed === false) return false;
+  if (item?.provider === "mercadolivre" && item?.affiliate_detected === false) return false;
+  if (item?.provider === "mercadolivre" && Number(item?.price || 0) <= 0) return false;
+  return true;
+}
+
+function isImportablePreviewItem(item) {
+  return defaultPreviewSelection(item);
+}
+
+function applyPreviewFieldUpdate(item, field, value) {
+  const nextItem = { ...item, [field]: value };
+  if (field === "price" && nextItem?.provider === "mercadolivre") {
+    nextItem.selected = isImportablePreviewItem(nextItem);
+  }
+  return nextItem;
+}
+
+function matchesManualProvider(link, provider) {
+  const value = String(link || "").toLowerCase();
+  if (!provider || provider === "auto") return true;
+  if (provider === "amazon") return value.includes("amazon.") || value.includes("amzn.to");
+  if (provider === "mercadolivre") return value.includes("mercadolivre") || value.includes("mercadolibre");
+  if (provider === "shopee") return value.includes("shopee");
+  if (provider === "tiktok") return value.includes("tiktok");
+  return true;
+}
+
 async function fetchJson(url, options) {
-  const response = await fetch(url, options);
+  let response;
+  try {
+    response = await fetch(url, options);
+  } catch (error) {
+    throw new Error("Nao foi possivel conectar ao backend agora.");
+  }
   const text = await response.text();
   let data = {};
   if (text) {
@@ -276,11 +310,14 @@ function App() {
   const [importPreview, setImportPreview] = useState(null);
   const [manualLinkPreview, setManualLinkPreview] = useState(null);
   const [manualLinkStatus, setManualLinkStatus] = useState(null);
+  const [mlRelinkText, setMlRelinkText] = useState("");
+  const [mlRelinkPreview, setMlRelinkPreview] = useState(null);
   const [socialPreview, setSocialPreview] = useState(null);
   const [socialHiddenIds, setSocialHiddenIds] = useState([]);
   const [socialCheckedIds, setSocialCheckedIds] = useState([]);
   const [importLoading, setImportLoading] = useState(false);
   const [manualLinkLoading, setManualLinkLoading] = useState(false);
+  const [mlRelinkLoading, setMlRelinkLoading] = useState(false);
   const [socialLoading, setSocialLoading] = useState(false);
   const [runLoading, setRunLoading] = useState({ import: false, manualLinks: false, social: false, batch: false, deployStories: false, deploySite: false });
   const [jobRunLoading, setJobRunLoading] = useState({ import: false, social: false, story: false });
@@ -294,6 +331,7 @@ function App() {
     pages: 1,
   });
   const [manualLinkText, setManualLinkText] = useState("");
+  const [manualLinkProvider, setManualLinkProvider] = useState("auto");
   const [manualLinkRetry, setManualLinkRetry] = useState(null);
   const [manualPageForm, setManualPageForm] = useState({ provider: "mercadolivre", url: "", limit: 10 });
   const [manualPagePreview, setManualPagePreview] = useState(null);
@@ -364,6 +402,14 @@ function App() {
   const socialQueue = useMemo(
     () => balancedSocialCandidates.filter((item) => !socialHiddenIds.includes(item.offer_id)),
     [balancedSocialCandidates, socialHiddenIds]
+  );
+  const hasInvalidSelectedManualMl = useMemo(
+    () => (manualLinkPreview?.items || []).some((item) => item.selected && item.provider === "mercadolivre" && Number(item.price || 0) <= 0),
+    [manualLinkPreview]
+  );
+  const hasInvalidSelectedFileMl = useMemo(
+    () => (fileImportPreview?.items || []).some((item) => item.selected && item.provider === "mercadolivre" && Number(item.price || 0) <= 0),
+    [fileImportPreview]
   );
 
   async function loadSnapshot() {
@@ -517,11 +563,31 @@ function App() {
     }
   }
 
-  function parseManualLinks() {
-    return manualLinkText
+  function parseLinksText(value) {
+    return String(value || "")
       .split(/\r?\n|,|;/)
       .map((item) => item.trim())
       .filter(Boolean);
+  }
+
+  function parseManualLinks() {
+    return parseLinksText(manualLinkText).filter((link) => matchesManualProvider(link, manualLinkProvider));
+  }
+
+  function selectValidFileItems() {
+    setFileImportPreview((current) => {
+      if (!current?.items?.length) return current;
+      const items = current.items.map((item) => ({ ...item, selected: isImportablePreviewItem(item) }));
+      return { ...current, items };
+    });
+  }
+
+  function selectValidManualItems() {
+    setManualLinkPreview((current) => {
+      if (!current?.items?.length) return current;
+      const items = current.items.map((item) => ({ ...item, selected: isImportablePreviewItem(item) }));
+      return { ...current, items };
+    });
   }
 
   async function handleManualLinksPreview(options = {}) {
@@ -541,13 +607,16 @@ function App() {
       });
       setManualLinkPreview({
         ...data,
-        items: (data.items || []).map((item) => ({ ...item, selected: true })),
+        items: (data.items || []).map((item) => ({ ...item, selected: defaultPreviewSelection(item) })),
       });
+      const blockedMlCount = (data.items || []).filter((item) => item.provider === "mercadolivre" && item.affiliate_detected === false).length;
       setManualLinkStatus({
-        type: "success",
-        message: `${data.count} link(s) analisado(s) com sucesso. Preview pronto para revisar e importar.`,
+        type: blockedMlCount ? "info" : "success",
+        message: blockedMlCount
+          ? `${data.count} link(s) analisado(s). ${blockedMlCount} item(ns) do Mercado Livre ficaram desmarcados porque nao trazem link oficial de afiliado.`
+          : `${data.count} link(s) analisado(s) com sucesso. Preview pronto para revisar e importar.`,
       });
-      setToast({ type: "success", message: `${data.count} link(s) analisado(s).` });
+      setToast({ type: blockedMlCount ? "info" : "success", message: blockedMlCount ? `${blockedMlCount} item(ns) do Mercado Livre exigem link oficial.` : `${data.count} link(s) analisado(s).` });
     } catch (error) {
       if (!skipRetrySchedule && retryAttempt === 1) {
         setManualLinkRetry({ active: true, ready: false, attempt: retryAttempt, secondsLeft: 30 });
@@ -613,9 +682,15 @@ function App() {
       });
       setFileImportPreview({
         ...data,
-        items: (data.items || []).map((item) => ({ ...item, selected: true })),
+        items: (data.items || []).map((item) => ({ ...item, selected: defaultPreviewSelection(item) })),
       });
-      setToast({ type: "success", message: `${data.count} item(ns) carregado(s) do arquivo ${data.filename || ""}.` });
+      const blockedMlCount = (data.items || []).filter((item) => item.provider === "mercadolivre" && item.affiliate_detected === false).length;
+      setToast({
+        type: blockedMlCount ? "info" : "success",
+        message: blockedMlCount
+          ? `${data.count} item(ns) lido(s). ${blockedMlCount} do Mercado Livre ficaram desmarcados por falta de link oficial.`
+          : `${data.count} item(ns) carregado(s) do arquivo ${data.filename || ""}.`,
+      });
     } catch (error) {
       setToast({ type: "error", message: `Preview por arquivo falhou: ${humanizeImportError(error.message)}` });
     } finally {
@@ -669,6 +744,53 @@ function App() {
     }
   }
 
+  async function handleMercadoLivreExistingPreview() {
+    setMlRelinkLoading(true);
+    try {
+      const links = parseLinksText(mlRelinkText);
+      const data = await fetchJson("/dashboard/api/import/store/mercadolivre/relink-existing/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ links }),
+      });
+      setMlRelinkPreview({
+        ...data,
+        items: (data.items || []).map((item) => ({ ...item, selected: Boolean(item.match_found) })),
+      });
+      const matched = (data.items || []).filter((item) => item.match_found).length;
+      const unmatched = (data.items || []).length - matched;
+      setToast({ type: unmatched ? "info" : "success", message: `ML relink: ${matched} link(s) com match, ${unmatched} sem match.` });
+    } catch (error) {
+      setToast({ type: "error", message: `Preview de relink do Mercado Livre falhou: ${humanizeImportError(error.message)}` });
+    } finally {
+      setMlRelinkLoading(false);
+    }
+  }
+
+  async function handleMercadoLivreExistingRun() {
+    setRunLoading((state) => ({ ...state, batch: true }));
+    try {
+      const items = (mlRelinkPreview?.items || []).filter((item) => item.selected);
+      if (!items.length) {
+        throw new Error("Selecione ao menos um link oficial do Mercado Livre com match encontrado.");
+      }
+      const data = await fetchJson("/dashboard/api/import/store/mercadolivre/relink-existing/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+      setToast({
+        type: "success",
+        message: `ML vinculado: ${data.processed} processado(s), ${data.updated} atualizado(s), ${data.reactivated} reativado(s), ${data.invalid} invalido(s), ${data.skipped} ignorado(s).`,
+      });
+      await loadSnapshot();
+    } catch (error) {
+      setToast({ type: "error", message: `Vinculo em lote do Mercado Livre falhou: ${error.message}` });
+    } finally {
+      setRunLoading((state) => ({ ...state, batch: false }));
+    }
+  }
+
   async function handleManualPageImport() {
     setRunLoading((state) => ({ ...state, manualLinks: true }));
     try {
@@ -712,11 +834,51 @@ function App() {
     }
   }
 
+  async function handleAmazonRepairReactivate(onlyInactive = true) {
+    setRunLoading((state) => ({ ...state, batch: true }));
+    try {
+      const data = await fetchJson("/dashboard/api/import/store/amazon/repair-affiliate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ only_inactive: onlyInactive }),
+      });
+      setToast({
+        type: "success",
+        message: `Amazon corrigida: ${data.processed} verificado(s), ${data.updated} atualizado(s), ${data.reactivated} reativado(s), ${data.invalid} invalido(s), ${data.skipped} sem mudanca.`,
+      });
+      await loadSnapshot();
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao corrigir links da Amazon: ${error.message}` });
+    } finally {
+      setRunLoading((state) => ({ ...state, batch: false }));
+    }
+  }
+
+  async function handleMercadoLivreRepairReactivate(onlyInactive = true) {
+    setRunLoading((state) => ({ ...state, batch: true }));
+    try {
+      const data = await fetchJson("/dashboard/api/import/store/mercadolivre/repair-affiliate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ only_inactive: onlyInactive }),
+      });
+      setToast({
+        type: "success",
+        message: `Mercado Livre corrigido: ${data.processed} verificado(s), ${data.updated} atualizado(s), ${data.reactivated} reativado(s), ${data.invalid} invalido(s), ${data.skipped} sem mudanca.`,
+      });
+      await loadSnapshot();
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao corrigir links do Mercado Livre: ${error.message}` });
+    } finally {
+      setRunLoading((state) => ({ ...state, batch: false }));
+    }
+  }
+
   function updateManualPreviewItem(index, field, value) {
     setManualLinkPreview((current) => {
       if (!current?.items?.length) return current;
       const items = current.items.map((item, itemIndex) => (
-        itemIndex === index ? { ...item, [field]: value } : item
+        itemIndex === index ? applyPreviewFieldUpdate(item, field, value) : item
       ));
       return { ...current, items };
     });
@@ -1446,7 +1608,7 @@ function App() {
                               value={item.price ?? 0}
                               onChange={(e) => setManualPagePreview((current) => {
                                 if (!current?.items?.length) return current;
-                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, price: e.target.value } : entry);
+                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? applyPreviewFieldUpdate(entry, "price", e.target.value) : entry);
                                 return { ...current, items };
                               })}
                             />
@@ -1514,7 +1676,7 @@ function App() {
                       : fileImportProvider === "amazon"
                       ? "Use um TXT com um link da Amazon por linha. Links encurtados amzn.to sao aceitos e recomendados. Evite dois links na mesma linha para ter o preview mais estavel."
                       : fileImportProvider === "mercadolivre"
-                        ? "Use um TXT com um link do Mercado Livre por linha. Links completos do produto e links com rastreio de afiliado sao aceitos."
+                        ? "Use um TXT com um link oficial de afiliado do Mercado Livre por linha. Link comum do produto serve para preview, mas nao entra na importacao."
                         : "Use o CSV exportado do painel da Shopee. O preco do arquivo vira a fonte principal do preview."}
                   </small>
                 </div>
@@ -1523,14 +1685,29 @@ function App() {
                 <button className="button is-secondary" onClick={handleFileImportPreview} disabled={fileImportLoading}>
                   {fileImportLoading ? "Lendo arquivo..." : "Analisar arquivo"}
                 </button>
-                <button className="button is-primary" onClick={handleFileImportRun} disabled={runLoading.manualLinks}>
-                  {runLoading.manualLinks ? "Importando arquivo..." : "Importar arquivo"}
+                <button className="button is-primary" onClick={handleFileImportRun} disabled={runLoading.manualLinks || hasInvalidSelectedFileMl}>
+                  {runLoading.manualLinks ? "Importando arquivo..." : hasInvalidSelectedFileMl ? "Revise precos ML antes de importar" : "Importar arquivo"}
+                </button>
+                <button className="button is-ghost" onClick={selectValidFileItems} disabled={!fileImportPreview?.items?.length}>
+                  Marcar validos
                 </button>
                 <button className="button is-secondary" onClick={() => handleShopeeRecategorize(false)} disabled={runLoading.batch}>
                   {runLoading.batch ? "Corrigindo categorias..." : "Recategorizar toda Shopee"}
                 </button>
                 <button className="button is-ghost" onClick={() => handleShopeeRecategorize(true)} disabled={runLoading.batch}>
                   {runLoading.batch ? "Corrigindo categorias..." : "Corrigir so 'ofertas'"}
+                </button>
+                <button className="button is-secondary" onClick={() => handleMercadoLivreRepairReactivate(true)} disabled={runLoading.batch}>
+                  {runLoading.batch ? "Corrigindo ML..." : "Reativar ML inativo"}
+                </button>
+                <button className="button is-ghost" onClick={() => handleMercadoLivreRepairReactivate(false)} disabled={runLoading.batch}>
+                  {runLoading.batch ? "Corrigindo ML..." : "Corrigir todo ML"}
+                </button>
+                <button className="button is-secondary" onClick={() => handleAmazonRepairReactivate(true)} disabled={runLoading.batch}>
+                  {runLoading.batch ? "Corrigindo Amazon..." : "Reativar Amazon inativa"}
+                </button>
+                <button className="button is-ghost" onClick={() => handleAmazonRepairReactivate(false)} disabled={runLoading.batch}>
+                  {runLoading.batch ? "Corrigindo Amazon..." : "Corrigir toda Amazon"}
                 </button>
               </div>
               <div style={{ marginTop: 18 }}>
@@ -1582,7 +1759,7 @@ function App() {
                               value={item.price ?? 0}
                               onChange={(e) => setFileImportPreview((current) => {
                                 if (!current?.items?.length) return current;
-                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, price: e.target.value } : entry);
+                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? applyPreviewFieldUpdate(entry, "price", e.target.value) : entry);
                                 return { ...current, items };
                               })}
                             />
@@ -1627,6 +1804,13 @@ function App() {
                         <div className="offer-meta" style={{ marginTop: 12 }}>
                           {item.image ? <a className="tiny-button is-soft" href={item.image} target="_blank" rel="noreferrer">Abrir imagem</a> : null}
                           {item.url ? <span className="meta-chip">link ok</span> : null}
+                          {item.provider === "mercadolivre" ? (
+                            <span className="meta-chip">{item.affiliate_detected ? "link afiliado oficial" : "link ML sem afiliado oficial"}</span>
+                          ) : null}
+                          {item.provider === "mercadolivre" && Number(item.price || 0) <= 0 ? (
+                            <span className="meta-chip">dados incompletos: revise preco</span>
+                          ) : null}
+                          {item.affiliate_warning ? <span className="meta-chip">{item.affiliate_warning}</span> : null}
                           {item.file_warning ? <span className="meta-chip">{item.file_warning}</span> : null}
                         </div>
                       </div>
@@ -1640,23 +1824,66 @@ function App() {
               </div>
 
               <div className="field" style={{ marginTop: 12 }}>
+                <label>Importador manual</label>
+                <select value={manualLinkProvider} onChange={(e) => setManualLinkProvider(e.target.value)}>
+                  <option value="auto">Auto detectar</option>
+                  <option value="amazon">Amazon</option>
+                  <option value="mercadolivre">Mercado Livre</option>
+                  <option value="shopee">Shopee</option>
+                  <option value="tiktok">TikTok</option>
+                </select>
+              </div>
+              <div className="field" style={{ marginTop: 12 }}>
                 <label>Links afiliados manuais</label>
                 <textarea
                   rows="5"
                   value={manualLinkText}
                   onChange={(e) => setManualLinkText(e.target.value)}
-                  placeholder="Cole aqui links da Shopee, Mercado Livre, Amazon ou TikTok, um por linha"
+                  placeholder={
+                    manualLinkProvider === "amazon"
+                      ? "Cole aqui links da Amazon, um por linha"
+                      : manualLinkProvider === "mercadolivre"
+                        ? "Cole aqui links oficiais do Mercado Livre, um por linha"
+                        : manualLinkProvider === "shopee"
+                          ? "Cole aqui links da Shopee, um por linha"
+                          : manualLinkProvider === "tiktok"
+                            ? "Cole aqui links do TikTok, um por linha"
+                            : "Cole aqui links da Shopee, Mercado Livre, Amazon ou TikTok, um por linha"
+                  }
                 />
-                <small>O sistema tenta identificar loja, titulo, foto, preco e categoria. Antes de importar, voce pode corrigir qualquer campo no preview.</small>
+                <small>
+                  {manualLinkProvider === "amazon"
+                    ? "Use links da Amazon com tag ou shortlinks amzn.to. Se a Amazon bloquear a leitura, o sistema tenta um fallback para revisar e importar."
+                    : manualLinkProvider === "mercadolivre"
+                      ? "Use links oficiais do Mercado Livre. Se a pagina bloquear, o sistema tenta fallback com dados minimos para revisao."
+                      : manualLinkProvider === "shopee"
+                        ? "Use links de afiliado da Shopee. O sistema tenta identificar produto, foto, preco e categoria."
+                        : manualLinkProvider === "tiktok"
+                          ? "Use links do TikTok Shop. O sistema tenta identificar os dados do produto automaticamente."
+                          : "O sistema tenta identificar loja, titulo, foto, preco e categoria. Para Mercado Livre, so link oficial de afiliado entra na importacao."}
+                </small>
               </div>
               <div className="provider-actions" style={{ marginTop: 16 }}>
                 <button className="button is-secondary" onClick={() => handleManualLinksPreview()} disabled={manualLinkLoading}>
                   {manualLinkLoading ? "Analisando links..." : "Analisar links"}
                 </button>
-                <button className="button is-primary" onClick={handleManualLinksImport} disabled={runLoading.manualLinks}>
-                  {runLoading.manualLinks ? "Importando selecionados..." : "Importar selecionados"}
+                <button className="button is-primary" onClick={handleManualLinksImport} disabled={runLoading.manualLinks || hasInvalidSelectedManualMl}>
+                  {runLoading.manualLinks ? "Importando selecionados..." : hasInvalidSelectedManualMl ? "Revise precos ML antes de importar" : "Importar selecionados"}
+                </button>
+                <button className="button is-ghost" onClick={selectValidManualItems} disabled={!manualLinkPreview?.items?.length}>
+                  Marcar validos
                 </button>
               </div>
+              {hasInvalidSelectedFileMl ? (
+                <div className="inline-note is-info" style={{ marginTop: 12 }}>
+                  Existem itens selecionados do Mercado Livre no arquivo com preco zero. Revise o preco antes de importar.
+                </div>
+              ) : null}
+              {hasInvalidSelectedManualMl ? (
+                <div className="inline-note is-info" style={{ marginTop: 12 }}>
+                  Existem itens selecionados do Mercado Livre com preco zero. Revise o preco antes de importar.
+                </div>
+              ) : null}
               {manualLinkStatus ? (
                 <div className={`inline-note ${manualLinkStatus.type === "error" ? "is-error" : manualLinkStatus.type === "info" ? "is-info" : "is-success"}`} style={{ marginTop: 16 }}>
                   {manualLinkStatus.message}
@@ -1715,6 +1942,73 @@ function App() {
                         <div className="offer-meta" style={{ marginTop: 12 }}>
                           {item.image ? <a className="tiny-button is-soft" href={item.image} target="_blank" rel="noreferrer">Abrir imagem</a> : null}
                           {item.canonical_url ? <a className="tiny-button is-soft" href={item.canonical_url} target="_blank" rel="noreferrer">Abrir produto</a> : null}
+                          {item.provider === "mercadolivre" ? (
+                            <span className="meta-chip">{item.affiliate_detected ? "link afiliado oficial" : "link ML sem afiliado oficial"}</span>
+                          ) : null}
+                          {item.provider === "mercadolivre" && Number(item.price || 0) <= 0 ? (
+                            <span className="meta-chip">dados incompletos: revise preco</span>
+                          ) : null}
+                          {item.affiliate_warning ? <span className="meta-chip">{item.affiliate_warning}</span> : null}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="deploy-divider">
+                <span>Reativar ML existente por links oficiais</span>
+              </div>
+
+              <div className="field" style={{ marginTop: 12 }}>
+                <label>Links oficiais do Mercado Livre</label>
+                <textarea
+                  rows="5"
+                  value={mlRelinkText}
+                  onChange={(e) => setMlRelinkText(e.target.value)}
+                  placeholder="Cole aqui varios links oficiais do Mercado Livre, um por linha"
+                />
+                <small>Cole os links oficiais gerados pela Barra/Central de Afiliados. O sistema tenta casar cada item com uma oferta ja cadastrada e reativar as correspondentes.</small>
+              </div>
+              <div className="provider-actions" style={{ marginTop: 16 }}>
+                <button className="button is-secondary" onClick={handleMercadoLivreExistingPreview} disabled={mlRelinkLoading}>
+                  {mlRelinkLoading ? "Analisando relink..." : "Analisar relink ML"}
+                </button>
+                <button className="button is-primary" onClick={handleMercadoLivreExistingRun} disabled={runLoading.batch}>
+                  {runLoading.batch ? "Vinculando ML..." : "Vincular e reativar ML"}
+                </button>
+              </div>
+              <div style={{ marginTop: 18 }}>
+                {!mlRelinkPreview?.items?.length ? (
+                  <div className="empty-state">Nenhum relink do Mercado Livre analisado ainda.</div>
+                ) : (
+                  <div className="preview-grid">
+                    {mlRelinkPreview.items.map((item, index) => (
+                      <div className="surface" key={`${item.url || item.title}-${index}`}>
+                        <div className="panel-head" style={{ marginBottom: 12 }}>
+                          <div>
+                            <h4>{item.title || "Produto Mercado Livre"}</h4>
+                            <p>{item.match_found ? `Match: ${item.matched_offer_title}` : item.match_reason || "Sem match"}</p>
+                          </div>
+                          <label className="check-chip">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(item.selected)}
+                              onChange={(e) => setMlRelinkPreview((current) => {
+                                if (!current?.items?.length) return current;
+                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, selected: e.target.checked } : entry);
+                                return { ...current, items };
+                              })}
+                            />
+                            Vincular
+                          </label>
+                        </div>
+                        <div className="offer-meta" style={{ marginTop: 12 }}>
+                          {item.url ? <a className="tiny-button is-soft" href={item.url} target="_blank" rel="noreferrer">Abrir link oficial</a> : null}
+                          {item.matched_offer_slug ? <span className="meta-chip">{item.matched_offer_slug}</span> : null}
+                          {item.product_id ? <span className="meta-chip">{item.product_id}</span> : null}
+                          <span className="meta-chip">{item.affiliate_detected ? "link oficial detectado" : "link oficial nao confirmado"}</span>
+                          <span className="meta-chip">{item.match_reason || (item.match_found ? "match ok" : "sem match")}</span>
                         </div>
                       </div>
                     ))}

@@ -31,6 +31,12 @@ from app.services.manual_link_import import preview_manual_affiliate_links
 from app.services.manual_page_import import preview_amazon_saved_html, preview_page_url
 from app.services.normalize import normalize_offer
 from app.services.publish import publish_offer
+from app.services.store_maintenance import (
+    preview_mercadolivre_existing_offer_relinks,
+    relink_mercadolivre_existing_offers,
+    repair_amazon_affiliate_links,
+    repair_mercadolivre_affiliate_links,
+)
 from app.services.sftp_deploy import (
     deploy_public_site_via_sftp,
     deploy_stories_via_sftp,
@@ -159,6 +165,9 @@ class DashboardManualLinkItemPayload(BaseModel):
     featured: int | None = None
     affiliate_detected: bool | None = None
     affiliate_code: str | None = None
+    affiliate_status: str | None = None
+    affiliate_warning: str | None = None
+    import_allowed: bool | None = None
     item_id: str | None = None
     product_id: str | None = None
 
@@ -166,6 +175,21 @@ class DashboardManualLinkItemPayload(BaseModel):
 class DashboardManualLinksPayload(BaseModel):
     links: list[str] | None = None
     items: list[DashboardManualLinkItemPayload] | None = None
+
+
+class DashboardMercadoLivreRelinkItemPayload(BaseModel):
+    url: str
+    canonical_url: str | None = None
+    title: str | None = None
+    affiliate_detected: bool | None = None
+    matched_offer_id: int | None = None
+    matched_offer_active: int | None = None
+    selected: bool = True
+
+
+class DashboardMercadoLivreRelinkPayload(BaseModel):
+    links: list[str] | None = None
+    items: list[DashboardMercadoLivreRelinkItemPayload] | None = None
 
 
 class DashboardManualPagePayload(BaseModel):
@@ -208,6 +232,10 @@ class DashboardSettingsPayload(BaseModel):
 class DashboardStoreRecategorizePayload(BaseModel):
     store: str = "Shopee"
     only_uncategorized: bool = True
+
+
+class DashboardAmazonRepairPayload(BaseModel):
+    only_inactive: bool = True
 
 
 class DashboardJobRunPayload(BaseModel):
@@ -935,6 +963,25 @@ def dashboard_api_manual_links_preview(payload: DashboardManualLinksPayload, _: 
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/dashboard/api/import/store/mercadolivre/relink-existing/preview")
+def dashboard_api_mercadolivre_relink_existing_preview(payload: DashboardMercadoLivreRelinkPayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        items = preview_mercadolivre_existing_offer_relinks(db, payload.links or [])
+        return {"provider": "mercadolivre_relink", "count": len(items), "items": items}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        raise HTTPException(status_code=502, detail=detail)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
 @app.post("/dashboard/api/import/manual-page/preview")
 def dashboard_api_manual_page_preview(payload: DashboardManualPagePayload, _: str = Depends(require_manager_auth)):
     try:
@@ -1004,6 +1051,54 @@ def dashboard_api_store_recategorize(payload: DashboardStoreRecategorizePayload,
         db.close()
 
 
+@app.post("/dashboard/api/import/store/amazon/repair-affiliate")
+def dashboard_api_amazon_repair_affiliate(payload: DashboardAmazonRepairPayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        summary = repair_amazon_affiliate_links(db, only_inactive=bool(payload.only_inactive))
+        db.commit()
+        return {"ok": True, "store": "Amazon", **summary}
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.post("/dashboard/api/import/store/mercadolivre/repair-affiliate")
+def dashboard_api_mercadolivre_repair_affiliate(payload: DashboardAmazonRepairPayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        summary = repair_mercadolivre_affiliate_links(db, only_inactive=bool(payload.only_inactive))
+        db.commit()
+        return {"ok": True, "store": "Mercado Livre", **summary}
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.post("/dashboard/api/import/store/mercadolivre/relink-existing/run")
+def dashboard_api_mercadolivre_relink_existing_run(payload: DashboardMercadoLivreRelinkPayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        items = [item.model_dump() for item in (payload.items or [])]
+        if not items:
+            raise HTTPException(status_code=400, detail="Nenhum link oficial do Mercado Livre recebido para vincular.")
+        summary = relink_mercadolivre_existing_offers(db, items)
+        db.commit()
+        return {"ok": True, "provider": "mercadolivre_relink", **summary}
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
 @app.post("/dashboard/api/import/manual-links/run")
 def dashboard_api_manual_links_run(payload: DashboardManualLinksPayload, _: str = Depends(require_manager_auth)):
     db = SessionLocal()
@@ -1014,6 +1109,23 @@ def dashboard_api_manual_links_run(payload: DashboardManualLinksPayload, _: str 
 
         processed_items: list[dict] = []
         for item in items:
+            store = (item.store or _provider_label(_normalize_provider_key(item.provider))).strip()
+            if store.lower() == "mercado livre" and not bool(item.affiliate_detected):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"O item '{item.title}' do Mercado Livre nao tem link oficial de afiliado. "
+                        "Gere o link na Central/Barra de Afiliados e refaca o preview."
+                    ),
+                )
+            if store.lower() == "mercado livre" and float(item.price or 0) <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"O item '{item.title}' do Mercado Livre esta com preco zerado ou ausente. "
+                        "Revise o preco antes de importar."
+                    ),
+                )
             raw = {
                 "title": item.title,
                 "description": item.description or "",
@@ -1029,7 +1141,6 @@ def dashboard_api_manual_links_run(payload: DashboardManualLinksPayload, _: str 
                 "item_id": item.item_id or None,
                 "product_id": item.product_id or None,
             }
-            store = (item.store or _provider_label(_normalize_provider_key(item.provider))).strip()
             processed_items.append(raw | {"store": store})
 
         summary = {"processed": 0, "created": 0, "updated": 0}

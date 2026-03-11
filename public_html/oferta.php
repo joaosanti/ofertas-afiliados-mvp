@@ -14,13 +14,19 @@ if (!$offer) {
 }
 
 if (isset($_GET['go']) && $_GET['go'] === '1') {
-  $pdo->prepare("INSERT INTO cliques (oferta_id, ip_hash, user_agent, referer) VALUES (?,?,?,?)")
-      ->execute([
-        $offer['id'],
-        ip_hash(),
-        substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 255),
-        $_SERVER['HTTP_REFERER'] ?? null,
-      ]);
+  try {
+    $pdo->prepare("INSERT INTO cliques (oferta_id, ip_hash, user_agent, referer) VALUES (?,?,?,?)")
+        ->execute([
+          $offer['id'],
+          ip_hash(),
+          substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255),
+          substr((string) ($_SERVER['HTTP_REFERER'] ?? ''), 0, 2000) ?: null,
+        ]);
+    header('X-ZeroPreco-Click-Logged: 1');
+  } catch (Throwable $e) {
+    error_log('Zero Preco click log failure: ' . $e->getMessage());
+    header('X-ZeroPreco-Click-Logged: 0');
+  }
 
   header("Location: " . $offer['url_afiliado']);
   exit;

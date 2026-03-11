@@ -1,6 +1,8 @@
 <?php
 require_once __DIR__ . '/_init.php';
 
+$flash = admin_flash_get();
+
 if (admin_is_logged_in()) {
   header('Location: /admin/ofertas.php');
   exit;
@@ -26,7 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       header('Location: /admin/ofertas.php');
       exit;
     }
-    $erro = 'Login inválido.';
+    $erro = 'Login invalido.';
   }
 }
 ?>
@@ -38,6 +40,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <title>Admin - Login</title>
   <link rel="icon" type="image/png" href="/assets/img/logo-zp.png">
   <link rel="stylesheet" href="/assets/css/style.css">
+  <link rel="stylesheet" href="/assets/css/admin.css">
   <style>
     .panel { max-width: 420px; margin: 40px auto; background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 18px; }
     .field { margin-top: 10px; }
@@ -46,7 +49,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     .err { margin-top: 10px; color: #991b1b; background: #fee2e2; border: 1px solid #fecaca; border-radius: 10px; padding: 10px; }
   </style>
 </head>
-<body>
+<body class="admin-page">
 <header>
   <div class="container" style="display:flex; align-items:center; justify-content:space-between;">
     <div style="font-weight:700;">Admin de Ofertas</div>
@@ -57,6 +60,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <main class="container">
   <section class="panel">
     <h1 style="margin:0 0 10px;">Entrar</h1>
+    <?php if ($flash): ?>
+      <div class="admin-alert <?= h((string) ($flash['type'] ?? '')) ?>"><?= h((string) ($flash['message'] ?? '')) ?></div>
+    <?php endif; ?>
     <form method="post">
       <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
       <div class="field">

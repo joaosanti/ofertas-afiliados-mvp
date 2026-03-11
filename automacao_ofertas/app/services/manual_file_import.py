@@ -249,8 +249,14 @@ def preview_mercadolivre_txt_file(content: bytes, filename: str = "") -> list[di
 
     for item in mercadolivre_items:
         item["source_file"] = filename
-        item["selected"] = True
+        item["selected"] = bool(item.get("import_allowed", item.get("affiliate_detected")))
+        warnings: list[str] = []
         if failed_links:
-            item["file_warning"] = f"{len(failed_links)} link(s) do Mercado Livre foram ignorados por resposta invalida."
+            warnings.append(f"{len(failed_links)} link(s) do Mercado Livre foram ignorados por resposta invalida.")
+        if not item.get("affiliate_detected"):
+            base_warning = item.get("affiliate_warning") or "Link sem marcador oficial de afiliado."
+            warnings.append(f"{base_warning} Revise este item antes de importar.")
+        if warnings:
+            item["file_warning"] = " ".join(warnings)
 
     return mercadolivre_items

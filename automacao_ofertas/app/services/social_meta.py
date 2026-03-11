@@ -111,6 +111,42 @@ CATEGORY_LABELS = {
 }
 
 
+def _affiliate_audit(store: str, url: str) -> dict[str, str]:
+    store_value = (store or "").strip().lower()
+    value = (url or "").strip()
+
+    if not value:
+        return {"severity": "broken", "reason": "Sem link afiliado salvo."}
+
+    if store_value == "mercado livre":
+        has_wid = "wid=" in value
+        has_sid = "sid=affiliates" in value
+        has_recos = "sid=recos" in value
+        has_polycard = "polycard_client=affiliates" in value
+        has_affiliate_profile = "affiliate-profile" in value
+        has_matt = "matt_tool=" in value
+        has_social = "/social/" in value
+        if has_social or has_matt or (has_wid and has_recos and has_affiliate_profile):
+            return {"severity": "ok", "reason": "Link oficial Mercado Livre."}
+        if has_wid and (has_sid or has_polycard or has_affiliate_profile):
+            return {"severity": "suspect", "reason": "Link ML com wid, mas sem garantia de origem oficial."}
+        return {"severity": "broken", "reason": "Link ML sem marcador oficial."}
+
+    if store_value == "shopee":
+        if "an_" in value or "mmp_pid=" in value or "utm_medium=affiliates" in value:
+            return {"severity": "ok", "reason": "Link Shopee com marcador afiliado visivel."}
+        if "s.shopee.com.br/" in value:
+            return {"severity": "suspect", "reason": "Shortlink Shopee sem marcador visivel."}
+        return {"severity": "broken", "reason": "Link Shopee sem marcador afiliado visivel."}
+
+    if store_value == "amazon":
+        if "tag=" in value:
+            return {"severity": "ok", "reason": "Link Amazon com tag."}
+        return {"severity": "broken", "reason": "Link Amazon sem tag."}
+
+    return {"severity": "suspect", "reason": "Loja sem regra de afiliado definida."}
+
+
 def _site_base_url() -> str:
     return os.getenv("SITE_BASE_URL", "https://zeropreco.com.br").rstrip("/")
 
@@ -573,14 +609,21 @@ def build_meta_post_previews(
             "search_like": f"%{normalized_query}%",
         }
         rows = db.execute(SELECT_TOP_OFFERS_SQL, params).mappings().all()
+        eligible_rows = [
+            dict(row)
+            for row in rows
+            if _affiliate_audit(str(row.get("loja") or ""), str(row.get("url_afiliado") or "")).get("severity") == "ok"
+        ]
         if normalized_query:
-            rows = [dict(row) for row in rows[:capped_limit]]
+            rows = eligible_rows[:capped_limit]
         else:
-            rows = _diversify_offer_rows([dict(row) for row in rows], capped_limit)
+            rows = _diversify_offer_rows(eligible_rows, capped_limit)
     previews: list[dict[str, Any]] = []
 
     for row in rows:
         offer = dict(row)
+        if _affiliate_audit(str(offer.get("loja") or ""), str(offer.get("url_afiliado") or "")).get("severity") != "ok":
+            continue
         if include_story_assets:
             story_asset = generate_story_asset(offer)
             story_payload = {

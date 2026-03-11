@@ -30,7 +30,7 @@ $siteHeaderNavItems = [
       <a class="brand brand-mark-only" href="/" aria-label="Zero Preço">
         <?php if ($siteHeaderHasLogo): ?>
           <span class="brand-media">
-            <img class="brand-logo" src="<?= h($siteHeaderLogoWebPath) ?>" alt="Zero PreÃ§o">
+            <img class="brand-logo" src="<?= h($siteHeaderLogoWebPath) ?>" alt="Zero Preco">
           </span>
         <?php else: ?>
           <span class="brand-badge">ZP</span>

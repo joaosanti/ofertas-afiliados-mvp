@@ -3,11 +3,49 @@ $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
 $fullPath = __DIR__ . '/public_html' . $path;
 
 if ($path !== '/' && is_file($fullPath)) {
-  return false;
+  $ext = strtolower((string) pathinfo($fullPath, PATHINFO_EXTENSION));
+  if ($ext !== 'php') {
+    $mimeTypes = [
+      'css' => 'text/css; charset=UTF-8',
+      'js' => 'application/javascript; charset=UTF-8',
+      'json' => 'application/json; charset=UTF-8',
+      'png' => 'image/png',
+      'jpg' => 'image/jpeg',
+      'jpeg' => 'image/jpeg',
+      'gif' => 'image/gif',
+      'svg' => 'image/svg+xml',
+      'webp' => 'image/webp',
+      'ico' => 'image/x-icon',
+      'txt' => 'text/plain; charset=UTF-8',
+      'xml' => 'application/xml; charset=UTF-8',
+      'pdf' => 'application/pdf',
+    ];
+
+    if (isset($mimeTypes[$ext])) {
+      header('Content-Type: ' . $mimeTypes[$ext]);
+    } elseif (function_exists('mime_content_type')) {
+      $mime = mime_content_type($fullPath);
+      if ($mime) {
+        header('Content-Type: ' . $mime);
+      }
+    }
+
+    header('Content-Length: ' . (string) filesize($fullPath));
+    readfile($fullPath);
+    return true;
+  }
+
+  require $fullPath;
+  return true;
 }
 
 if ($path === '/' || $path === '') {
   require __DIR__ . '/public_html/index.php';
+  return true;
+}
+
+if (in_array($path, ['/admin', '/admin/'], true)) {
+  require __DIR__ . '/public_html/admin/index.php';
   return true;
 }
 

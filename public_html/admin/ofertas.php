@@ -2,6 +2,8 @@
 require_once __DIR__ . '/_init.php';
 admin_require_login();
 
+$flash = admin_flash_get();
+
 $pdo = db();
 $filter = trim((string) ($_GET['loja'] ?? ''));
 $mode = trim((string) ($_GET['modo'] ?? ''));
@@ -32,26 +34,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   exit;
 }
 
-$sql = 'SELECT id, titulo, slug, preco, loja, categoria, destaque, ativo, atualizado_em, url_afiliado
-        FROM ofertas';
+$sql = 'SELECT o.id, o.titulo, o.slug, o.preco, o.loja, o.categoria, o.destaque, o.ativo, o.atualizado_em, o.url_afiliado,
+               COUNT(c.id) AS clicks
+        FROM ofertas o
+        LEFT JOIN cliques c ON c.oferta_id = o.id';
 $where = [];
 $params = [];
 
 if ($filter !== '') {
-  $where[] = 'loja = ?';
+  $where[] = 'o.loja = ?';
   $params[] = $filter;
 }
 
 if ($mode === 'ml_invalidos') {
-  $where[] = "LOWER(loja) = 'mercado livre'";
-  $where[] = "(url_afiliado NOT LIKE '%wid=%' OR url_afiliado NOT LIKE '%sid=affiliates%')";
+  $where[] = "LOWER(o.loja) = 'mercado livre'";
+  $where[] = "(
+    o.url_afiliado NOT LIKE '%/social/%'
+    AND o.url_afiliado NOT LIKE '%matt_tool=%'
+    AND o.url_afiliado NOT LIKE '%affiliate-profile%'
+    AND o.url_afiliado NOT LIKE '%polycard_client=affiliates%'
+    AND (
+      o.url_afiliado NOT LIKE '%wid=%'
+      OR o.url_afiliado NOT LIKE '%sid=affiliates%'
+    )
+  )";
 }
 
 if ($where) {
   $sql .= ' WHERE ' . implode(' AND ', $where);
 }
 
-$sql .= ' ORDER BY atualizado_em DESC, id DESC LIMIT 300';
+$sql .= ' GROUP BY o.id, o.titulo, o.slug, o.preco, o.loja, o.categoria, o.destaque, o.ativo, o.atualizado_em, o.url_afiliado';
+$sql .= ' ORDER BY clicks DESC, o.atualizado_em DESC, o.id DESC LIMIT 300';
 
 $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
@@ -61,7 +75,16 @@ $invalidMeliCount = (int) $pdo->query("
   SELECT COUNT(*)
   FROM ofertas
   WHERE LOWER(loja) = 'mercado livre'
-    AND (url_afiliado NOT LIKE '%wid=%' OR url_afiliado NOT LIKE '%sid=affiliates%')
+    AND (
+      url_afiliado NOT LIKE '%/social/%'
+      AND url_afiliado NOT LIKE '%matt_tool=%'
+      AND url_afiliado NOT LIKE '%affiliate-profile%'
+      AND url_afiliado NOT LIKE '%polycard_client=affiliates%'
+      AND (
+        url_afiliado NOT LIKE '%wid=%'
+        OR url_afiliado NOT LIKE '%sid=affiliates%'
+      )
+    )
 ")->fetchColumn();
 ?>
 <!doctype html>
@@ -71,6 +94,7 @@ $invalidMeliCount = (int) $pdo->query("
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Admin - Ofertas</title>
   <link rel="stylesheet" href="/assets/css/style.css">
+  <link rel="stylesheet" href="/assets/css/admin.css">
   <style>
     .admin-wrap { display: grid; gap: 18px; }
     .toolbar, .panel { background: #fff; border: 1px solid #d9e2f2; border-radius: 18px; padding: 18px; }
@@ -95,12 +119,14 @@ $invalidMeliCount = (int) $pdo->query("
     }
   </style>
 </head>
-<body>
+<body class="admin-page">
 <header>
   <div class="container" style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
     <div style="font-weight:700;">Admin de Ofertas</div>
     <div style="display:flex; gap:8px; flex-wrap:wrap;">
       <a class="badge" href="/admin/oferta_editar.php">+ Nova oferta</a>
+      <a class="badge" href="/admin/auditoria_links.php">Auditoria de links</a>
+      <a class="badge" href="/admin/ml_corrigir_lote.php">Corrigir ML em lote</a>
       <a class="badge" href="/">Ver site</a>
       <a class="badge" href="/admin/logout.php">Sair</a>
     </div>
@@ -108,15 +134,18 @@ $invalidMeliCount = (int) $pdo->query("
 </header>
 
 <main class="container admin-wrap">
+  <?php if ($flash): ?>
+    <div class="admin-alert <?= h((string) ($flash['type'] ?? '')) ?>"><?= h((string) ($flash['message'] ?? '')) ?></div>
+  <?php endif; ?>
   <section class="toolbar">
     <div>
       <div style="font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:#6c7c98;">Auditoria de links</div>
-      <div style="font-weight:700; color:#10213a;">Confira rapidamente se o Mercado Livre está saindo com `wid` e `sid=affiliates`.</div>
+      <div style="font-weight:700; color:#10213a;">Mercado Livre precisa usar link oficial de afiliado, como `/social/`, `matt_*`, URL com `wid` e marcadores `affiliates` ou links do fluxo `affiliate-profile`.</div>
     </div>
 
     <div class="filters">
       <a class="badge" href="/admin/ofertas.php">Todas</a>
-      <a class="badge" href="/admin/ofertas.php?modo=ml_invalidos">Somente ML inválidos (<?= $invalidMeliCount ?>)</a>
+      <a class="badge" href="/admin/ofertas.php?modo=ml_invalidos">Somente ML invalidos (<?= $invalidMeliCount ?>)</a>
       <?php foreach ($lojas as $loja): ?>
         <a class="badge" href="/admin/ofertas.php?loja=<?= urlencode($loja['loja']) ?>"><?= h($loja['loja']) ?> (<?= (int) $loja['total'] ?>)</a>
       <?php endforeach; ?>
@@ -128,12 +157,13 @@ $invalidMeliCount = (int) $pdo->query("
       <thead>
         <tr>
           <th>ID</th>
-          <th>Título</th>
-          <th>Preço</th>
+          <th>Titulo</th>
+          <th>Preco</th>
+          <th>Cliques</th>
           <th>Loja / Categoria</th>
           <th>Status</th>
           <th>URL Afiliado</th>
-          <th>Ações</th>
+          <th>Acoes</th>
         </tr>
       </thead>
       <tbody>
@@ -148,12 +178,13 @@ $invalidMeliCount = (int) $pdo->query("
               <div class="meta-line">atualizado em: <?= h((string) $o['atualizado_em']) ?></div>
             </td>
             <td>R$ <?= number_format((float) $o['preco'], 2, ',', '.') ?></td>
+            <td><?= (int) ($o['clicks'] ?? 0) ?></td>
             <td><?= h($o['loja']) ?><br><span class="meta-line"><?= h($o['categoria']) ?></span></td>
             <td>
               <span class="status <?= ((int) $o['ativo'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $o['ativo'] === 1) ? 'Ativa' : 'Inativa' ?></span>
               <span class="status <?= ((int) $o['destaque'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $o['destaque'] === 1) ? 'Destaque' : 'Normal' ?></span>
               <?php if ($isMeli): ?>
-                <span class="status <?= $isAffiliateOk ? 'ok' : 'warn' ?>"><?= $isAffiliateOk ? 'Link afiliado OK' : 'Revisar link ML' ?></span>
+                <span class="status <?= $isAffiliateOk ? 'ok' : 'warn' ?>"><?= $isAffiliateOk ? 'Link ML com marcador afiliado' : 'Revisar link ML' ?></span>
               <?php endif; ?>
             </td>
             <td>
@@ -183,3 +214,4 @@ $invalidMeliCount = (int) $pdo->query("
 </main>
 </body>
 </html>
+

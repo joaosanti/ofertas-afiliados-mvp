@@ -2,6 +2,8 @@
 require_once __DIR__ . '/_init.php';
 admin_require_login();
 
+$flash = admin_flash_get();
+
 $pdo = db();
 $id = (int) ($_GET['id'] ?? 0);
 $erro = '';
@@ -30,7 +32,7 @@ if ($id > 0) {
   $row = $stmt->fetch();
   if (!$row) {
     http_response_code(404);
-    exit('Oferta não encontrada');
+    exit('Oferta nao encontrada');
   }
   $oferta = $row;
   $oferta['expira_em'] = $row['expira_em'] ? str_replace(' ', 'T', substr($row['expira_em'], 0, 16)) : '';
@@ -56,7 +58,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $expiraRaw = trim((string) ($_POST['expira_em'] ?? ''));
 
   if ($titulo === '' || $urlAfiliado === '' || $precoRaw === '') {
-    $erro = 'Título, preço e link afiliado são obrigatórios.';
+    $erro = 'Titulo, preco e link afiliado sao obrigatorios.';
   } else {
     $slug = admin_unique_slug($pdo, admin_normalize_slug($slugInput, $titulo), $idPost);
     $preco = admin_parse_decimal($precoRaw);
@@ -114,6 +116,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Admin - <?= $id > 0 ? 'Editar oferta' : 'Nova oferta' ?></title>
   <link rel="stylesheet" href="/assets/css/style.css">
+  <link rel="stylesheet" href="/assets/css/admin.css">
   <style>
     .box { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 16px; }
     .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -125,7 +128,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     @media (max-width: 840px) { .fields { grid-template-columns: 1fr; } }
   </style>
 </head>
-<body>
+<body class="admin-page">
 <header>
   <div class="container" style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
     <div style="font-weight:700;"><?= $id > 0 ? 'Editar oferta' : 'Nova oferta' ?></div>
@@ -138,6 +141,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 <main class="container">
   <section class="box">
+    <?php if ($flash): ?>
+      <div class="admin-alert <?= h((string) ($flash['type'] ?? '')) ?>"><?= h((string) ($flash['message'] ?? '')) ?></div>
+    <?php endif; ?>
     <?php if (isset($_GET['ok']) && $_GET['ok'] === '1'): ?>
       <div class="ok">Oferta salva com sucesso.</div>
     <?php endif; ?>
@@ -150,7 +156,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       <input type="hidden" name="id" value="<?= (int) ($oferta['id'] ?? 0) ?>">
       <div class="fields">
         <div class="field full">
-          <label for="titulo">Título*</label>
+          <label for="titulo">Titulo*</label>
           <input id="titulo" name="titulo" value="<?= h($oferta['titulo']) ?>" required>
         </div>
         <div class="field full">
@@ -158,11 +164,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <input id="slug" name="slug" value="<?= h($oferta['slug']) ?>">
         </div>
         <div class="field">
-          <label for="preco">Preço*</label>
+          <label for="preco">Preco*</label>
           <input id="preco" name="preco" value="<?= h($oferta['preco']) ?>" required>
         </div>
         <div class="field">
-          <label for="preco_antigo">Preço antigo</label>
+          <label for="preco_antigo">Preco antigo</label>
           <input id="preco_antigo" name="preco_antigo" value="<?= h($oferta['preco_antigo']) ?>">
         </div>
         <div class="field">
@@ -186,7 +192,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <input id="imagem_url" type="url" name="imagem_url" value="<?= h($oferta['imagem_url']) ?>">
         </div>
         <div class="field full">
-          <label for="tags">Tags (separadas por vírgula)</label>
+          <label for="tags">Tags (separadas por virgula)</label>
           <input id="tags" name="tags" value="<?= h($oferta['tags']) ?>">
         </div>
         <div class="field">
@@ -194,7 +200,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <input id="expira_em" type="datetime-local" name="expira_em" value="<?= h($oferta['expira_em']) ?>">
         </div>
         <div class="field full">
-          <label for="descricao">Descrição</label>
+          <label for="descricao">Descricao</label>
           <textarea id="descricao" name="descricao" rows="4"><?= h($oferta['descricao']) ?></textarea>
         </div>
       </div>

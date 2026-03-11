@@ -3,7 +3,7 @@ import time
 from collections import Counter
 from html import unescape
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
@@ -17,6 +17,46 @@ PROVIDER_LABELS = {
     "amazon": "Amazon",
     "tiktok": "TikTok",
 }
+
+
+def _meli_affiliate_meta(url: str) -> dict[str, Any]:
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    fragment = parse_qs(parsed.fragment, keep_blank_values=True)
+    combined = {**query, **fragment}
+
+    wid = (combined.get("wid") or [None])[0]
+    sid = (combined.get("sid") or [None])[0]
+    polycard_client = (combined.get("polycard_client") or [None])[0]
+    matt_tool = (combined.get("matt_tool") or [None])[0]
+    source = (combined.get("source") or [None])[0]
+    reco_client = (combined.get("reco_client") or [None])[0]
+    is_social = "/social/" in (parsed.path or "").lower()
+
+    official = bool(
+        matt_tool
+        or is_social
+        or (wid and sid == "affiliates")
+        or (wid and polycard_client == "affiliates")
+        or (wid and sid == "recos" and source == "affiliate-profile")
+        or (wid and source == "affiliate-profile")
+        or (wid and reco_client == "home_affiliate-profile")
+        or (wid and isinstance(polycard_client, str) and "affiliate-profile" in polycard_client)
+    )
+    code = matt_tool or wid
+
+    warning = None
+    if not official:
+        warning = (
+            "Link do Mercado Livre sem marcador oficial de afiliado. "
+            "Gere o link na Central/Barra de Afiliados antes de importar."
+        )
+
+    return {
+        "official": official,
+        "code": code,
+        "warning": warning,
+    }
 
 
 def _extract_first(content: str, patterns: list[str]) -> str:
@@ -68,6 +108,11 @@ def _normalize_link(link: str) -> str:
     if not raw:
         return ""
     if raw.startswith("http://") or raw.startswith("https://"):
+        parsed = urlparse(raw)
+        host = (parsed.netloc or "").lower()
+        if host in {"l.facebook.com", "lm.facebook.com"}:
+            target = (parse_qs(parsed.query, keep_blank_values=True).get("u") or [raw])[0]
+            return unquote(target).strip() or raw
         return raw
     return f"https://{raw.lstrip('/')}"
 
@@ -131,6 +176,112 @@ def _clean_title(title: str, provider: str) -> str:
     return title.strip()
 
 
+def _extract_ml_title_from_url(url: str) -> str:
+    path = unquote(urlparse(url).path or "")
+    segments = [segment for segment in path.split("/") if segment]
+    for segment in reversed(segments):
+        upper = segment.upper()
+        if upper.startswith("MLB") or segment == "p":
+            continue
+        text = re.sub(r"[-_]+", " ", segment).strip()
+        if text:
+            return text[:180]
+    return "Oferta Mercado Livre"
+
+
+def _extract_ml_product_id_from_url(url: str) -> str | None:
+    match = re.search(r"/p/(MLB\d+)", (url or "").strip(), re.IGNORECASE)
+    return match.group(1).upper() if match else None
+
+
+def _build_ml_fallback_offer(link: str) -> dict[str, Any]:
+    meta = _meli_affiliate_meta(link)
+    title = _extract_ml_title_from_url(link)
+    description = (
+        "Oferta Mercado Livre importada por link oficial. "
+        "A pagina bloqueou a leitura automatica, entao revise preco, imagem e descricao antes de importar."
+    )
+    return {
+        "provider": "mercadolivre",
+        "store": "Mercado Livre",
+        "title": title,
+        "description": description,
+        "price": 0.0,
+        "old_price": None,
+        "url": link,
+        "canonical_url": link,
+        "image": "",
+        "category": infer_category_label(title, description, link, link, default="ofertas"),
+        "tags": "mercadolivre,manual,fallback",
+        "featured": 0,
+        "affiliate_detected": bool(meta["official"]),
+        "affiliate_code": meta["code"],
+        "affiliate_status": "official" if meta["official"] else "missing",
+        "affiliate_warning": (
+            "Link oficial detectado, mas o Mercado Livre bloqueou a leitura automatica. Revise os dados antes de importar."
+            if meta["official"]
+            else meta["warning"]
+        ),
+        "import_allowed": bool(meta["official"]),
+        "item_id": meta["code"] if str(meta["code"] or "").upper().startswith("MLB") else None,
+        "product_id": _extract_ml_product_id_from_url(link),
+    }
+
+
+def _extract_amazon_asin_from_url(url: str) -> str | None:
+    match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", (url or "").strip(), re.IGNORECASE)
+    return match.group(1).upper() if match else None
+
+
+def _extract_amazon_title_from_url(url: str) -> str:
+    path = unquote(urlparse(url).path or "")
+    match = re.search(r"/([^/]+)/dp/[A-Z0-9]{10}", path, re.IGNORECASE)
+    if match:
+        text = re.sub(r"[-_]+", " ", match.group(1)).strip()
+        if text:
+            return text[:180]
+    asin = _extract_amazon_asin_from_url(url)
+    return f"Oferta Amazon {asin}" if asin else "Oferta Amazon"
+
+
+def _build_amazon_fallback_offer(link: str) -> dict[str, Any]:
+    parsed = urlparse(link)
+    host = (parsed.netloc or "").lower()
+    affiliate_detected, affiliate_code = _detect_affiliate(link)
+    is_short = host == "amzn.to"
+    title = _extract_amazon_title_from_url(link)
+    description = (
+        "Oferta Amazon importada por link manual. "
+        "A pagina bloqueou a leitura automatica, entao revise preco, imagem e descricao antes de importar."
+    )
+    warning = (
+        "Shortlink Amazon aceito. Revise os dados do produto antes de importar."
+        if is_short
+        else "Link Amazon com afiliado detectado, mas a pagina bloqueou a leitura automatica. Revise os dados antes de importar."
+    )
+    return {
+        "provider": "amazon",
+        "store": "Amazon",
+        "title": title,
+        "description": description,
+        "price": 0.0,
+        "old_price": None,
+        "url": link,
+        "canonical_url": link,
+        "image": "",
+        "category": infer_category_label(title, description, link, link, default="ofertas"),
+        "tags": "amazon,manual,fallback",
+        "featured": 0,
+        "affiliate_detected": bool(affiliate_detected or is_short),
+        "affiliate_code": affiliate_code,
+        "affiliate_status": "official" if (affiliate_detected or is_short) else "missing",
+        "affiliate_warning": warning,
+        "import_allowed": bool(affiliate_detected or is_short),
+        "item_id": None,
+        "product_id": _extract_amazon_asin_from_url(link),
+    }
+
+
 def _detect_affiliate(url: str) -> tuple[bool, str | None]:
     parsed = urlparse(url)
     query = parse_qs(parsed.query, keep_blank_values=True)
@@ -145,9 +296,11 @@ def _detect_affiliate(url: str) -> tuple[bool, str | None]:
             code,
         )
     if "mercadolivre" in host or "mercadolibre" in host:
-        code = (combined.get("wid") or combined.get("matt_tool") or [None])[0]
-        return ("affiliates" in parsed.fragment.lower() or code is not None, code)
+        meta = _meli_affiliate_meta(url)
+        return (bool(meta["official"]), meta["code"])
     if "amazon." in host or "amzn.to" in host:
+        if "amzn.to" in host:
+            return (True, None)
         code = (combined.get("tag") or [None])[0]
         return (code is not None, code)
     if "tiktok" in host:
@@ -297,6 +450,16 @@ def _extract_generic_offer(provider: str, source_url: str, final_url: str, html_
         if normalized_title in {"mercado livre", "mercadolivre"} or price <= 0:
             raise ValueError("Mercado Livre nao retornou os dados do produto. Isso normalmente acontece quando a pagina foi bloqueada temporariamente.")
     affiliate_detected, affiliate_code = _detect_affiliate(final_url or source_url)
+    import_allowed = True
+    affiliate_warning = None
+    affiliate_status = "ok" if affiliate_detected else "missing"
+    if provider == "mercadolivre":
+        meta = _meli_affiliate_meta(source_url)
+        affiliate_detected = bool(meta["official"])
+        affiliate_code = meta["code"]
+        affiliate_warning = meta["warning"]
+        import_allowed = affiliate_detected
+        affiliate_status = "official" if affiliate_detected else "missing"
 
     return {
         "provider": provider,
@@ -313,6 +476,9 @@ def _extract_generic_offer(provider: str, source_url: str, final_url: str, html_
         "featured": 0,
         "affiliate_detected": affiliate_detected,
         "affiliate_code": affiliate_code,
+        "affiliate_status": affiliate_status,
+        "affiliate_warning": affiliate_warning,
+        "import_allowed": import_allowed,
     }
 
 
@@ -389,15 +555,26 @@ def preview_manual_affiliate_links(links: list[str]) -> list[dict[str, Any]]:
                 )
             continue
 
-        final_url, html_text = _fetch_best_html_for_provider(link, provider)
-        provider = detect_provider(final_url)
         try:
-            items.append(_extract_generic_offer(provider, link, final_url, html_text))
-        except ValueError:
-            if provider in {"amazon", "shopee"}:
-                retry_url, retry_html = _fetch_best_html_for_provider(link, provider)
-                items.append(_extract_generic_offer(provider, link, retry_url, retry_html))
-            else:
-                raise
+            final_url, html_text = _fetch_best_html_for_provider(link, provider)
+            provider = detect_provider(final_url)
+            try:
+                items.append(_extract_generic_offer(provider, link, final_url, html_text))
+            except ValueError:
+                if provider in {"amazon", "shopee"}:
+                    retry_url, retry_html = _fetch_best_html_for_provider(link, provider)
+                    items.append(_extract_generic_offer(provider, link, retry_url, retry_html))
+                else:
+                    raise
+        except Exception:
+            if provider == "mercadolivre" and _meli_affiliate_meta(link)["official"]:
+                items.append(_build_ml_fallback_offer(link))
+                continue
+            if provider == "amazon":
+                affiliate_detected, _ = _detect_affiliate(link)
+                if affiliate_detected:
+                    items.append(_build_amazon_fallback_offer(link))
+                    continue
+            raise
 
     return items

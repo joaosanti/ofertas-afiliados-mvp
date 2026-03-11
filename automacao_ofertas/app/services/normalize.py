@@ -1,5 +1,6 @@
 import os
-from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse, urlunparse
+import re
+from urllib.parse import parse_qs, parse_qsl, quote_plus, unquote, urlencode, urlparse, urlunparse
 
 from app.schemas import NormalizedOffer
 
@@ -28,13 +29,121 @@ def build_slug(title: str) -> str:
     return slug.strip("-")[:170] or "item"
 
 
+def _unwrap_redirect_url(url: str) -> str:
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+
+    parsed = urlparse(raw)
+    host = (parsed.netloc or "").lower()
+    if host not in {"l.facebook.com", "lm.facebook.com"}:
+        return raw
+
+    target = (parse_qs(parsed.query, keep_blank_values=True).get("u") or [raw])[0]
+    return unquote(target).strip() or raw
+
+
+def _normalize_meli_item_id(value: str | None) -> str | None:
+    raw = repair_text(value).upper().strip().replace("-", "")
+    if not raw:
+        return None
+
+    match = re.search(r"(MLB)(\d+)", raw)
+    if match:
+        return f"{match.group(1)}{match.group(2)}"
+
+    if raw.isdigit():
+        return f"MLB{raw}"
+
+    return None
+
+
+def _extract_meli_item_id(url: str) -> str | None:
+    parsed = urlparse(url)
+
+    for values in (
+        parse_qs(parsed.query, keep_blank_values=True),
+        parse_qs(parsed.fragment, keep_blank_values=True),
+    ):
+        for key in ("wid", "item_id", "item"):
+            candidate = _normalize_meli_item_id((values.get(key) or [None])[0])
+            if candidate:
+                return candidate
+        for entry in values.get("pdp_filters") or []:
+            match = re.search(r"item_id:((?:MLB)?\d+)", unquote(entry), re.IGNORECASE)
+            if match:
+                candidate = _normalize_meli_item_id(match.group(1))
+                if candidate:
+                    return candidate
+
+    path_match = re.search(r"(MLB)[-_]?(\d+)", parsed.path, re.IGNORECASE)
+    if path_match:
+        return f"{path_match.group(1).upper()}{path_match.group(2)}"
+
+    return None
+
+
+def _is_meli_social_link(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    if "mercadolivre" not in host and "mercadolibre" not in host:
+        return False
+    path = (parsed.path or "").lower()
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    return "/social/" in path or "matt_tool" in query
+
+
+def _has_meli_affiliate_marker(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    if "mercadolivre" not in host and "mercadolibre" not in host:
+        return False
+
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    fragment = parse_qs(parsed.fragment, keep_blank_values=True)
+    combined = {**query, **fragment}
+
+    wid = (combined.get("wid") or [None])[0]
+    sid = (combined.get("sid") or [None])[0]
+    polycard = (combined.get("polycard_client") or [None])[0]
+    source = (combined.get("source") or [None])[0]
+    reco_client = (combined.get("reco_client") or [None])[0]
+
+    return bool(
+        _is_meli_social_link(url)
+        or ("matt_tool" in query)
+        or (wid and sid == "affiliates")
+        or (wid and polycard == "affiliates")
+        or (wid and sid == "recos" and source == "affiliate-profile")
+        or (wid and source == "affiliate-profile")
+        or (wid and reco_client == "home_affiliate-profile")
+        or (wid and isinstance(polycard, str) and "affiliate-profile" in polycard)
+    )
+
+
+def _extract_amazon_asin(url: str, product_id: str | None = None) -> str | None:
+    candidate = repair_text(product_id).upper()
+    if re.fullmatch(r"[A-Z0-9]{10}", candidate):
+        return candidate
+
+    match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", (url or "").strip(), re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+
+    return None
+
+
 def ensure_affiliate_link(url: str, store: str, tag: str | None = None, item_id: str | None = None, product_id: str | None = None) -> str:
+    url = _unwrap_redirect_url(url)
     if not tag:
         return url
 
     normalized_store = store.strip().lower()
 
     if normalized_store == "mercado livre":
+        if _has_meli_affiliate_marker(url):
+            return url
+
         template = os.getenv("MERCADOLIVRE_AFFILIATE_URL_TEMPLATE", "").strip()
         if template:
             return (
@@ -46,18 +155,17 @@ def ensure_affiliate_link(url: str, store: str, tag: str | None = None, item_id:
                 .replace("{product_id}", product_id or "")
             )
 
-        if item_id:
-            parsed = urlparse(url)
-            query = parsed.query
-            query_sep = "&" if query else ""
-            query = f"{query}{query_sep}pdp_filters=item_id%3A{item_id}"
-            fragment = f"polycard_client=affiliates&wid={item_id}&sid=affiliates"
-            return urlunparse(parsed._replace(query=query, fragment=fragment))
-
+        # Do not fabricate Mercado Livre affiliate parameters locally.
+        # Tracking must come from an official affiliate link or an explicit template.
         return url
 
     if normalized_store == "amazon":
         parsed = urlparse(url)
+        asin = _extract_amazon_asin(url, product_id)
+        if asin:
+            host = parsed.netloc or "www.amazon.com.br"
+            return urlunparse((parsed.scheme or "https", host, f"/dp/{asin}", "", urlencode([("tag", tag)]), ""))
+
         query_items = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key.lower() != "tag"]
         query_items.append(("tag", tag))
         return urlunparse(parsed._replace(query=urlencode(query_items), fragment=""))

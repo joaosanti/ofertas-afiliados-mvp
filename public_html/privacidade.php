@@ -28,7 +28,7 @@ $siteHasLogo = is_file($siteLogoFilePath);
         <a class="brand" href="/">
           <?php if ($siteHasLogo): ?>
             <span class="brand-media">
-              <img class="brand-logo" src="<?= h($siteLogoWebPath) ?>" alt="Zero PreÃ§o">
+              <img class="brand-logo" src="<?= h($siteLogoWebPath) ?>" alt="Zero Preco">
             </span>
           <?php else: ?>
             <span class="brand-badge">ZP</span>
