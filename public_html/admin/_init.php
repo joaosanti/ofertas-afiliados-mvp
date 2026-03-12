@@ -183,7 +183,7 @@ function admin_affiliate_audit($store, $url) {
       return ['severity' => 'ok', 'status' => 'marker_ok', 'label' => 'OK', 'reason' => 'Link com marcador visivel de afiliado da Shopee.'];
     }
     if ($isShort) {
-      return ['severity' => 'suspect', 'status' => 'short_sem_marcador', 'label' => 'Suspeito', 'reason' => 'Shortlink da Shopee sem marcador visivel; pode funcionar, mas nao esta comprovado na URL salva.'];
+      return ['severity' => 'ok', 'status' => 'short_oficial', 'label' => 'OK', 'reason' => 'Shortlink oficial da Shopee; o rastreio do afiliado costuma aparecer so apos o redirecionamento.'];
     }
     return ['severity' => 'broken', 'status' => 'sem_marcador', 'label' => 'Errado', 'reason' => 'Link Shopee sem marcador visivel de afiliado.'];
   }

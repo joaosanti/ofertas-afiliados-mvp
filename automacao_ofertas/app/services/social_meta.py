@@ -136,7 +136,10 @@ def _affiliate_audit(store: str, url: str) -> dict[str, str]:
         if "an_" in value or "mmp_pid=" in value or "utm_medium=affiliates" in value:
             return {"severity": "ok", "reason": "Link Shopee com marcador afiliado visivel."}
         if "s.shopee.com.br/" in value:
-            return {"severity": "suspect", "reason": "Shortlink Shopee sem marcador visivel."}
+            return {
+                "severity": "ok",
+                "reason": "Shortlink oficial da Shopee; os marcadores podem aparecer apenas apos o redirecionamento.",
+            }
         return {"severity": "broken", "reason": "Link Shopee sem marcador afiliado visivel."}
 
     if store_value == "amazon":
@@ -334,6 +337,10 @@ def _destination_url(offer: dict[str, Any]) -> str:
     return _cta_url(offer["slug"])
 
 
+def _site_offer_url(offer: dict[str, Any]) -> str:
+    return _offer_url(offer["slug"])
+
+
 def _display_url(url: str) -> str:
     parsed = urlparse((url or "").strip())
     host = (parsed.netloc or "").replace("www.", "")
@@ -357,6 +364,7 @@ def _caption_for_offer(offer: dict[str, Any]) -> str:
     discount = _discount_percent(offer["preco"], offer.get("preco_antigo"))
     coupon = (offer.get("cupom") or "").strip()
     destination_url = _destination_url(offer)
+    site_offer_url = _site_offer_url(offer)
     has_direct_store_link = bool((offer.get("url_afiliado") or "").strip())
 
     lead = f"{offer['titulo']}\n{price} na {store}"
@@ -371,6 +379,8 @@ def _caption_for_offer(offer: dict[str, Any]) -> str:
         " | ".join(details),
         "Abrir direto na loja:" if has_direct_store_link else "Veja o produto no site:",
         destination_url,
+        "Ver no site:" if has_direct_store_link else "Oferta no site:",
+        site_offer_url,
         "",
         "#ofertas #promocao #zeropreco",
     ]
@@ -382,6 +392,7 @@ def _story_caption_for_offer(offer: dict[str, Any]) -> str:
     discount = _discount_percent(offer["preco"], offer.get("preco_antigo"))
     coupon = (offer.get("cupom") or "").strip()
     destination_url = _destination_url(offer)
+    site_offer_url = _site_offer_url(offer)
     has_direct_store_link = bool((offer.get("url_afiliado") or "").strip())
     parts = [f"{offer['titulo']}", f"{_money(offer['preco'])} na {store}"]
     if discount > 0:
@@ -390,6 +401,8 @@ def _story_caption_for_offer(offer: dict[str, Any]) -> str:
         parts.append(f"Cupom: {coupon}")
     parts.append("Abrir direto na loja:" if has_direct_store_link else "Ver produto no site:")
     parts.append(destination_url)
+    parts.append("Ver no site:")
+    parts.append(site_offer_url)
     return "\n".join(parts)
 
 

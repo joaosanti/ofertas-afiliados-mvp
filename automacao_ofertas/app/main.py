@@ -36,6 +36,7 @@ from app.services.store_maintenance import (
     relink_mercadolivre_existing_offers,
     repair_amazon_affiliate_links,
     repair_mercadolivre_affiliate_links,
+    repair_shopee_affiliate_links,
 )
 from app.services.sftp_deploy import (
     deploy_public_site_via_sftp,
@@ -551,7 +552,7 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
             db,
             limit=limit,
             offer_ids=selected_offer_ids or None,
-            include_story_assets=(platform == "instagram" and mode == "story"),
+            include_story_assets=((platform == "instagram" and mode in {"story", "feed_story"}) or (platform in {"both", "facebook_instagram"} and mode == "feed_story")),
         )
         if not previews:
             raise ValueError("Nao ha ofertas elegiveis para publicar.")
@@ -599,6 +600,72 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                             "offer_id": item["offer_id"],
                             "title": item["title"],
                             "platform": "instagram",
+                            "error": str(exc),
+                        }
+                    )
+
+                if success_for_item:
+                    items.append(combined_item)
+        elif platform in {"both", "facebook_instagram"} and mode == "feed_story":
+            for item in previews:
+                combined_item = {
+                    "offer_id": item["offer_id"],
+                    "slug": item["slug"],
+                    "title": item["title"],
+                }
+                success_for_item = False
+
+                try:
+                    facebook_result = publish_facebook_post(
+                        message=item["facebook_payload"]["message"],
+                        link=item["facebook_payload"]["link"],
+                    )
+                    combined_item["facebook_result"] = facebook_result["result"]
+                    success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "facebook",
+                            "error": str(exc),
+                        }
+                    )
+
+                try:
+                    created_feed = create_instagram_media_container(
+                        image_url=item["instagram_payload"]["image_url"],
+                        caption=item["instagram_payload"]["caption"],
+                    )
+                    published_feed = publish_instagram_container(created_feed["result"]["id"])
+                    combined_item["feed_creation_id"] = created_feed["result"]["id"]
+                    combined_item["feed_result"] = published_feed["result"]
+                    success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_feed",
+                            "error": str(exc),
+                        }
+                    )
+
+                try:
+                    story_filename = item["story_payload"]["image_url"].rstrip("/").split("/")[-1]
+                    deploy_result = deploy_stories_via_sftp(only_files=[story_filename])
+                    created_story = create_instagram_story_container(item["story_payload"]["image_url"])
+                    published_story = publish_instagram_container(created_story["result"]["id"])
+                    combined_item["story_deploy"] = deploy_result
+                    combined_item["story_creation_id"] = created_story["result"]["id"]
+                    combined_item["story_result"] = published_story["result"]
+                    success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_story",
                             "error": str(exc),
                         }
                     )
@@ -675,6 +742,55 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     )
                 except Exception as exc:  # noqa: BLE001
                     errors.append({"offer_id": item["offer_id"], "title": item["title"], "error": str(exc)})
+        elif platform == "instagram" and mode == "feed_story":
+            for item in previews:
+                combined_item = {
+                    "offer_id": item["offer_id"],
+                    "slug": item["slug"],
+                    "title": item["title"],
+                }
+                success_for_item = False
+
+                try:
+                    created_feed = create_instagram_media_container(
+                        image_url=item["instagram_payload"]["image_url"],
+                        caption=item["instagram_payload"]["caption"],
+                    )
+                    published_feed = publish_instagram_container(created_feed["result"]["id"])
+                    combined_item["feed_creation_id"] = created_feed["result"]["id"]
+                    combined_item["feed_result"] = published_feed["result"]
+                    success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_feed",
+                            "error": str(exc),
+                        }
+                    )
+
+                try:
+                    story_filename = item["story_payload"]["image_url"].rstrip("/").split("/")[-1]
+                    deploy_result = deploy_stories_via_sftp(only_files=[story_filename])
+                    created_story = create_instagram_story_container(item["story_payload"]["image_url"])
+                    published_story = publish_instagram_container(created_story["result"]["id"])
+                    combined_item["story_deploy"] = deploy_result
+                    combined_item["story_creation_id"] = created_story["result"]["id"]
+                    combined_item["story_result"] = published_story["result"]
+                    success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_story",
+                            "error": str(exc),
+                        }
+                    )
+
+                if success_for_item:
+                    items.append(combined_item)
         else:
             raise HTTPException(status_code=400, detail=f"Acao social nao suportada: {platform}/{mode}")
 
@@ -684,7 +800,18 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
             "mode": mode,
             "count": len(items),
             "facebook_count": len([item for item in items if item.get("facebook_result")]),
-            "instagram_count": len([item for item in items if item.get("instagram_result") or item.get("creation_id")]),
+            "instagram_count": len(
+                [
+                    item
+                    for item in items
+                    if item.get("instagram_result")
+                    or item.get("creation_id")
+                    or item.get("feed_result")
+                    or item.get("story_result")
+                ]
+            ),
+            "instagram_feed_count": len([item for item in items if item.get("feed_result")]),
+            "instagram_story_count": len([item for item in items if item.get("story_result") or item.get("story_deploy")]),
             "facebook_reel_count": len([item for item in items if item.get("video_id")]),
             "items": items,
             "errors": errors,
@@ -1072,6 +1199,20 @@ def dashboard_api_mercadolivre_repair_affiliate(payload: DashboardAmazonRepairPa
         summary = repair_mercadolivre_affiliate_links(db, only_inactive=bool(payload.only_inactive))
         db.commit()
         return {"ok": True, "store": "Mercado Livre", **summary}
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.post("/dashboard/api/import/store/shopee/repair-affiliate")
+def dashboard_api_shopee_repair_affiliate(payload: DashboardAmazonRepairPayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        summary = repair_shopee_affiliate_links(db, only_inactive=bool(payload.only_inactive))
+        db.commit()
+        return {"ok": True, "store": "Shopee", **summary}
     except ValueError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))

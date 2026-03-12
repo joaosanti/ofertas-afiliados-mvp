@@ -20,6 +20,6 @@ if errorlevel 1 (
 )
 
 start "" "http://127.0.0.1:8010/manager"
-uvicorn app.main:app --reload --port 8010
+uvicorn app.main:app --port 8010
 
 endlocal

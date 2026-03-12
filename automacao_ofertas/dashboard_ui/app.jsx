@@ -11,7 +11,9 @@ const SOCIAL_OPTIONS = [
   { key: "facebook:feed", label: "Facebook Feed", note: "Posta direto na pagina do projeto." },
   { key: "facebook:reel", label: "Facebook Reel", note: "Gera um MP4 vertical e publica na pagina do Facebook." },
   { key: "both:feed", label: "Facebook + Instagram Feed", note: "Publica a mesma oferta nos dois canais." },
+  { key: "both:feed_story", label: "Facebook + Instagram Feed + Story", note: "Publica Facebook feed, Instagram feed e Instagram story na mesma execucao." },
   { key: "instagram:feed", label: "Instagram Feed", note: "Publica no feed do Instagram via Graph API." },
+  { key: "instagram:feed_story", label: "Instagram Feed + Story", note: "Publica o feed e o story juntos para a mesma oferta." },
   { key: "instagram:story", label: "Instagram Story", note: "Usa a arte gerada automaticamente." },
 ];
 
@@ -849,6 +851,26 @@ function App() {
       await loadSnapshot();
     } catch (error) {
       setToast({ type: "error", message: `Falha ao corrigir links da Amazon: ${error.message}` });
+    } finally {
+      setRunLoading((state) => ({ ...state, batch: false }));
+    }
+  }
+
+  async function handleShopeeRepairReactivate(onlyInactive = true) {
+    setRunLoading((state) => ({ ...state, batch: true }));
+    try {
+      const data = await fetchJson("/dashboard/api/import/store/shopee/repair-affiliate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ only_inactive: onlyInactive }),
+      });
+      setToast({
+        type: "success",
+        message: `Shopee revisada: ${data.processed} verificado(s), ${data.updated} atualizado(s), ${data.reactivated} reativado(s), ${data.invalid} invalido(s), ${data.skipped} sem mudanca.`,
+      });
+      await loadSnapshot();
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao corrigir links da Shopee: ${error.message}` });
     } finally {
       setRunLoading((state) => ({ ...state, batch: false }));
     }
@@ -1696,6 +1718,12 @@ function App() {
                 </button>
                 <button className="button is-ghost" onClick={() => handleShopeeRecategorize(true)} disabled={runLoading.batch}>
                   {runLoading.batch ? "Corrigindo categorias..." : "Corrigir so 'ofertas'"}
+                </button>
+                <button className="button is-secondary" onClick={() => handleShopeeRepairReactivate(true)} disabled={runLoading.batch}>
+                  {runLoading.batch ? "Reativando Shopee..." : "Reativar Shopee inativa"}
+                </button>
+                <button className="button is-ghost" onClick={() => handleShopeeRepairReactivate(false)} disabled={runLoading.batch}>
+                  {runLoading.batch ? "Reativando Shopee..." : "Revisar toda Shopee"}
                 </button>
                 <button className="button is-secondary" onClick={() => handleMercadoLivreRepairReactivate(true)} disabled={runLoading.batch}>
                   {runLoading.batch ? "Corrigindo ML..." : "Reativar ML inativo"}

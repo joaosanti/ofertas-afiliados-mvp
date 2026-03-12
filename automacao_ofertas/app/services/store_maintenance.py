@@ -156,6 +156,56 @@ def repair_mercadolivre_affiliate_links(db, only_inactive: bool = True) -> dict[
     return summary
 
 
+def _has_shopee_affiliate_marker(url: str) -> bool:
+    value = (url or "").strip().lower()
+    return (
+        "mmp_pid=" in value
+        or "utm_medium=affiliates" in value
+        or "an_" in value
+        or "s.shopee.com.br/" in value
+    )
+
+
+def repair_shopee_affiliate_links(db, only_inactive: bool = True) -> dict[str, int | str]:
+    rows = db.execute(
+        SELECT_AMAZON_OFFERS_SQL,
+        {"store": "Shopee", "only_inactive": 1 if only_inactive else 0},
+    ).mappings().all()
+
+    summary = {
+        "processed": 0,
+        "updated": 0,
+        "reactivated": 0,
+        "skipped": 0,
+        "invalid": 0,
+    }
+
+    for row in rows:
+        summary["processed"] += 1
+        current_url = str(row.get("url_afiliado") or "").strip()
+        if not current_url:
+            summary["invalid"] += 1
+            continue
+
+        if not _has_shopee_affiliate_marker(current_url):
+            summary["invalid"] += 1
+            continue
+
+        next_active = 1
+        if int(row.get("ativo") or 0) == next_active:
+            summary["skipped"] += 1
+            continue
+
+        db.execute(
+            UPDATE_OFFER_SQL,
+            {"id": row["id"], "url_afiliado": current_url, "ativo": next_active},
+        )
+        summary["updated"] += 1
+        summary["reactivated"] += 1
+
+    return summary
+
+
 def _extract_ml_product_id(url: str) -> str | None:
     match = re.search(r"/p/(MLB\d+)", (url or "").strip(), re.IGNORECASE)
     return match.group(1).upper() if match else None
