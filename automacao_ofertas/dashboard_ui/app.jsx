@@ -15,6 +15,8 @@ const SOCIAL_OPTIONS = [
   { key: "instagram:feed", label: "Instagram Feed", note: "Publica no feed do Instagram via Graph API." },
   { key: "instagram:feed_story", label: "Instagram Feed + Story", note: "Publica o feed e o story juntos para a mesma oferta." },
   { key: "instagram:story", label: "Instagram Story", note: "Usa a arte gerada automaticamente." },
+  { key: "whatsapp:web", label: "WhatsApp Web Local", note: "Modo gratis: monta a mensagem e abre o WhatsApp Web para envio manual." },
+  { key: "whatsapp:group", label: "WhatsApp Grupo", note: "Prepara o lote e a mensagem para grupo; envio real entra na proxima etapa." },
 ];
 
 const NAV_ITEMS = [
@@ -29,6 +31,10 @@ const NAV_ITEMS = [
 function fmtMoney(value) {
   const numeric = Number(value || 0);
   return numeric.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+
+function fmtWhatsappMoney(value) {
+  return `R$ ${Number(value || 0).toFixed(2).replace(".", ",")}`;
 }
 
 function fmtInt(value) {
@@ -128,6 +134,41 @@ function humanizeSocialError(message) {
     return "META_ACCESS_TOKEN ausente ou inválido no manager.";
   }
   return text;
+}
+
+function whatsappMessageForItem(item) {
+  const lines = [String(item?.title || "").trim()];
+  if (item?.coupon) lines.push(`Cupom: ${item.coupon}`);
+  lines.push(`Preco: ${fmtWhatsappMoney(item?.price)}`);
+  lines.push(`Loja: ${item?.store || "Loja"}`);
+  lines.push(`Link: ${item?.cta_url || item?.offer_url || "#"}`);
+  return lines.join("\n");
+}
+
+function whatsappCaptionForItem(item) {
+  const lines = [String(item?.title || "").trim()];
+  if (item?.store) lines.push(item.store);
+  lines.push(`👉 ${item?.cta_url || item?.offer_url || "#"}`);
+  if (item?.coupon) lines.push(`🏷 Cupom: ${item.coupon}`);
+  if (Number(item?.price || 0) > 0) lines.push(`💰 ${fmtWhatsappMoney(item?.price)}`);
+  if (Number(item?.old_price || 0) > 0) lines.push(`De: ${fmtWhatsappMoney(item?.old_price)}`);
+  return lines.join("\n");
+}
+
+function whatsappPreviewImageUrl(item) {
+  if (item?.generated_filename) return `/dashboard/api/stories/${encodeURIComponent(item.generated_filename)}`;
+  return item?.image_url || item?.product_image_url || "";
+}
+
+function socialChannelPreviewTitle(platform, mode) {
+  if (platform === "facebook" && mode === "feed") return "Preview Facebook Feed";
+  if (platform === "facebook" && mode === "reel") return "Preview Facebook Reel";
+  if (platform === "instagram" && mode === "feed") return "Preview Instagram Feed";
+  if (platform === "instagram" && mode === "story") return "Preview Instagram Story";
+  if (platform === "instagram" && mode === "feed_story") return "Preview Instagram Feed + Story";
+  if ((platform === "both" || platform === "facebook_instagram") && mode === "feed") return "Preview Facebook + Instagram Feed";
+  if ((platform === "both" || platform === "facebook_instagram") && mode === "feed_story") return "Preview Facebook + Instagram Feed + Story";
+  return "Preview social";
 }
 
 function defaultPreviewSelection(item) {
@@ -328,6 +369,7 @@ function App() {
   const [mlRelinkText, setMlRelinkText] = useState("");
   const [mlRelinkPreview, setMlRelinkPreview] = useState(null);
   const [socialPreview, setSocialPreview] = useState(null);
+  const [socialRunPreview, setSocialRunPreview] = useState(null);
   const [socialHiddenIds, setSocialHiddenIds] = useState([]);
   const [socialCheckedIds, setSocialCheckedIds] = useState([]);
   const [importLoading, setImportLoading] = useState(false);
@@ -379,6 +421,8 @@ function App() {
   const [socialForm, setSocialForm] = useState({ selected: "facebook:feed", limit: 120, query: "" });
   const [socialFilters, setSocialFilters] = useState({ store: "all", category: "all" });
   const [activeSection, setActiveSection] = useState("painel");
+  const [whatsappGroups, setWhatsappGroups] = useState([]);
+  const [whatsappGroupsLoading, setWhatsappGroupsLoading] = useState(false);
   const [settingsForm, setSettingsForm] = useState({
     manager_username: "admin",
     manager_password: "",
@@ -395,6 +439,9 @@ function App() {
     auto_story_times: "07:05,13:05,19:05",
     auto_story_platform: "instagram",
     auto_story_limit: 1,
+    whatsapp_api_base_url: "",
+    whatsapp_api_token: "",
+    whatsapp_group_target: "",
     sftp_host: "",
     sftp_port: 22,
     sftp_username: "",
@@ -407,6 +454,8 @@ function App() {
     const [platform, mode] = socialForm.selected.split(":");
     return { platform, mode };
   }, [socialForm.selected]);
+  const isWhatsappGroupSelected = socialSplit.platform === "whatsapp" && socialSplit.mode === "group";
+  const isWhatsappWebSelected = socialSplit.platform === "whatsapp" && socialSplit.mode === "web";
 
   const socialCandidates = useMemo(() => socialPreview?.items || [], [socialPreview]);
   const socialStoreOptions = useMemo(() => {
@@ -438,6 +487,21 @@ function App() {
   const socialQueue = useMemo(
     () => balancedSocialCandidates.filter((item) => !socialHiddenIds.includes(item.offer_id)),
     [balancedSocialCandidates, socialHiddenIds]
+  );
+  const whatsappPreviewItems = useMemo(() => {
+    if (
+      socialRunPreview?.platform === "whatsapp" &&
+      socialRunPreview?.mode === socialSplit.mode &&
+      Array.isArray(socialRunPreview?.items) &&
+      socialRunPreview.items.length
+    ) {
+      return socialRunPreview.items.slice(0, 3);
+    }
+    return [];
+  }, [socialQueue, socialCheckedIds, socialRunPreview, socialSplit.mode]);
+  const whatsappBatchText = useMemo(
+    () => whatsappPreviewItems.map((item, index) => `Mensagem ${index + 1}\n${whatsappCaptionForItem(item)}`).join("\n\n--------------------\n\n"),
+    [whatsappPreviewItems]
   );
   const hasInvalidSelectedManualMl = useMemo(
     () => (manualLinkPreview?.items || []).some((item) => item.selected && item.provider === "mercadolivre" && Number(item.price || 0) <= 0),
@@ -516,6 +580,9 @@ function App() {
       auto_story_times: settings.auto_story_times || "",
       auto_story_platform: settings.auto_story_platform || "instagram",
       auto_story_limit: Number(settings.auto_story_limit || 1),
+      whatsapp_api_base_url: settings.whatsapp?.api_base_url || "",
+      whatsapp_api_token: "",
+      whatsapp_group_target: settings.whatsapp?.group_target || "",
       sftp_host: settings.sftp?.host || "",
       sftp_port: Number(settings.sftp?.port || 22),
       sftp_username: settings.sftp?.username || "",
@@ -548,6 +615,10 @@ function App() {
   }, []);
 
   useEffect(() => {
+    setSocialRunPreview(null);
+  }, [socialForm.selected]);
+
+  useEffect(() => {
     const timer = window.setInterval(() => setNowTs(Date.now()), 30000);
     return () => window.clearInterval(timer);
   }, []);
@@ -578,11 +649,7 @@ function App() {
 
   useEffect(() => {
     const visibleIds = socialQueue.map((item) => item.offer_id);
-    setSocialCheckedIds((current) => {
-      const kept = current.filter((id) => visibleIds.includes(id));
-      if (kept.length) return kept;
-      return visibleIds.slice(0, 5);
-    });
+    setSocialCheckedIds((current) => current.filter((id) => visibleIds.includes(id)));
   }, [socialQueue]);
 
   function toggleProvider(providerKey) {
@@ -1037,13 +1104,20 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      if (payload.platform === "whatsapp") {
+        setSocialRunPreview(data);
+      } else {
+        setSocialRunPreview(null);
+      }
       const errorCount = Number((data.errors || []).length);
       const errorSummary = humanizeSocialError(data.error_summary || (data.errors || [])[0]?.error || "");
       setToast({
         type: errorCount ? "error" : "success",
-        message: errorCount
-          ? `Publicacao ${payload.platform}/${payload.mode}: ${data.count} concluido(s), ${errorCount} erro(s). ${errorSummary}`
-          : `Publicacao ${payload.platform}/${payload.mode}: ${data.count} concluido(s), ${errorCount} erro(s).`,
+        message: payload.platform === "whatsapp"
+          ? `${payload.mode === "web" ? "WhatsApp Web" : "WhatsApp grupo"}: ${data.count} item(ns) preparado(s) para envio.`
+          : errorCount
+            ? `Publicacao ${payload.platform}/${payload.mode}: ${data.count} concluido(s), ${errorCount} erro(s). ${errorSummary}`
+            : `Publicacao ${payload.platform}/${payload.mode}: ${data.count} concluido(s), ${errorCount} erro(s).`,
       });
       setSocialHiddenIds((current) => [...new Set([...current, ...selectedIds])]);
       await Promise.all([loadSnapshot(), loadSocialPreview(socialForm.limit, socialForm.query)]);
@@ -1094,7 +1168,7 @@ function App() {
             }
         : {
             platform: settingsForm.auto_social_platform,
-            mode: "feed",
+            mode: settingsForm.auto_social_mode,
             limit: Number(settingsForm.auto_social_limit || 1),
           };
       const data = await fetchJson(url, {
@@ -1149,6 +1223,9 @@ function App() {
         auto_story_times: settingsForm.auto_story_times,
         auto_story_platform: settingsForm.auto_story_platform,
         auto_story_limit: Number(settingsForm.auto_story_limit || 1),
+        whatsapp_api_base_url: settingsForm.whatsapp_api_base_url,
+        whatsapp_api_token: settingsForm.whatsapp_api_token || null,
+        whatsapp_group_target: settingsForm.whatsapp_group_target,
         sftp_host: settingsForm.sftp_host,
         sftp_port: Number(settingsForm.sftp_port || 22),
         sftp_username: settingsForm.sftp_username,
@@ -1172,6 +1249,31 @@ function App() {
       setToast({ type: "error", message: `Falha ao salvar configuracoes: ${error.message}` });
     } finally {
       setSettingsLoading(false);
+    }
+  }
+
+  async function handleLoadWhatsappGroups() {
+    setWhatsappGroupsLoading(true);
+    try {
+      const data = await fetchJson("/dashboard/api/whatsapp/groups?limit=100");
+      setWhatsappGroups(Array.isArray(data.items) ? data.items : []);
+      setToast({ type: "success", message: `${Number(data.count || 0)} grupo(s) carregado(s) do WhatsApp.` });
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao carregar grupos do WhatsApp: ${error.message}` });
+    } finally {
+      setWhatsappGroupsLoading(false);
+    }
+  }
+
+  async function handleCopyText(text, successMessage) {
+    try {
+      if (!navigator?.clipboard?.writeText) {
+        throw new Error("Clipboard indisponivel neste navegador.");
+      }
+      await navigator.clipboard.writeText(String(text || ""));
+      setToast({ type: "success", message: successMessage || "Texto copiado." });
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao copiar texto: ${error.message}` });
     }
   }
 
@@ -1624,6 +1726,7 @@ function App() {
                     <option value="facebook">Facebook</option>
                     <option value="instagram">Instagram</option>
                     <option value="both">Facebook + Instagram</option>
+                    <option value="whatsapp">WhatsApp</option>
                   </select>
                 </div>
               </div>
@@ -1634,6 +1737,7 @@ function App() {
                   <select value={settingsForm.auto_social_mode} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_mode: e.target.value }))}>
                     <option value="feed">Feed</option>
                     <option value="reel">Reel</option>
+                    <option value="group">Grupo</option>
                   </select>
                 </div>
                 <div className="field">
@@ -1644,6 +1748,55 @@ function App() {
                   <label>Status do token</label>
                   <div className="check-grid">
                     <span className={`badge ${metaTokenConfigured ? "is-success" : "is-warning"}`}>{metaTokenConfigured ? "Token salvo" : "Token ausente"}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="field-grid" style={{ marginTop: 12 }}>
+                <div className="field">
+                  <label>WhatsApp grupo</label>
+                  <input type="text" value={settingsForm.whatsapp_group_target} onChange={(e) => setSettingsForm((state) => ({ ...state, whatsapp_group_target: e.target.value }))} />
+                  <small>Ex.: group id alvo no 360dialog.</small>
+                </div>
+                <div className="field">
+                  <label>WhatsApp API base (360dialog)</label>
+                  <input type="text" value={settingsForm.whatsapp_api_base_url} onChange={(e) => setSettingsForm((state) => ({ ...state, whatsapp_api_base_url: e.target.value }))} />
+                </div>
+                <div className="field">
+                  <label>WhatsApp token (360dialog)</label>
+                  <input type="password" placeholder={settingsForm.whatsapp_api_base_url ? "Deixe vazio para manter" : "Informe depois"} value={settingsForm.whatsapp_api_token} onChange={(e) => setSettingsForm((state) => ({ ...state, whatsapp_api_token: e.target.value }))} />
+                </div>
+              </div>
+
+              <div className="field-grid" style={{ marginTop: 12 }}>
+                <div className="field">
+                  <label>Grupos detectados</label>
+                  <select
+                    value={settingsForm.whatsapp_group_target}
+                    onChange={(e) => setSettingsForm((state) => ({ ...state, whatsapp_group_target: e.target.value }))}
+                  >
+                    <option value="">Selecione um grupo carregado</option>
+                    {whatsappGroups.map((item) => (
+                      <option key={item.group_id} value={item.group_id}>
+                        {item.subject} ({item.group_id})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Ação</label>
+                  <div className="provider-actions" style={{ marginTop: 4 }}>
+                    <button className="tiny-button is-soft" type="button" onClick={handleLoadWhatsappGroups} disabled={whatsappGroupsLoading}>
+                      {whatsappGroupsLoading ? "Carregando grupos..." : "Carregar grupos do 360dialog"}
+                    </button>
+                  </div>
+                </div>
+                <div className="field">
+                  <label>Status</label>
+                  <div className="check-grid">
+                    <span className={`badge ${settingsForm.whatsapp_group_target ? "is-success" : "is-neutral"}`}>
+                      {settingsForm.whatsapp_group_target ? "Grupo selecionado" : "Grupo pendente"}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -2403,18 +2556,26 @@ function App() {
               <div className="panel-head">
                 <div>
                   <h3 className="panel-title">Execução social</h3>
-                  <p className="panel-subtitle">Fila pronta para Facebook e Instagram com seleção manual antes da publicação.</p>
+                  <p className="panel-subtitle">
+                    {isWhatsappWebSelected
+                      ? "Fila pronta para montar links locais do WhatsApp Web sem mensalidade, com envio manual pela sua sessao logada."
+                      : isWhatsappGroupSelected
+                      ? "Fila pronta para montar mensagens no estilo WhatsApp antes da integração do envio real."
+                      : "Fila pronta para Facebook e Instagram com seleção manual antes da publicação."}
+                  </p>
                 </div>
                 <div className="provider-actions">
                   <button className="button is-secondary" onClick={() => loadSocialPreview(Number(socialForm.limit))} disabled={socialLoading}>
                     {socialLoading ? "Atualizando fila..." : "Atualizar fila"}
                   </button>
                   <button className="button is-primary" onClick={handleSocialRun} disabled={runLoading.social}>
-                    {runLoading.social ? "Publicando..." : "Publicar selecionados"}
+                    {runLoading.social ? ((isWhatsappGroupSelected || isWhatsappWebSelected) ? "Preparando..." : "Publicando...") : ((isWhatsappGroupSelected || isWhatsappWebSelected) ? "Preparar lote" : "Publicar selecionados")}
                   </button>
-                  <button className="button is-secondary" onClick={handleFacebookBatch} disabled={runLoading.batch}>
-                    {runLoading.batch ? "Rodando lote..." : "Facebook em lote"}
-                  </button>
+                  {!(isWhatsappGroupSelected || isWhatsappWebSelected) ? (
+                    <button className="button is-secondary" onClick={handleFacebookBatch} disabled={runLoading.batch}>
+                      {runLoading.batch ? "Rodando lote..." : "Facebook em lote"}
+                    </button>
+                  ) : null}
                 </div>
               </div>
 
@@ -2472,6 +2633,99 @@ function App() {
                 <span className="meta-chip">{fmtInt(socialCandidates.length)} carregada(s)</span>
                 {socialPreview?.database?.ok === false ? <span className="meta-chip">Banco indisponivel</span> : null}
               </div>
+
+              {(isWhatsappGroupSelected || isWhatsappWebSelected) ? (
+                <div className="surface" style={{ marginTop: 18, padding: 0, overflow: "hidden" }}>
+                  <div style={{ padding: "16px 18px", borderBottom: "1px solid rgba(16, 24, 40, 0.08)", background: "linear-gradient(135deg, #103a7a 0%, #1d4ed8 100%)", color: "#fff" }}>
+                    <strong style={{ display: "block", fontSize: 18 }}>{isWhatsappWebSelected ? "Preview WhatsApp Web Local" : "Preview WhatsApp Grupo"}</strong>
+                    <span style={{ opacity: 0.86, fontSize: 13 }}>
+                      {isWhatsappWebSelected
+                        ? "Sessao local do WhatsApp Web · mensagem pronta com link para abrir e enviar manualmente"
+                        : `${settingsForm.whatsapp_group_target || "Grupo ainda não definido"} · mensagem pronta no formato do lote`}
+                    </span>
+                  </div>
+                  <div style={{ background: "#e9ded3", padding: 18 }}>
+                    {!whatsappPreviewItems.length ? (
+                      <div className="empty-state" style={{ margin: 0 }}>Selecione ofertas para visualizar o preview do WhatsApp.</div>
+                    ) : (
+                      <div style={{ display: "grid", gap: 14 }}>
+                        {isWhatsappWebSelected ? (
+                          <div className="surface" style={{ padding: 14, background: "#f8fafc" }}>
+                            <strong style={{ display: "block", marginBottom: 10 }}>Lote rapido do WhatsApp Web</strong>
+                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+                              <button
+                                className="tiny-button is-soft"
+                                type="button"
+                                onClick={() => handleCopyText(whatsappBatchText, "Lote completo copiado.")}
+                              >
+                                Copiar lote completo
+                              </button>
+                            </div>
+                            <div style={{ display: "grid", gap: 8 }}>
+                              {whatsappPreviewItems.map((item, index) => (
+                                <div key={`wa-batch-${item.offer_id}`} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                                  <span className="meta-chip">Legenda {index + 1}</span>
+                                  <a
+                                    className="tiny-button"
+                                    href={`https://web.whatsapp.com/send?text=${encodeURIComponent(whatsappCaptionForItem(item))}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    Abrir link {index + 1}
+                                  </a>
+                                  <button
+                                    className="tiny-button is-soft"
+                                    type="button"
+                                    onClick={() => handleCopyText(whatsappCaptionForItem(item), `Legenda ${index + 1} copiada.`)}
+                                  >
+                                    Copiar legenda
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {whatsappPreviewItems.map((item, index) => (
+                          <div key={`wa-preview-${item.offer_id}`} style={{ marginLeft: "auto", width: "min(100%, 720px)", display: "grid", gap: 10 }}>
+                            <div style={{ background: "#ffffff", borderRadius: 18, padding: 12, boxShadow: "0 10px 24px rgba(15, 23, 42, 0.08)" }}>
+                              {whatsappPreviewImageUrl(item) ? (
+                                <img
+                                  src={whatsappPreviewImageUrl(item)}
+                                  alt={item.title}
+                                  style={{ width: "100%", maxHeight: 760, objectFit: "contain", borderRadius: 14, background: "#fff" }}
+                                />
+                              ) : null}
+                            </div>
+                            <div style={{ marginLeft: "auto", maxWidth: 620, background: "#dcf8c6", borderRadius: "18px 18px 4px 18px", padding: 14, boxShadow: "0 10px 24px rgba(15, 23, 42, 0.08)" }}>
+                              <div style={{ whiteSpace: "pre-wrap", color: "#102a43", fontSize: 14, lineHeight: 1.55 }}>{whatsappCaptionForItem(item)}</div>
+                              {item.coupon ? (
+                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                                  <span className="meta-chip">Cupom {item.coupon}</span>
+                                </div>
+                              ) : null}
+                              {isWhatsappWebSelected ? (
+                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                                  <a className="tiny-button" href={`https://web.whatsapp.com/send?text=${encodeURIComponent(whatsappCaptionForItem(item))}`} target="_blank" rel="noreferrer">
+                                    Abrir legenda no WhatsApp Web
+                                  </a>
+                                  <button
+                                    className="tiny-button is-soft"
+                                    type="button"
+                                    onClick={() => handleCopyText(whatsappCaptionForItem(item), `Legenda ${index + 1} copiada.`)}
+                                  >
+                                    Copiar legenda
+                                  </button>
+                                </div>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
 
               <div style={{ marginTop: 18 }}>
                 {!socialQueue.length ? (

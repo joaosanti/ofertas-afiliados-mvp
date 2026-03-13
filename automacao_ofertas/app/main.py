@@ -42,6 +42,7 @@ from app.services.store_maintenance import (
 from app.services.sftp_deploy import (
     deploy_public_site_via_sftp,
     deploy_stories_via_sftp,
+    ensure_stories_dir,
     sftp_settings_snapshot,
 )
 from app.services.social_meta import (
@@ -51,9 +52,18 @@ from app.services.social_meta import (
     generate_reel_asset,
     generate_story_asset,
     publish_facebook_offer_batch,
+    publish_facebook_photo,
     publish_facebook_post,
     publish_facebook_reel,
+    publish_facebook_story_photo,
     publish_instagram_container,
+)
+from app.services.whatsapp_social import (
+    list_whatsapp_groups,
+    prepare_whatsapp_group_batch,
+    prepare_whatsapp_web_batch,
+    send_whatsapp_group_batch,
+    whatsapp_settings_snapshot,
 )
 
 app = FastAPI(title="Automacao de Ofertas")
@@ -223,6 +233,9 @@ class DashboardSettingsPayload(BaseModel):
     auto_story_times: str | None = None
     auto_story_platform: str | None = None
     auto_story_limit: int | None = None
+    whatsapp_api_base_url: str | None = None
+    whatsapp_api_token: str | None = None
+    whatsapp_group_target: str | None = None
     sftp_host: str | None = None
     sftp_port: int | None = None
     sftp_username: str | None = None
@@ -422,6 +435,7 @@ def _env_settings_snapshot() -> dict:
         "auto_story_times": os.getenv("AUTO_STORY_TIMES") or "",
         "auto_story_platform": (os.getenv("AUTO_STORY_PLATFORM") or "instagram").strip().lower(),
         "auto_story_limit": max(1, int((os.getenv("AUTO_STORY_LIMIT") or "1").strip() or "1")),
+        "whatsapp": whatsapp_settings_snapshot(),
         "sftp": sftp_settings_snapshot(),
     }
 
@@ -605,11 +619,22 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
             record_execution_success(db, run_id, processed_count=int(result["count"]), result=result)
             return {"run_id": run_id} | result
 
+        if platform == "whatsapp" and mode == "group":
+            result = send_whatsapp_group_batch(db, limit=limit, offer_ids=selected_offer_ids or None)
+            record_execution_success(db, run_id, processed_count=int(result["count"]), result=result)
+            return {"run_id": run_id} | result
+
+        if platform == "whatsapp" and mode == "web":
+            result = prepare_whatsapp_web_batch(db, limit=limit, offer_ids=selected_offer_ids or None)
+            record_execution_success(db, run_id, processed_count=int(result["count"]), result=result)
+            return {"run_id": run_id} | result
+
         previews = build_meta_post_previews(
             db,
             limit=limit,
             offer_ids=selected_offer_ids or None,
             include_story_assets=((platform == "instagram" and mode in {"story", "feed_story"}) or (platform in {"both", "facebook_instagram"} and mode == "feed_story")),
+            include_square_card_assets=(platform in {"facebook", "instagram", "both", "facebook_instagram"} and mode in {"feed", "story", "feed_story"}),
         )
         if not previews:
             raise ValueError("Nao ha ofertas elegiveis para publicar.")
@@ -626,9 +651,12 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                 success_for_item = False
 
                 try:
-                    facebook_result = publish_facebook_post(
-                        message=item["facebook_payload"]["message"],
-                        link=item["facebook_payload"]["link"],
+                    image_filename = (item.get("facebook_payload", {}).get("image_filename") or "").strip()
+                    if image_filename:
+                        deploy_stories_via_sftp(only_files=[image_filename])
+                    facebook_result = publish_facebook_photo(
+                        image_url=item["facebook_payload"]["image_url"],
+                        caption=item["facebook_payload"]["message"],
                     )
                     combined_item["facebook_result"] = facebook_result["result"]
                     success_for_item = True
@@ -643,6 +671,9 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     )
 
                 try:
+                    feed_filename = (item.get("instagram_payload", {}).get("image_filename") or "").strip()
+                    if feed_filename:
+                        deploy_stories_via_sftp(only_files=[feed_filename])
                     created = create_instagram_media_container(
                         image_url=item["instagram_payload"]["image_url"],
                         caption=item["instagram_payload"]["caption"],
@@ -673,9 +704,12 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                 success_for_item = False
 
                 try:
-                    facebook_result = publish_facebook_post(
-                        message=item["facebook_payload"]["message"],
-                        link=item["facebook_payload"]["link"],
+                    image_filename = (item.get("facebook_payload", {}).get("image_filename") or "").strip()
+                    if image_filename:
+                        deploy_stories_via_sftp(only_files=[image_filename])
+                    facebook_result = publish_facebook_photo(
+                        image_url=item["facebook_payload"]["image_url"],
+                        caption=item["facebook_payload"]["message"],
                     )
                     combined_item["facebook_result"] = facebook_result["result"]
                     success_for_item = True
@@ -690,6 +724,9 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     )
 
                 try:
+                    feed_filename = (item.get("instagram_payload", {}).get("image_filename") or "").strip()
+                    if feed_filename:
+                        deploy_stories_via_sftp(only_files=[feed_filename])
                     created_feed = create_instagram_media_container(
                         image_url=item["instagram_payload"]["image_url"],
                         caption=item["instagram_payload"]["caption"],
@@ -711,9 +748,11 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                 try:
                     story_filename = item["story_payload"]["image_url"].rstrip("/").split("/")[-1]
                     deploy_result = deploy_stories_via_sftp(only_files=[story_filename])
+                    facebook_story = publish_facebook_story_photo(item["story_payload"]["image_url"])
                     created_story = create_instagram_story_container(item["story_payload"]["image_url"])
                     published_story = publish_instagram_container(created_story["result"]["id"])
                     combined_item["story_deploy"] = deploy_result
+                    combined_item["facebook_story_result"] = facebook_story["result"]
                     combined_item["story_creation_id"] = created_story["result"]["id"]
                     combined_item["story_result"] = published_story["result"]
                     success_for_item = True
@@ -722,7 +761,7 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                         {
                             "offer_id": item["offer_id"],
                             "title": item["title"],
-                            "platform": "instagram_story",
+                            "platform": "facebook_instagram_story",
                             "error": str(exc),
                         }
                     )
@@ -764,6 +803,9 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
         elif platform == "instagram" and mode == "feed":
             for item in previews:
                 try:
+                    feed_filename = (item.get("instagram_payload", {}).get("image_filename") or "").strip()
+                    if feed_filename:
+                        deploy_stories_via_sftp(only_files=[feed_filename])
                     created = create_instagram_media_container(
                         image_url=item["instagram_payload"]["image_url"],
                         caption=item["instagram_payload"]["caption"],
@@ -809,6 +851,9 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                 success_for_item = False
 
                 try:
+                    feed_filename = (item.get("instagram_payload", {}).get("image_filename") or "").strip()
+                    if feed_filename:
+                        deploy_stories_via_sftp(only_files=[feed_filename])
                     created_feed = create_instagram_media_container(
                         image_url=item["instagram_payload"]["image_url"],
                         caption=item["instagram_payload"]["caption"],
@@ -1029,6 +1074,21 @@ def manager_ui_assets(asset_path: str, _: str = Depends(require_manager_auth)):
 
     if not asset.exists() or not asset.is_file():
         raise HTTPException(status_code=404, detail="Asset nao encontrado.")
+
+    return FileResponse(asset)
+
+
+@app.get("/dashboard/api/stories/{filename}")
+def dashboard_story_asset(filename: str, _: str = Depends(require_manager_auth)):
+    stories_dir = ensure_stories_dir().resolve()
+    asset = (stories_dir / filename).resolve()
+    try:
+        asset.relative_to(stories_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Story invalido.") from exc
+
+    if not asset.exists() or not asset.is_file():
+        raise HTTPException(status_code=404, detail="Story nao encontrado.")
 
     return FileResponse(asset)
 
@@ -1606,6 +1666,12 @@ def dashboard_api_settings_save(payload: DashboardSettingsPayload, _: str = Depe
         updates["AUTO_SOCIAL_MODE"] = payload.auto_social_mode.strip().lower() or "feed"
     if payload.auto_social_limit is not None:
         updates["AUTO_SOCIAL_LIMIT"] = str(max(1, min(int(payload.auto_social_limit), 20)))
+    if payload.whatsapp_api_base_url is not None:
+        updates["WHATSAPP_API_BASE_URL"] = payload.whatsapp_api_base_url.strip()
+    if payload.whatsapp_api_token is not None and payload.whatsapp_api_token.strip() != "":
+        updates["WHATSAPP_API_TOKEN"] = payload.whatsapp_api_token.strip()
+    if payload.whatsapp_group_target is not None:
+        updates["WHATSAPP_GROUP_TARGET"] = payload.whatsapp_group_target.strip()
     if payload.auto_story_enabled is not None:
         updates["AUTO_STORY_ENABLED"] = "true" if payload.auto_story_enabled else "false"
     if payload.auto_story_times is not None:
@@ -1666,6 +1732,19 @@ def dashboard_api_deploy_site(_: str = Depends(require_manager_auth)):
     except paramiko.SSHException as e:
         raise HTTPException(status_code=502, detail=str(e))
     except OSError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/dashboard/api/whatsapp/groups")
+def dashboard_api_whatsapp_groups(limit: int = 100, _: str = Depends(require_manager_auth)):
+    try:
+        return list_whatsapp_groups(limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        raise HTTPException(status_code=502, detail=detail)
+    except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 

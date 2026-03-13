@@ -124,7 +124,7 @@ class AutomationScheduler:
                 "interval_minutes": interval,
                 "times": times,
                 "platform": self.social_platform(),
-                "mode": "feed",
+                "mode": self.social_mode(),
                 "limit": self.social_limit(),
                 "last_run_at": None,
                 "last_status": None,

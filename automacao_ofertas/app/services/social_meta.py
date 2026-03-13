@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from sqlalchemy import bindparam, text
 
+from app.services.offer_card_asset import generate_offer_square_card_asset
 from app.services.sftp_deploy import ensure_stories_dir, story_public_url
 
 
@@ -709,6 +710,7 @@ def build_meta_post_previews(
     limit: int = 12,
     offer_ids: list[int] | None = None,
     include_story_assets: bool = True,
+    include_square_card_assets: bool = False,
     search_query: str | None = None,
 ) -> list[dict[str, Any]]:
     capped_limit = max(1, min(limit, 200))
@@ -743,16 +745,19 @@ def build_meta_post_previews(
         offer = dict(row)
         if _affiliate_audit(str(offer.get("loja") or ""), str(offer.get("url_afiliado") or "")).get("severity") != "ok":
             continue
+        square_card_asset = generate_offer_square_card_asset(offer, suffix="social") if include_square_card_assets else None
         if include_story_assets:
             story_asset = generate_story_asset(offer)
             story_payload = {
                 "image_url": story_asset["public_url"],
+                "image_filename": story_asset["filename"],
                 "caption": story_asset["caption"],
                 "offer_url": story_asset["destination_url"],
             }
         else:
             story_payload = {
                 "image_url": offer["imagem_url"],
+                "image_filename": None,
                 "caption": _story_caption_for_offer(offer),
                 "offer_url": _destination_url(offer),
             }
@@ -775,9 +780,12 @@ def build_meta_post_previews(
                 "facebook_payload": {
                     "message": _caption_for_offer(offer),
                     "link": _destination_url(offer),
+                    "image_url": (square_card_asset["public_url"] if square_card_asset else offer["imagem_url"]),
+                    "image_filename": (square_card_asset["filename"] if square_card_asset else None),
                 },
                 "instagram_payload": {
-                    "image_url": offer["imagem_url"],
+                    "image_url": (square_card_asset["public_url"] if square_card_asset else offer["imagem_url"]),
+                    "image_filename": (square_card_asset["filename"] if square_card_asset else None),
                     "caption": _caption_for_offer(offer),
                 },
                 "story_payload": story_payload,
@@ -808,16 +816,91 @@ def publish_facebook_post(message: str, link: str | None = None) -> dict[str, An
     return {"ok": True, "platform": "facebook", "page_id": _meta_page_id(), "result": data}
 
 
+def publish_facebook_photo(image_url: str, caption: str) -> dict[str, Any]:
+    image_url = (image_url or "").strip()
+    caption = (caption or "").strip()
+    if not image_url:
+        raise ValueError("image_url da foto do Facebook nao pode ficar vazio.")
+    if not caption:
+        raise ValueError("caption da foto do Facebook nao pode ficar vazio.")
+
+    payload = {
+        "url": image_url,
+        "caption": caption,
+        "published": "true",
+        "access_token": _meta_page_token(),
+    }
+
+    with httpx.Client(timeout=30) as client:
+        response = client.post(f"{_meta_api_base()}/{_meta_page_id()}/photos", data=payload)
+        response.raise_for_status()
+        data = response.json()
+
+    return {"ok": True, "platform": "facebook_photo", "page_id": _meta_page_id(), "result": data}
+
+
+def publish_facebook_story_photo(image_url: str) -> dict[str, Any]:
+    image_url = (image_url or "").strip()
+    if not image_url:
+        raise ValueError("image_url do story do Facebook nao pode ficar vazio.")
+
+    page_id = _meta_page_id()
+    access_token = _meta_page_token()
+
+    with httpx.Client(timeout=30) as client:
+        upload_response = client.post(
+            f"{_meta_api_base()}/{page_id}/photos",
+            data={
+                "url": image_url,
+                "published": "false",
+                "access_token": access_token,
+            },
+        )
+        upload_response.raise_for_status()
+        upload_data = upload_response.json()
+
+        photo_id = str(upload_data.get("id") or "").strip()
+        if not photo_id:
+            raise ValueError(f"Resposta inesperada ao preparar foto do story do Facebook: {upload_data}")
+
+        story_response = client.post(
+            f"{_meta_api_base()}/{page_id}/photo_stories",
+            data={
+                "photo_id": photo_id,
+                "access_token": access_token,
+            },
+        )
+        story_response.raise_for_status()
+        story_data = story_response.json()
+
+    return {
+        "ok": True,
+        "platform": "facebook_story",
+        "page_id": page_id,
+        "photo_id": photo_id,
+        "result": story_data,
+    }
+
+
 def publish_facebook_offer_batch(db, limit: int = 5, offer_ids: list[int] | None = None) -> dict[str, Any]:
-    previews = build_meta_post_previews(db, limit=limit, offer_ids=offer_ids, include_story_assets=False)
+    previews = build_meta_post_previews(
+        db,
+        limit=limit,
+        offer_ids=offer_ids,
+        include_story_assets=False,
+        include_square_card_assets=True,
+    )
     if not previews:
         raise ValueError("Nao ha ofertas elegiveis para publicar no Facebook.")
 
     published = []
     for item in previews:
-        response = publish_facebook_post(
-            message=item["facebook_payload"]["message"],
-            link=item["facebook_payload"]["link"],
+        image_filename = (item.get("facebook_payload", {}).get("image_filename") or "").strip()
+        if image_filename:
+            deploy_stories_via_sftp(only_files=[image_filename])
+        response = publish_facebook_photo(
+            image_url=item["facebook_payload"]["image_url"],
+            caption=item["facebook_payload"]["message"],
         )
         published.append(
             {
