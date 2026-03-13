@@ -34,7 +34,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   exit;
 }
 
-$sql = 'SELECT o.id, o.titulo, o.slug, o.preco, o.loja, o.categoria, o.destaque, o.ativo, o.atualizado_em, o.url_afiliado,
+$sql = 'SELECT o.id, o.titulo, o.slug, o.preco, o.preco_antigo, o.loja, o.categoria, o.destaque, o.ativo, o.atualizado_em, o.url_afiliado,
+               o.imagem_url, o.cupom, o.tags,
                COUNT(c.id) AS clicks
         FROM ofertas o
         LEFT JOIN cliques c ON c.oferta_id = o.id';
@@ -64,13 +65,22 @@ if ($where) {
   $sql .= ' WHERE ' . implode(' AND ', $where);
 }
 
-$sql .= ' GROUP BY o.id, o.titulo, o.slug, o.preco, o.loja, o.categoria, o.destaque, o.ativo, o.atualizado_em, o.url_afiliado';
+$sql .= ' GROUP BY o.id, o.titulo, o.slug, o.preco, o.preco_antigo, o.loja, o.categoria, o.destaque, o.ativo, o.atualizado_em, o.url_afiliado, o.imagem_url, o.cupom, o.tags';
 $sql .= ' ORDER BY clicks DESC, o.atualizado_em DESC, o.id DESC LIMIT 300';
 
 $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $ofertas = $stmt->fetchAll();
 $lojas = $pdo->query('SELECT loja, COUNT(*) AS total FROM ofertas GROUP BY loja ORDER BY total DESC, loja ASC')->fetchAll();
+$visibleCount = count($ofertas);
+$activeCount = 0;
+$featuredCount = 0;
+$visibleClicks = 0;
+foreach ($ofertas as $item) {
+  $activeCount += ((int) $item['ativo'] === 1) ? 1 : 0;
+  $featuredCount += ((int) $item['destaque'] === 1) ? 1 : 0;
+  $visibleClicks += (int) ($item['clicks'] ?? 0);
+}
 $invalidMeliCount = (int) $pdo->query("
   SELECT COUNT(*)
   FROM ofertas
@@ -95,35 +105,20 @@ $invalidMeliCount = (int) $pdo->query("
   <title>Admin - Ofertas</title>
   <link rel="stylesheet" href="/assets/css/style.css">
   <link rel="stylesheet" href="/assets/css/admin.css">
-  <style>
-    .admin-wrap { display: grid; gap: 18px; }
-    .toolbar, .panel { background: #fff; border: 1px solid #d9e2f2; border-radius: 18px; padding: 18px; }
-    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
-    .filters { display: flex; gap: 10px; flex-wrap: wrap; }
-    .table-wrap { overflow-x: auto; }
-    table { width: 100%; border-collapse: collapse; min-width: 1150px; }
-    th, td { border-bottom: 1px solid #e7edf7; text-align: left; padding: 12px 10px; vertical-align: top; font-size: 14px; }
-    th { color: #42577c; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
-    .actions form { display: inline-block; margin: 4px 6px 0 0; }
-    .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 5px 10px; border-radius: 999px; border: 1px solid #d8e2f2; color: #324564; margin: 0 6px 6px 0; }
-    .status.ok { background: #eef8f0; color: #1d6b39; border-color: #c9ead3; }
-    .status.warn { background: #fff7e7; color: #8a5a00; border-color: #f0deaf; }
-    .status.off { background: #f5f7fb; color: #5c6d8a; }
-    .url-box { max-width: 360px; word-break: break-all; color: #435776; font-size: 12px; line-height: 1.45; }
-    .title-cell strong { display: block; margin-bottom: 6px; color: #10213a; }
-    .meta-line { color: #6c7c98; font-size: 12px; }
-    .btn-link { display: inline-flex; align-items: center; gap: 6px; padding: 9px 12px; border-radius: 999px; border: 1px solid #d8e2f2; background: #fff; color: #164a9f; font-size: 12px; font-weight: 700; text-decoration: none; }
-    .btn-link.primary { background: #164a9f; border-color: #164a9f; color: #fff; }
-    @media (max-width: 840px) {
-      .toolbar { align-items: flex-start; }
-    }
-  </style>
 </head>
 <body class="admin-page">
 <header>
-  <div class="container" style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
-    <div style="font-weight:700;">Admin de Ofertas</div>
-    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+  <div class="container admin-header">
+    <div class="admin-brand">
+      <div class="admin-brand-mark">
+        <img src="/assets/img/logo-zp.png" alt="Zero Preco">
+      </div>
+      <div class="admin-brand-copy">
+        <strong>Zero Preco Admin</strong>
+        <span>Catalogo, afiliados e curadoria em um painel mais visual.</span>
+      </div>
+    </div>
+    <div class="admin-header-actions">
       <a class="badge" href="/admin/oferta_editar.php">+ Nova oferta</a>
       <a class="badge" href="/admin/auditoria_links.php">Auditoria de links</a>
       <a class="badge" href="/admin/ml_corrigir_lote.php">Corrigir ML em lote</a>
@@ -133,17 +128,55 @@ $invalidMeliCount = (int) $pdo->query("
   </div>
 </header>
 
-<main class="container admin-wrap">
+<main class="container admin-shell">
   <?php if ($flash): ?>
     <div class="admin-alert <?= h((string) ($flash['type'] ?? '')) ?>"><?= h((string) ($flash['message'] ?? '')) ?></div>
   <?php endif; ?>
-  <section class="toolbar">
-    <div>
-      <div style="font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:#6c7c98;">Auditoria de links</div>
-      <div style="font-weight:700; color:#10213a;">Mercado Livre precisa usar link oficial de afiliado, como `/social/`, `matt_*`, URL com `wid` e marcadores `affiliates` ou links do fluxo `affiliate-profile`.</div>
+  <section class="admin-hero">
+    <div class="admin-hero-head">
+      <div class="admin-hero-copy">
+        <span class="admin-kicker">Gerenciador de produtos</span>
+        <h1>Ofertas com visual mais limpo, foto forte e leitura rapida do afiliado.</h1>
+        <p>O fluxo continua o mesmo, mas agora o catalogo fica mais facil de revisar: preco, imagem, cupom, status, cliques, slug e link afiliado aparecem no mesmo card sem quebrar a operacao atual.</p>
+      </div>
+      <div class="admin-hero-actions">
+        <a class="btn-link primary" href="/admin/oferta_editar.php">Criar oferta</a>
+        <a class="badge" href="/admin/auditoria_links.php">Abrir auditoria</a>
+      </div>
     </div>
+  </section>
 
-    <div class="filters">
+  <section class="admin-stats-grid">
+    <article class="admin-stat-card">
+      <div class="admin-stat-label">Ofertas nesta visao</div>
+      <div class="admin-stat-value"><?= (int) $visibleCount ?></div>
+      <div class="admin-stat-foot"><?= $filter !== '' ? 'Filtro por loja ativo.' : 'Ate 300 itens mais relevantes.' ?></div>
+    </article>
+    <article class="admin-stat-card">
+      <div class="admin-stat-label">Ativas</div>
+      <div class="admin-stat-value"><?= (int) $activeCount ?></div>
+      <div class="admin-stat-foot"><?= (int) $featuredCount ?> em destaque neste recorte.</div>
+    </article>
+    <article class="admin-stat-card">
+      <div class="admin-stat-label">Cliques somados</div>
+      <div class="admin-stat-value"><?= number_format((int) $visibleClicks, 0, ',', '.') ?></div>
+      <div class="admin-stat-foot">Ordenacao prioriza clique e atualizacao.</div>
+    </article>
+    <article class="admin-stat-card">
+      <div class="admin-stat-label">ML para revisar</div>
+      <div class="admin-stat-value"><?= (int) $invalidMeliCount ?></div>
+      <div class="admin-stat-foot">Links sem marcador oficial de afiliado.</div>
+    </article>
+  </section>
+
+  <section class="admin-panel">
+    <div class="admin-panel-head">
+      <div>
+        <h2 class="admin-section-title">Filtros rapidos</h2>
+        <p>Mercado Livre precisa usar link oficial de afiliado, como <code>/social/</code>, <code>matt_*</code>, URL com <code>wid</code> e marcadores <code>affiliates</code> ou links do fluxo <code>affiliate-profile</code>.</p>
+      </div>
+    </div>
+    <div class="admin-filter-row">
       <a class="badge" href="/admin/ofertas.php">Todas</a>
       <a class="badge" href="/admin/ofertas.php?modo=ml_invalidos">Somente ML invalidos (<?= $invalidMeliCount ?>)</a>
       <?php foreach ($lojas as $loja): ?>
@@ -152,64 +185,101 @@ $invalidMeliCount = (int) $pdo->query("
     </div>
   </section>
 
-  <section class="panel table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Titulo</th>
-          <th>Preco</th>
-          <th>Cliques</th>
-          <th>Loja / Categoria</th>
-          <th>Status</th>
-          <th>URL Afiliado</th>
-          <th>Acoes</th>
-        </tr>
-      </thead>
-      <tbody>
+  <section class="admin-panel">
+    <div class="admin-panel-head">
+      <div>
+        <h2 class="admin-section-title">Catalogo operacional</h2>
+        <p>Cards grandes para revisar produto, conversao e integridade do link sem perder as acoes rapidas.</p>
+      </div>
+    </div>
+
+    <?php if (!$ofertas): ?>
+      <div class="admin-empty">Nenhuma oferta encontrada para este filtro.</div>
+    <?php else: ?>
+      <div class="admin-offers-grid">
         <?php foreach ($ofertas as $o): ?>
           <?php $isMeli = strtolower((string) $o['loja']) === 'mercado livre'; ?>
           <?php $isAffiliateOk = $isMeli ? admin_is_meli_affiliate_url($o['url_afiliado']) : false; ?>
-          <tr>
-            <td><?= (int) $o['id'] ?></td>
-            <td class="title-cell">
-              <strong><?= h($o['titulo']) ?></strong>
-              <div class="meta-line">slug: <?= h($o['slug']) ?></div>
-              <div class="meta-line">atualizado em: <?= h((string) $o['atualizado_em']) ?></div>
-            </td>
-            <td>R$ <?= number_format((float) $o['preco'], 2, ',', '.') ?></td>
-            <td><?= (int) ($o['clicks'] ?? 0) ?></td>
-            <td><?= h($o['loja']) ?><br><span class="meta-line"><?= h($o['categoria']) ?></span></td>
-            <td>
-              <span class="status <?= ((int) $o['ativo'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $o['ativo'] === 1) ? 'Ativa' : 'Inativa' ?></span>
-              <span class="status <?= ((int) $o['destaque'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $o['destaque'] === 1) ? 'Destaque' : 'Normal' ?></span>
-              <?php if ($isMeli): ?>
-                <span class="status <?= $isAffiliateOk ? 'ok' : 'warn' ?>"><?= $isAffiliateOk ? 'Link ML com marcador afiliado' : 'Revisar link ML' ?></span>
-              <?php endif; ?>
-            </td>
-            <td>
-              <div class="url-box"><?= h($o['url_afiliado']) ?></div>
-            </td>
-            <td class="actions">
-              <a class="btn-link" href="/admin/oferta_editar.php?id=<?= (int) $o['id'] ?>">Editar</a>
-              <a class="btn-link primary" href="<?= h($o['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Testar link</a>
-              <form method="post">
-                <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
-                <input type="hidden" name="id" value="<?= (int) $o['id'] ?>">
-                <input type="hidden" name="acao" value="toggle_ativo">
-                <button class="badge" type="submit"><?= ((int) $o['ativo'] === 1) ? 'Desativar' : 'Ativar' ?></button>
-              </form>
-              <form method="post">
-                <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
-                <input type="hidden" name="id" value="<?= (int) $o['id'] ?>">
-                <input type="hidden" name="acao" value="toggle_destaque">
-                <button class="badge" type="submit"><?= ((int) $o['destaque'] === 1) ? 'Remover destaque' : 'Destacar' ?></button>
-              </form>
-            </td>
-          </tr>
+          <article class="admin-offer-card">
+            <div class="admin-offer-layout">
+              <div>
+                <?php if (!empty($o['imagem_url'])): ?>
+                  <img class="admin-offer-thumb" src="<?= h($o['imagem_url']) ?>" alt="<?= h($o['titulo']) ?>">
+                <?php else: ?>
+                  <div class="admin-thumb-fallback"><?= h(strtoupper(substr((string) $o['loja'], 0, 2) ?: 'OF')) ?></div>
+                <?php endif; ?>
+              </div>
+
+              <div>
+                <div class="admin-card-topline">
+                  <div>
+                    <h3 class="admin-card-title"><?= h($o['titulo']) ?></h3>
+                    <div class="admin-card-subtitle">ID <?= (int) $o['id'] ?> · <?= h($o['loja']) ?> · <?= h($o['categoria']) ?></div>
+                  </div>
+                </div>
+
+                <div class="admin-preview-price">
+                  <span class="admin-price">R$ <?= number_format((float) $o['preco'], 2, ',', '.') ?></span>
+                  <?php if ($o['preco_antigo'] !== null && (float) $o['preco_antigo'] > (float) $o['preco']): ?>
+                    <span class="admin-price-old">R$ <?= number_format((float) $o['preco_antigo'], 2, ',', '.') ?></span>
+                  <?php endif; ?>
+                </div>
+
+                <div class="admin-meta-row" style="margin-top: 12px;">
+                  <span class="admin-meta-chip"><?= (int) ($o['clicks'] ?? 0) ?> cliques</span>
+                  <span class="admin-meta-chip">slug: <?= h($o['slug']) ?></span>
+                  <?php if (!empty($o['cupom'])): ?>
+                    <span class="admin-meta-chip">cupom <?= h($o['cupom']) ?></span>
+                  <?php endif; ?>
+                  <?php if (!empty($o['tags'])): ?>
+                    <span class="admin-meta-chip"><?= h($o['tags']) ?></span>
+                  <?php endif; ?>
+                </div>
+
+                <div class="admin-meta-row" style="margin-top: 12px;">
+                  <span class="admin-status <?= ((int) $o['ativo'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $o['ativo'] === 1) ? 'Ativa' : 'Inativa' ?></span>
+                  <span class="admin-status <?= ((int) $o['destaque'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $o['destaque'] === 1) ? 'Destaque' : 'Normal' ?></span>
+                  <?php if ($isMeli): ?>
+                    <span class="admin-status <?= $isAffiliateOk ? 'ok' : 'warn' ?>"><?= $isAffiliateOk ? 'ML afiliado ok' : 'Revisar link ML' ?></span>
+                  <?php endif; ?>
+                </div>
+
+                <div class="admin-help" style="margin-top: 12px;">Atualizado em <?= h((string) $o['atualizado_em']) ?></div>
+              </div>
+
+              <div class="admin-mini-grid">
+                <div class="admin-side-card">
+                  <strong>URL afiliado</strong>
+                  <div class="admin-url-box"><?= h($o['url_afiliado']) ?></div>
+                </div>
+
+                <div class="admin-side-card">
+                  <strong>Acoes</strong>
+                  <div class="admin-card-actions" style="margin-top: 10px;">
+                    <a class="btn-link" href="/admin/oferta_editar.php?id=<?= (int) $o['id'] ?>">Editar</a>
+                    <a class="btn-link primary" href="<?= h($o['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Testar link</a>
+                    <a class="btn-link" href="/oferta.php?slug=<?= urlencode((string) $o['slug']) ?>" target="_blank" rel="noopener">Ver pagina</a>
+                    <a class="btn-link" href="/oferta.php?slug=<?= urlencode((string) $o['slug']) ?>&go=1" target="_blank" rel="noopener sponsored nofollow">Ir via site</a>
+                    <form method="post">
+                      <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+                      <input type="hidden" name="id" value="<?= (int) $o['id'] ?>">
+                      <input type="hidden" name="acao" value="toggle_ativo">
+                      <button class="badge" type="submit"><?= ((int) $o['ativo'] === 1) ? 'Desativar' : 'Ativar' ?></button>
+                    </form>
+                    <form method="post">
+                      <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+                      <input type="hidden" name="id" value="<?= (int) $o['id'] ?>">
+                      <input type="hidden" name="acao" value="toggle_destaque">
+                      <button class="badge" type="submit"><?= ((int) $o['destaque'] === 1) ? 'Remover destaque' : 'Destacar' ?></button>
+                    </form>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </article>
         <?php endforeach; ?>
-      </tbody>
-    </table>
+      </div>
+    <?php endif; ?>
   </section>
 </main>
 </body>

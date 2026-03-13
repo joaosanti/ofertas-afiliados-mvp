@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import paramiko
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -29,7 +30,7 @@ from app.services.automation_scheduler import AutomationScheduler
 from app.services.manual_file_import import preview_amazon_txt_file, preview_mercadolivre_txt_file, preview_shopee_csv_file
 from app.services.manual_link_import import preview_manual_affiliate_links
 from app.services.manual_page_import import preview_amazon_saved_html, preview_page_url
-from app.services.normalize import normalize_offer
+from app.services.normalize import build_slug, normalize_offer
 from app.services.publish import publish_offer
 from app.services.store_maintenance import (
     preview_mercadolivre_existing_offer_relinks,
@@ -250,11 +251,67 @@ class DashboardDeployPayload(BaseModel):
     only_files: list[str] | None = None
 
 
+class DashboardOfferUpdatePayload(BaseModel):
+    titulo: str
+    slug: str | None = None
+    descricao: str | None = None
+    preco: float | int | str = 0
+    preco_antigo: float | int | str | None = None
+    loja: str | None = None
+    url_afiliado: str
+    cupom: str | None = None
+    imagem_url: str | None = None
+    categoria: str | None = None
+    tags: str | None = None
+    destaque: bool = False
+    ativo: bool = True
+    expira_em: str | None = None
+
+
 def _bool_env(name: str, default: bool = False) -> bool:
     value = (os.getenv(name) or "").strip().lower()
     if not value:
         return default
     return value in {"1", "true", "yes", "on", "sim"}
+
+
+def _site_base_url() -> str:
+    return (os.getenv("SITE_BASE_URL") or "https://zeropreco.com.br").rstrip("/")
+
+
+def _parse_decimal(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    raw = str(value).strip()
+    if not raw:
+        return default
+    if "," in raw and "." in raw:
+        raw = raw.replace(".", "").replace(",", ".")
+    elif "," in raw:
+        raw = raw.replace(",", ".")
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _normalize_offer_slug(db, slug: str | None, title: str, ignore_id: int = 0) -> str:
+    base = build_slug((slug or "").strip() or title)
+    candidate = base
+    suffix = 2
+    while True:
+        params = {"slug": candidate}
+        sql = "SELECT id FROM ofertas WHERE slug = :slug"
+        if ignore_id > 0:
+            sql += " AND id <> :ignore_id"
+            params["ignore_id"] = ignore_id
+        sql += " LIMIT 1"
+        exists = db.execute(text(sql), params).scalar()
+        if not exists:
+            return candidate
+        suffix_text = f"-{suffix}"
+        candidate = f"{base[: max(1, 170 - len(suffix_text))]}{suffix_text}"
+        suffix += 1
 
 
 def _manager_auth_enabled() -> bool:
@@ -815,6 +872,7 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
             "facebook_reel_count": len([item for item in items if item.get("video_id")]),
             "items": items,
             "errors": errors,
+            "error_summary": (errors[0].get("error") if errors else ""),
         }
         if items:
             record_execution_success(db, run_id, processed_count=len(items), result=result)
@@ -983,6 +1041,7 @@ def dashboard_api_overview(_: str = Depends(require_manager_auth)):
             snapshot = fetch_dashboard_snapshot(db)
         except OperationalError as exc:
             snapshot = _empty_dashboard_snapshot(_database_error_message(exc))
+        snapshot["site_base_url"] = _site_base_url()
         snapshot["automation"] = scheduler.snapshot() if scheduler is not None else None
         snapshot["manager"] = {
             "auth_enabled": _manager_auth_enabled(),
@@ -1105,6 +1164,162 @@ def dashboard_api_mercadolivre_relink_existing_preview(payload: DashboardMercado
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.get("/dashboard/api/offers")
+def dashboard_api_offers(q: str = "", limit: int = 12, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        normalized_limit = min(max(int(limit or 12), 1), 50)
+        query = (q or "").strip()
+        params: dict[str, Any] = {"limit": normalized_limit}
+        sql = """
+            SELECT
+              id,
+              slug,
+              titulo,
+              descricao,
+              preco,
+              preco_antigo,
+              loja,
+              url_afiliado,
+              cupom,
+              imagem_url,
+              categoria,
+              tags,
+              destaque,
+              ativo,
+              expira_em,
+              atualizado_em
+            FROM ofertas
+        """
+        if query:
+            sql += """
+            WHERE titulo LIKE :query
+               OR slug LIKE :query
+               OR loja LIKE :query
+               OR categoria LIKE :query
+               OR tags LIKE :query
+            """
+            params["query"] = f"%{query}%"
+        sql += " ORDER BY atualizado_em DESC, id DESC LIMIT :limit"
+        rows = db.execute(text(sql), params).mappings().all()
+        items = [
+            {
+                **dict(row),
+                "preco": float(row["preco"] or 0),
+                "preco_antigo": float(row["preco_antigo"]) if row["preco_antigo"] is not None else None,
+                "destaque": bool(row["destaque"]),
+                "ativo": bool(row["ativo"]),
+                "offer_url": f"{_site_base_url()}/oferta.php?slug={row['slug']}",
+                "store_url": f"{_site_base_url()}/oferta.php?slug={row['slug']}&go=1",
+            }
+            for row in rows
+        ]
+        return {"count": len(items), "items": items}
+    finally:
+        db.close()
+
+
+@app.post("/dashboard/api/offers/{offer_id}")
+def dashboard_api_offer_update(offer_id: int, payload: DashboardOfferUpdatePayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        existing = db.execute(text("SELECT id FROM ofertas WHERE id = :id LIMIT 1"), {"id": offer_id}).scalar()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Oferta nao encontrada.")
+
+        title = (payload.titulo or "").strip()
+        affiliate_url = (payload.url_afiliado or "").strip()
+        if not title or not affiliate_url:
+            raise HTTPException(status_code=400, detail="Titulo e URL afiliado sao obrigatorios.")
+
+        slug = _normalize_offer_slug(db, payload.slug, title, ignore_id=offer_id)
+        old_price = _parse_decimal(payload.preco_antigo, default=0.0) if payload.preco_antigo not in (None, "") else None
+        expires_at = (payload.expira_em or "").strip() or None
+        if expires_at and "T" in expires_at:
+            expires_at = expires_at.replace("T", " ") + ":00"
+
+        db.execute(
+            text(
+                """
+                UPDATE ofertas
+                SET slug = :slug,
+                    titulo = :titulo,
+                    descricao = :descricao,
+                    preco = :preco,
+                    preco_antigo = :preco_antigo,
+                    loja = :loja,
+                    url_afiliado = :url_afiliado,
+                    cupom = :cupom,
+                    imagem_url = :imagem_url,
+                    categoria = :categoria,
+                    tags = :tags,
+                    destaque = :destaque,
+                    ativo = :ativo,
+                    expira_em = :expira_em,
+                    atualizado_em = NOW()
+                WHERE id = :id
+                """
+            ),
+            {
+                "id": offer_id,
+                "slug": slug,
+                "titulo": title,
+                "descricao": (payload.descricao or "").strip() or None,
+                "preco": _parse_decimal(payload.preco, default=0.0),
+                "preco_antigo": old_price,
+                "loja": (payload.loja or "").strip().lower() or None,
+                "url_afiliado": affiliate_url,
+                "cupom": (payload.cupom or "").strip() or None,
+                "imagem_url": (payload.imagem_url or "").strip() or None,
+                "categoria": (payload.categoria or "").strip() or "geral",
+                "tags": (payload.tags or "").strip() or None,
+                "destaque": 1 if payload.destaque else 0,
+                "ativo": 1 if payload.ativo else 0,
+                "expira_em": expires_at,
+            },
+        )
+        db.commit()
+        row = db.execute(
+            text(
+                """
+                SELECT
+                  id,
+                  slug,
+                  titulo,
+                  descricao,
+                  preco,
+                  preco_antigo,
+                  loja,
+                  url_afiliado,
+                  cupom,
+                  imagem_url,
+                  categoria,
+                  tags,
+                  destaque,
+                  ativo,
+                  expira_em,
+                  atualizado_em
+                FROM ofertas
+                WHERE id = :id
+                LIMIT 1
+                """
+            ),
+            {"id": offer_id},
+        ).mappings().one()
+        item = {
+            **dict(row),
+            "preco": float(row["preco"] or 0),
+            "preco_antigo": float(row["preco_antigo"]) if row["preco_antigo"] is not None else None,
+            "destaque": bool(row["destaque"]),
+            "ativo": bool(row["ativo"]),
+            "offer_url": f"{_site_base_url()}/oferta.php?slug={row['slug']}",
+            "store_url": f"{_site_base_url()}/oferta.php?slug={row['slug']}&go=1",
+        }
+        return {"ok": True, "item": item}
     finally:
         db.close()
 

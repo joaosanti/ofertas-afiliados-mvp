@@ -117,6 +117,19 @@ function humanizeImportError(message) {
   return text;
 }
 
+function humanizeSocialError(message) {
+  const text = String(message || "").trim();
+  const lowered = text.toLowerCase();
+  if (!text) return "Falha ao publicar nas redes sociais.";
+  if (lowered.includes("token da meta expirou") || lowered.includes("\"code\":190") || lowered.includes("session has expired")) {
+    return "Token da Meta expirado. Gere um novo token no Graph API Explorer e salve no manager para voltar a publicar.";
+  }
+  if (lowered.includes("meta_access_token")) {
+    return "META_ACCESS_TOKEN ausente ou inválido no manager.";
+  }
+  return text;
+}
+
 function defaultPreviewSelection(item) {
   if (item?.import_allowed === false) return false;
   if (item?.provider === "mercadolivre" && item?.affiliate_detected === false) return false;
@@ -342,6 +355,27 @@ function App() {
   const [fileImportFile, setFileImportFile] = useState(null);
   const [fileImportPreview, setFileImportPreview] = useState(null);
   const [fileImportLoading, setFileImportLoading] = useState(false);
+  const [productQuery, setProductQuery] = useState("");
+  const [productResults, setProductResults] = useState([]);
+  const [productsLoading, setProductsLoading] = useState(false);
+  const [productSaving, setProductSaving] = useState(false);
+  const [selectedProductId, setSelectedProductId] = useState(null);
+  const [productForm, setProductForm] = useState({
+    titulo: "",
+    slug: "",
+    descricao: "",
+    preco: "",
+    preco_antigo: "",
+    loja: "",
+    url_afiliado: "",
+    cupom: "",
+    imagem_url: "",
+    categoria: "",
+    tags: "",
+    destaque: false,
+    ativo: true,
+    expira_em: "",
+  });
   const [socialForm, setSocialForm] = useState({ selected: "facebook:feed", limit: 120, query: "" });
   const [socialFilters, setSocialFilters] = useState({ store: "all", category: "all" });
   const [activeSection, setActiveSection] = useState("painel");
@@ -413,6 +447,43 @@ function App() {
     () => (fileImportPreview?.items || []).some((item) => item.selected && item.provider === "mercadolivre" && Number(item.price || 0) <= 0),
     [fileImportPreview]
   );
+  const siteBaseUrl = snapshot?.site_base_url || "";
+
+  function siteOfferUrl(slug) {
+    if (!slug) return "#";
+    return siteBaseUrl ? `${siteBaseUrl}/oferta.php?slug=${encodeURIComponent(slug)}` : `/oferta.php?slug=${encodeURIComponent(slug)}`;
+  }
+
+  function siteStoreUrl(slug) {
+    if (!slug) return "#";
+    return siteBaseUrl ? `${siteBaseUrl}/oferta.php?slug=${encodeURIComponent(slug)}&go=1` : `/oferta.php?slug=${encodeURIComponent(slug)}&go=1`;
+  }
+
+  function toDatetimeLocalValue(value) {
+    if (!value) return "";
+    return String(value).replace(" ", "T").slice(0, 16);
+  }
+
+  function selectProduct(item) {
+    if (!item) return;
+    setSelectedProductId(item.id);
+    setProductForm({
+      titulo: item.titulo || "",
+      slug: item.slug || "",
+      descricao: item.descricao || "",
+      preco: item.preco ?? "",
+      preco_antigo: item.preco_antigo ?? "",
+      loja: item.loja || "",
+      url_afiliado: item.url_afiliado || "",
+      cupom: item.cupom || "",
+      imagem_url: item.imagem_url || "",
+      categoria: item.categoria || "",
+      tags: item.tags || "",
+      destaque: Boolean(item.destaque),
+      ativo: Boolean(item.ativo),
+      expira_em: toDatetimeLocalValue(item.expira_em),
+    });
+  }
 
   async function loadSnapshot() {
     setLoading(true);
@@ -473,6 +544,7 @@ function App() {
   useEffect(() => {
     loadSnapshot();
     loadSocialPreview();
+    handleProductSearch("");
   }, []);
 
   useEffect(() => {
@@ -746,6 +818,52 @@ function App() {
     }
   }
 
+  async function handleProductSearch(query = productQuery) {
+    setProductsLoading(true);
+    try {
+      const params = new URLSearchParams({
+        q: String(query || "").trim(),
+        limit: "18",
+      });
+      const data = await fetchJson(`/dashboard/api/offers?${params.toString()}`);
+      setProductResults(data.items || []);
+      if ((data.items || []).length && !selectedProductId) {
+        selectProduct(data.items[0]);
+      }
+    } catch (error) {
+      setToast({ type: "error", message: `Busca de produtos falhou: ${error.message}` });
+    } finally {
+      setProductsLoading(false);
+    }
+  }
+
+  async function handleProductSave() {
+    if (!selectedProductId) {
+      setToast({ type: "error", message: "Selecione um produto para editar." });
+      return;
+    }
+    setProductSaving(true);
+    try {
+      const data = await fetchJson(`/dashboard/api/offers/${selectedProductId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(productForm),
+      });
+      setToast({ type: "success", message: "Produto atualizado no dashboard." });
+      const savedItem = data.item;
+      setProductResults((current) => {
+        const next = current.map((item) => (item.id === savedItem.id ? savedItem : item));
+        return next.some((item) => item.id === savedItem.id) ? next : [savedItem, ...next];
+      });
+      selectProduct(savedItem);
+      await loadSnapshot();
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao salvar produto: ${error.message}` });
+    } finally {
+      setProductSaving(false);
+    }
+  }
+
   async function handleMercadoLivreExistingPreview() {
     setMlRelinkLoading(true);
     try {
@@ -920,7 +1038,13 @@ function App() {
         body: JSON.stringify(payload),
       });
       const errorCount = Number((data.errors || []).length);
-      setToast({ type: errorCount ? "error" : "success", message: `Publicacao ${payload.platform}/${payload.mode}: ${data.count} concluido(s), ${errorCount} erro(s).` });
+      const errorSummary = humanizeSocialError(data.error_summary || (data.errors || [])[0]?.error || "");
+      setToast({
+        type: errorCount ? "error" : "success",
+        message: errorCount
+          ? `Publicacao ${payload.platform}/${payload.mode}: ${data.count} concluido(s), ${errorCount} erro(s). ${errorSummary}`
+          : `Publicacao ${payload.platform}/${payload.mode}: ${data.count} concluido(s), ${errorCount} erro(s).`,
+      });
       setSocialHiddenIds((current) => [...new Set([...current, ...selectedIds])]);
       await Promise.all([loadSnapshot(), loadSocialPreview(socialForm.limit, socialForm.query)]);
     } catch (error) {
@@ -1138,9 +1262,7 @@ function App() {
 
         <main className="main">
           <section className="workspace-header">
-            <span className="hero-kicker">Zero Preço Control</span>
             <h2>{activeNavItem.label}</h2>
-            <p>{activeNavItem.note}</p>
           </section>
 
           {activeSection === "painel" ? (
@@ -1149,12 +1271,17 @@ function App() {
             <div className="hero-head">
               <div className="hero-copy">
                 <span className="hero-kicker">Painel de operação</span>
-                <h2>Gerenciador React para o backend de afiliados.</h2>
-                <p>Controle importações, publicações sociais, cliques, gráficos e os provedores atuais e futuros em uma interface única, limpa e pronta para crescer.</p>
+                <h2>Visão geral do manager.</h2>
               </div>
               <div className="hero-actions">
+                <span className="status-pill is-ok">API online</span>
+                <span className={`status-pill ${socialStatus.some((item) => !item.enabled) ? "is-warn" : "is-info"}`}>Social</span>
+                <span className={`status-pill ${manager.auth_enabled ? "is-protected" : "is-danger"}`}>{manager.auth_enabled ? "Protegido" : "Sem auth"}</span>
                 <button className="button" onClick={loadSnapshot} disabled={loading}>{loading ? "Atualizando..." : "Atualizar dados"}</button>
                 <button className="ghost-button" onClick={() => loadSocialPreview(Number(socialForm.limit))} disabled={socialLoading}>{socialLoading ? "Montando prévias..." : "Atualizar prévias sociais"}</button>
+                <form method="post" action="/manager/logout">
+                  <button className="ghost-button" type="submit">Sair</button>
+                </form>
               </div>
             </div>
           </section>
@@ -1162,15 +1289,6 @@ function App() {
           <div className="toolbar">
             <div className="toolbar-copy">
               <h3>Radar operacional</h3>
-              <p>Visão rápida de estoque ativo, engajamento, importações e social.</p>
-            </div>
-            <div className="toolbar-actions">
-              <span className="status-pill is-ok">API Python online</span>
-              <span className={`status-pill ${socialStatus.some((item) => !item.enabled) ? "is-warn" : "is-ok"}`}>Social monitorado</span>
-              <span className={`status-pill ${manager.auth_enabled ? "is-ok" : "is-warn"}`}>{manager.auth_enabled ? `Manager protegido (${manager.username})` : "Manager sem auth"}</span>
-              <form method="post" action="/manager/logout">
-                <button className="ghost-button" type="submit">Sair</button>
-              </form>
             </div>
           </div>
 
@@ -1196,6 +1314,189 @@ function App() {
               <div className="metric-foot">{fmtInt(overview.import_runs_7d)} importações + {fmtInt(overview.social_posts_7d)} posts sociais nos últimos 7 dias.</div>
             </div>
           </div>
+
+          <section className="panel" style={{ marginBottom: 18 }}>
+            <div className="panel-head">
+              <div>
+                <h3 className="panel-title">Gerenciador de produtos</h3>
+                <p className="panel-subtitle">Preview rápido das ofertas mais recentes, no mesmo estilo visual novo do painel.</p>
+              </div>
+            </div>
+            {!snapshot?.recent_offers?.length ? (
+              <div className="empty-state">Nenhuma oferta ativa recente encontrada.</div>
+            ) : (
+              <div className="product-manager-grid">
+                {snapshot.recent_offers.slice(0, 4).map((offer) => (
+                  <article className="product-card" key={`painel-${offer.id}`}>
+                    <div className="product-card-media">
+                      {offer.imagem_url ? (
+                        <img className="product-card-image" src={offer.imagem_url} alt={offer.titulo} />
+                      ) : (
+                        <div className="product-card-fallback">{String(offer.loja || "of").slice(0, 2)}</div>
+                      )}
+                      <span className="badge is-neutral product-card-stamp">{truncateText(offer.loja || "Loja", 20)}</span>
+                    </div>
+                    <div className="product-card-body">
+                      <div className="product-card-topline">
+                        <span className="badge is-success">{offer.categoria || "Geral"}</span>
+                        <span className="badge is-neutral">{offer.cupom ? `Cupom ${offer.cupom}` : "Sem cupom"}</span>
+                      </div>
+                      <h4 className="product-card-title">{offer.titulo}</h4>
+                      <p className="product-card-copy">Atualizado {fmtDate(offer.atualizado_em)} · slug {truncateText(offer.slug, 28)}</p>
+                      <div className="product-card-price">
+                        <span className="product-price-main">{fmtMoney(offer.preco)}</span>
+                        {offer.preco_antigo && Number(offer.preco_antigo) > Number(offer.preco) ? (
+                          <span className="product-price-old">{fmtMoney(offer.preco_antigo)}</span>
+                        ) : null}
+                      </div>
+                      <div className="product-card-actions">
+                        <a className="tiny-button is-soft" href={siteOfferUrl(offer.slug)} target="_blank" rel="noreferrer">Abrir no site</a>
+                        <a className="tiny-button" href={siteStoreUrl(offer.slug)} target="_blank" rel="noreferrer">Ir para a loja</a>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="panel" style={{ marginBottom: 18 }}>
+            <div className="panel-head">
+              <div>
+                <h3 className="panel-title">Pesquisar e editar produtos</h3>
+                <p className="panel-subtitle">Busque produtos antigos pelo título, slug, loja ou categoria e edite sem sair do dashboard.</p>
+              </div>
+            </div>
+            <div className="product-manager-shell">
+              <div className="surface">
+                <div className="product-search-toolbar">
+                  <input
+                    className="product-search-input"
+                    type="text"
+                    placeholder="Buscar por título, slug, loja, categoria ou tags"
+                    value={productQuery}
+                    onChange={(e) => setProductQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleProductSearch();
+                      }
+                    }}
+                  />
+                  <button className="button is-secondary" onClick={() => handleProductSearch()} disabled={productsLoading}>
+                    {productsLoading ? "Buscando..." : "Pesquisar"}
+                  </button>
+                </div>
+                <div className="product-result-stack">
+                  {!productResults.length ? (
+                    <div className="empty-state">Nenhum produto encontrado ainda.</div>
+                  ) : (
+                    productResults.map((item) => (
+                      <button
+                        key={item.id}
+                        className={`product-result-card ${selectedProductId === item.id ? "is-active" : ""}`}
+                        onClick={() => selectProduct(item)}
+                        style={{ cursor: "pointer" }}
+                      >
+                        {item.imagem_url ? (
+                          <img className="product-result-thumb" src={item.imagem_url} alt={item.titulo} />
+                        ) : (
+                          <div className="product-result-thumb product-card-fallback">{String(item.loja || "of").slice(0, 2)}</div>
+                        )}
+                        <div style={{ textAlign: "left" }}>
+                          <strong>{item.titulo}</strong>
+                          <small>{item.loja} · {item.categoria || "Geral"} · {truncateText(item.slug, 34)}</small>
+                          <div className="offer-meta" style={{ marginTop: 8 }}>
+                            <span className="meta-chip">{fmtMoney(item.preco)}</span>
+                            {item.cupom ? <span className="meta-chip">Cupom {item.cupom}</span> : null}
+                          </div>
+                        </div>
+                        <span className="badge is-neutral">#{item.id}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="surface">
+                <h4>Editor rápido</h4>
+                <p>{selectedProductId ? "Ajuste os campos abaixo e salve no banco." : "Selecione um produto na busca para editar."}</p>
+                {!selectedProductId ? (
+                  <div className="empty-state">Nenhum produto selecionado.</div>
+                ) : (
+                  <>
+                    <div className="product-edit-grid">
+                      <div className="field is-full">
+                        <label>Título</label>
+                        <input type="text" value={productForm.titulo} onChange={(e) => setProductForm((state) => ({ ...state, titulo: e.target.value }))} />
+                      </div>
+                      <div className="field is-full">
+                        <label>Slug</label>
+                        <input type="text" value={productForm.slug} onChange={(e) => setProductForm((state) => ({ ...state, slug: e.target.value }))} />
+                      </div>
+                      <div className="field">
+                        <label>Preço</label>
+                        <input type="text" value={productForm.preco} onChange={(e) => setProductForm((state) => ({ ...state, preco: e.target.value }))} />
+                      </div>
+                      <div className="field">
+                        <label>Preço antigo</label>
+                        <input type="text" value={productForm.preco_antigo} onChange={(e) => setProductForm((state) => ({ ...state, preco_antigo: e.target.value }))} />
+                      </div>
+                      <div className="field">
+                        <label>Loja</label>
+                        <input type="text" value={productForm.loja} onChange={(e) => setProductForm((state) => ({ ...state, loja: e.target.value }))} />
+                      </div>
+                      <div className="field">
+                        <label>Categoria</label>
+                        <input type="text" value={productForm.categoria} onChange={(e) => setProductForm((state) => ({ ...state, categoria: e.target.value }))} />
+                      </div>
+                      <div className="field">
+                        <label>Cupom</label>
+                        <input type="text" value={productForm.cupom} onChange={(e) => setProductForm((state) => ({ ...state, cupom: e.target.value }))} />
+                      </div>
+                      <div className="field">
+                        <label>Expira em</label>
+                        <input type="datetime-local" value={productForm.expira_em} onChange={(e) => setProductForm((state) => ({ ...state, expira_em: e.target.value }))} />
+                      </div>
+                      <div className="field is-full">
+                        <label>Imagem URL</label>
+                        <input type="text" value={productForm.imagem_url} onChange={(e) => setProductForm((state) => ({ ...state, imagem_url: e.target.value }))} />
+                      </div>
+                      <div className="field is-full">
+                        <label>URL afiliado</label>
+                        <input type="text" value={productForm.url_afiliado} onChange={(e) => setProductForm((state) => ({ ...state, url_afiliado: e.target.value }))} />
+                      </div>
+                      <div className="field is-full">
+                        <label>Tags</label>
+                        <input type="text" value={productForm.tags} onChange={(e) => setProductForm((state) => ({ ...state, tags: e.target.value }))} />
+                      </div>
+                      <div className="field is-full">
+                        <label>Descrição</label>
+                        <textarea value={productForm.descricao} onChange={(e) => setProductForm((state) => ({ ...state, descricao: e.target.value }))} />
+                      </div>
+                    </div>
+                    <div className="product-check-row" style={{ marginTop: 14 }}>
+                      <label className="check-chip">
+                        <input type="checkbox" checked={productForm.ativo} onChange={(e) => setProductForm((state) => ({ ...state, ativo: e.target.checked }))} />
+                        Ativa
+                      </label>
+                      <label className="check-chip">
+                        <input type="checkbox" checked={productForm.destaque} onChange={(e) => setProductForm((state) => ({ ...state, destaque: e.target.checked }))} />
+                        Destaque
+                      </label>
+                    </div>
+                    <div className="product-edit-actions">
+                      <button className="button is-primary" onClick={handleProductSave} disabled={productSaving}>
+                        {productSaving ? "Salvando..." : "Salvar produto"}
+                      </button>
+                      <a className="tiny-button is-soft" href={siteOfferUrl(productForm.slug)} target="_blank" rel="noreferrer">Abrir página</a>
+                      <a className="tiny-button" href={siteStoreUrl(productForm.slug)} target="_blank" rel="noreferrer">Abrir loja</a>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </section>
             </>
           ) : null}
 
@@ -1407,6 +1708,55 @@ function App() {
           ) : null}
 
           {activeSection === "analytics" ? (
+          <>
+          <section className="panel" id="analytics-products" style={{ marginBottom: 18 }}>
+            <div className="panel-head">
+              <div>
+                <h3 className="panel-title">Gerenciador de produtos</h3>
+                <p className="panel-subtitle">Cards visuais para revisar ofertas recentes com foto, cupom, slug e atalhos de abertura.</p>
+              </div>
+            </div>
+            {!snapshot?.recent_offers?.length ? (
+              <div className="empty-state">Nenhuma oferta ativa recente encontrada.</div>
+            ) : (
+              <div className="product-manager-grid">
+                {snapshot.recent_offers.map((offer) => (
+                  <article className="product-card" key={offer.id}>
+                    <div className="product-card-media">
+                      {offer.imagem_url ? (
+                        <img className="product-card-image" src={offer.imagem_url} alt={offer.titulo} />
+                      ) : (
+                        <div className="product-card-fallback">{String(offer.loja || "of").slice(0, 2)}</div>
+                      )}
+                      <span className="badge is-neutral product-card-stamp">{truncateText(offer.loja || "Loja", 20)}</span>
+                    </div>
+                    <div className="product-card-body">
+                      <div className="product-card-topline">
+                        <span className="badge is-success">{offer.categoria || "Geral"}</span>
+                        <span className="badge is-neutral">Atualizado {fmtDate(offer.atualizado_em)}</span>
+                      </div>
+                      <h4 className="product-card-title">{offer.titulo}</h4>
+                      <p className="product-card-copy">Slug {offer.slug} {offer.cupom ? `· cupom ${offer.cupom}` : "· sem cupom ativo"}</p>
+                      <div className="product-card-price">
+                        <span className="product-price-main">{fmtMoney(offer.preco)}</span>
+                        {offer.preco_antigo && Number(offer.preco_antigo) > Number(offer.preco) ? (
+                          <span className="product-price-old">{fmtMoney(offer.preco_antigo)}</span>
+                        ) : null}
+                      </div>
+                      <div className="offer-meta">
+                        {offer.cupom ? <span className="meta-chip">Cupom {offer.cupom}</span> : null}
+                        <span className="meta-chip">{truncateText(offer.slug, 32)}</span>
+                      </div>
+                      <div className="product-card-actions">
+                        <a className="tiny-button is-soft" href={siteOfferUrl(offer.slug)} target="_blank" rel="noreferrer">Abrir no site</a>
+                        <a className="tiny-button" href={siteStoreUrl(offer.slug)} target="_blank" rel="noreferrer">Ir para a loja</a>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
           <div className="content-grid" style={{ marginBottom: 18 }}>
             <section className="panel" id="analytics">
                 <div className="panel-head">
@@ -1428,7 +1778,7 @@ function App() {
                             <span className="meta-chip">{fmtInt(offer.clicks)} cliques</span>
                           </div>
                         </div>
-                        <a className="tiny-button is-soft" href={`/oferta.php?slug=${offer.slug}`} target="_blank" rel="noreferrer">Abrir</a>
+                          <a className="tiny-button is-soft" href={siteOfferUrl(offer.slug)} target="_blank" rel="noreferrer">Abrir</a>
                       </div>
                     ))}
                   </div>
@@ -1447,6 +1797,7 @@ function App() {
               </section>
             </div>
           </div>
+          </>
           ) : null}
 
           {activeSection === "importadores" ? (

@@ -117,105 +117,184 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <title>Admin - <?= $id > 0 ? 'Editar oferta' : 'Nova oferta' ?></title>
   <link rel="stylesheet" href="/assets/css/style.css">
   <link rel="stylesheet" href="/assets/css/admin.css">
-  <style>
-    .box { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 16px; }
-    .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-    .field label { display: block; font-size: 13px; color: #6b7280; margin-bottom: 6px; }
-    .field input, .field textarea { width: 100%; border: 1px solid #d1d5db; border-radius: 10px; padding: 9px; font: inherit; }
-    .field.full { grid-column: 1 / -1; }
-    .ok { margin: 12px 0; padding: 10px; border: 1px solid #bbf7d0; background: #dcfce7; color: #166534; border-radius: 10px; }
-    .err { margin: 12px 0; padding: 10px; border: 1px solid #fecaca; background: #fee2e2; color: #991b1b; border-radius: 10px; }
-    @media (max-width: 840px) { .fields { grid-template-columns: 1fr; } }
-  </style>
 </head>
 <body class="admin-page">
 <header>
-  <div class="container" style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
-    <div style="font-weight:700;"><?= $id > 0 ? 'Editar oferta' : 'Nova oferta' ?></div>
-    <div style="display:flex; gap:8px;">
+  <div class="container admin-header">
+    <div class="admin-brand">
+      <div class="admin-brand-mark">
+        <img src="/assets/img/logo-zp.png" alt="Zero Preco">
+      </div>
+      <div class="admin-brand-copy">
+        <strong><?= $id > 0 ? 'Editar oferta' : 'Nova oferta' ?></strong>
+        <span>Formulario amplo para revisar links, copy, imagem e expiracao.</span>
+      </div>
+    </div>
+    <div class="admin-header-actions">
       <a class="badge" href="/admin/ofertas.php">Voltar</a>
       <a class="badge" href="/admin/logout.php">Sair</a>
     </div>
   </div>
 </header>
 
-<main class="container">
-  <section class="box">
+<main class="container admin-shell">
+  <section class="admin-hero">
+    <div class="admin-hero-head">
+      <div class="admin-hero-copy">
+        <span class="admin-kicker">Editor visual</span>
+        <h1><?= $id > 0 ? 'Ajuste a oferta com mais contexto antes de publicar.' : 'Cadastre um novo produto no mesmo estilo do dashboard.' ?></h1>
+        <p>Titulo, imagem, cupom, preco e destino afiliado ficam organizados em campos mais compridos. A logica de salvamento continua a mesma, sem alterar o fluxo atual do site.</p>
+      </div>
+      <div class="admin-hero-actions">
+        <?php if (!empty($oferta['url_afiliado'])): ?>
+          <a class="btn-link primary" href="<?= h($oferta['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Testar link afiliado</a>
+        <?php endif; ?>
+        <?php if (!empty($oferta['slug'])): ?>
+          <a class="badge" href="/oferta.php?slug=<?= urlencode((string) $oferta['slug']) ?>" target="_blank" rel="noopener">Ver pagina</a>
+        <?php endif; ?>
+      </div>
+    </div>
+  </section>
+
+  <div class="admin-form-shell">
+    <section class="admin-form">
     <?php if ($flash): ?>
       <div class="admin-alert <?= h((string) ($flash['type'] ?? '')) ?>"><?= h((string) ($flash['message'] ?? '')) ?></div>
     <?php endif; ?>
     <?php if (isset($_GET['ok']) && $_GET['ok'] === '1'): ?>
-      <div class="ok">Oferta salva com sucesso.</div>
+      <div class="admin-alert success">Oferta salva com sucesso.</div>
     <?php endif; ?>
     <?php if ($erro): ?>
-      <div class="err"><?= h($erro) ?></div>
+      <div class="admin-alert error"><?= h($erro) ?></div>
     <?php endif; ?>
+
+    <div>
+      <h2 class="admin-form-title">Dados principais</h2>
+      <p class="admin-form-copy">Preencha os campos essenciais do produto. O slug pode ficar vazio para geracao automatica.</p>
+    </div>
 
     <form method="post">
       <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
       <input type="hidden" name="id" value="<?= (int) ($oferta['id'] ?? 0) ?>">
-      <div class="fields">
-        <div class="field full">
+      <div class="admin-field-grid">
+        <div class="admin-field is-full">
           <label for="titulo">Titulo*</label>
           <input id="titulo" name="titulo" value="<?= h($oferta['titulo']) ?>" required>
         </div>
-        <div class="field full">
+        <div class="admin-field is-full">
           <label for="slug">Slug (deixe vazio para gerar automaticamente)</label>
           <input id="slug" name="slug" value="<?= h($oferta['slug']) ?>">
         </div>
-        <div class="field">
+        <div class="admin-field">
           <label for="preco">Preco*</label>
           <input id="preco" name="preco" value="<?= h($oferta['preco']) ?>" required>
         </div>
-        <div class="field">
+        <div class="admin-field">
           <label for="preco_antigo">Preco antigo</label>
           <input id="preco_antigo" name="preco_antigo" value="<?= h($oferta['preco_antigo']) ?>">
         </div>
-        <div class="field">
+        <div class="admin-field">
           <label for="loja">Loja</label>
           <input id="loja" name="loja" value="<?= h($oferta['loja']) ?>">
         </div>
-        <div class="field">
+        <div class="admin-field">
           <label for="categoria">Categoria</label>
           <input id="categoria" name="categoria" value="<?= h($oferta['categoria']) ?>">
         </div>
-        <div class="field full">
+        <div class="admin-field is-full">
           <label for="url_afiliado">URL afiliado*</label>
           <input id="url_afiliado" type="url" name="url_afiliado" value="<?= h($oferta['url_afiliado']) ?>" required>
         </div>
-        <div class="field">
+        <div class="admin-field">
           <label for="cupom">Cupom</label>
           <input id="cupom" name="cupom" value="<?= h($oferta['cupom']) ?>">
         </div>
-        <div class="field">
+        <div class="admin-field">
           <label for="imagem_url">Imagem URL</label>
           <input id="imagem_url" type="url" name="imagem_url" value="<?= h($oferta['imagem_url']) ?>">
         </div>
-        <div class="field full">
+        <div class="admin-field is-full">
           <label for="tags">Tags (separadas por virgula)</label>
           <input id="tags" name="tags" value="<?= h($oferta['tags']) ?>">
         </div>
-        <div class="field">
+        <div class="admin-field">
           <label for="expira_em">Expira em</label>
           <input id="expira_em" type="datetime-local" name="expira_em" value="<?= h($oferta['expira_em']) ?>">
         </div>
-        <div class="field full">
+        <div class="admin-field is-full">
           <label for="descricao">Descricao</label>
           <textarea id="descricao" name="descricao" rows="4"><?= h($oferta['descricao']) ?></textarea>
         </div>
       </div>
-      <div style="margin-top:12px; display:flex; gap:18px; flex-wrap:wrap;">
-        <label><input type="checkbox" name="ativo" value="1" <?= ((int) $oferta['ativo'] === 1) ? 'checked' : '' ?>> Ativa</label>
-        <label><input type="checkbox" name="destaque" value="1" <?= ((int) $oferta['destaque'] === 1) ? 'checked' : '' ?>> Destaque</label>
+      <div class="admin-check-row">
+        <label class="admin-check-chip"><input type="checkbox" name="ativo" value="1" <?= ((int) $oferta['ativo'] === 1) ? 'checked' : '' ?>> Ativa</label>
+        <label class="admin-check-chip"><input type="checkbox" name="destaque" value="1" <?= ((int) $oferta['destaque'] === 1) ? 'checked' : '' ?>> Destaque</label>
       </div>
-      <div style="margin-top:14px;">
+      <div class="admin-form-actions">
         <button class="btn" type="submit">Salvar</button>
         <?php if (!empty($oferta['url_afiliado'])): ?>
-          <a class="badge" href="<?= h($oferta['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow" style="margin-left:8px;">Testar link afiliado</a>
+          <a class="badge" href="<?= h($oferta['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Testar link afiliado</a>
+        <?php endif; ?>
+        <?php if (!empty($oferta['slug'])): ?>
+          <a class="badge" href="/oferta.php?slug=<?= urlencode((string) $oferta['slug']) ?>&go=1" target="_blank" rel="noopener sponsored nofollow">Abrir pelo site</a>
         <?php endif; ?>
       </div>
     </form>
-  </section>
+    </section>
+
+    <aside class="admin-preview">
+      <?php if (!empty($oferta['imagem_url'])): ?>
+        <img class="admin-preview-thumb" src="<?= h($oferta['imagem_url']) ?>" alt="<?= h($oferta['titulo'] ?: 'Preview da oferta') ?>">
+      <?php else: ?>
+        <div class="admin-preview-thumb is-empty"><?= h(strtoupper(substr((string) ($oferta['loja'] ?: 'oferta'), 0, 2))) ?></div>
+      <?php endif; ?>
+
+      <div>
+        <span class="admin-kicker">Preview rapido</span>
+        <h3 class="admin-card-title" style="margin-top: 10px;"><?= h($oferta['titulo'] ?: 'Titulo da oferta') ?></h3>
+        <div class="admin-card-subtitle"><?= h($oferta['loja'] ?: 'loja') ?> · <?= h($oferta['categoria'] ?: 'categoria') ?></div>
+      </div>
+
+      <div class="admin-preview-price">
+        <span class="admin-price"><?= $oferta['preco'] !== '' ? 'R$ ' . h((string) $oferta['preco']) : 'R$ --' ?></span>
+        <?php if ($oferta['preco_antigo'] !== ''): ?>
+          <span class="admin-price-old">R$ <?= h((string) $oferta['preco_antigo']) ?></span>
+        <?php endif; ?>
+      </div>
+
+      <div class="admin-meta-row">
+        <?php if (!empty($oferta['cupom'])): ?>
+          <span class="admin-meta-chip">cupom <?= h($oferta['cupom']) ?></span>
+        <?php endif; ?>
+        <span class="admin-status <?= ((int) $oferta['ativo'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $oferta['ativo'] === 1) ? 'Ativa' : 'Inativa' ?></span>
+        <span class="admin-status <?= ((int) $oferta['destaque'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $oferta['destaque'] === 1) ? 'Destaque' : 'Normal' ?></span>
+      </div>
+
+      <div class="admin-side-card">
+        <strong>Slug final</strong>
+        <div class="admin-url-box"><?= h($oferta['slug'] ?: 'sera gerado automaticamente') ?></div>
+      </div>
+
+      <div class="admin-side-card">
+        <strong>Link afiliado</strong>
+        <div class="admin-url-box"><?= h($oferta['url_afiliado'] ?: 'preencha a URL afiliada para validar o destino') ?></div>
+      </div>
+
+      <div class="admin-side-card">
+        <strong>Descricao</strong>
+        <div class="admin-description"><?= nl2br(h($oferta['descricao'] ?: 'Use este campo para destacar pontos fortes, prazo, voltagem, tamanho ou restricoes do produto.')) ?></div>
+      </div>
+
+      <div class="admin-preview-actions">
+        <?php if (!empty($oferta['slug'])): ?>
+          <a class="btn-link" href="/oferta.php?slug=<?= urlencode((string) $oferta['slug']) ?>" target="_blank" rel="noopener">Ver pagina</a>
+        <?php endif; ?>
+        <?php if (!empty($oferta['url_afiliado'])): ?>
+          <a class="btn-link primary" href="<?= h($oferta['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Loja afiliada</a>
+        <?php endif; ?>
+      </div>
+    </aside>
+  </div>
 </main>
 </body>
 </html>

@@ -1,6 +1,7 @@
 import html
 import os
 import re
+import time
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from sqlalchemy import bindparam, text
 
 from app.services.sftp_deploy import ensure_stories_dir, story_public_url
+
+
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+META_REFRESH_WINDOW_SECONDS = 7 * 24 * 60 * 60
 
 
 SELECT_TOP_OFFERS_SQL = text(
@@ -159,11 +164,111 @@ def _meta_api_base() -> str:
     return f"https://graph.facebook.com/{version}"
 
 
+def _meta_app_id() -> str:
+    app_id = (os.getenv("META_APP_ID") or "").strip()
+    if not app_id:
+        raise ValueError("META_APP_ID nao preenchido no .env.")
+    return app_id
+
+
+def _meta_app_secret() -> str:
+    app_secret = (os.getenv("META_APP_SECRET") or "").strip()
+    if not app_secret:
+        raise ValueError("META_APP_SECRET nao preenchido no .env.")
+    return app_secret
+
+
 def _meta_token() -> str:
     token = (os.getenv("META_ACCESS_TOKEN") or "").strip()
     if not token:
         raise ValueError("META_ACCESS_TOKEN nao preenchido no .env.")
     return token
+
+
+def _write_env_updates(updates: dict[str, str]) -> None:
+    if not ENV_FILE.exists():
+        return
+
+    content = ENV_FILE.read_text(encoding="utf-8").splitlines()
+    remaining = dict(updates)
+    output: list[str] = []
+
+    for line in content:
+        replaced = False
+        for key, value in list(remaining.items()):
+            prefix = f"{key}="
+            if line.startswith(prefix):
+                output.append(f"{key}={value}")
+                remaining.pop(key, None)
+                replaced = True
+                break
+        if not replaced:
+            output.append(line)
+
+    for key, value in remaining.items():
+        output.append(f"{key}={value}")
+
+    ENV_FILE.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    for key, value in updates.items():
+        os.environ[key] = value
+
+
+def _meta_debug_token(token: str) -> dict[str, Any]:
+    app_access_token = f"{_meta_app_id()}|{_meta_app_secret()}"
+    with httpx.Client(timeout=20) as client:
+        response = client.get(
+            f"{_meta_api_base()}/debug_token",
+            params={
+                "input_token": token,
+                "access_token": app_access_token,
+            },
+        )
+        response.raise_for_status()
+        return response.json().get("data", {})
+
+
+def _exchange_for_long_lived_meta_token(token: str) -> dict[str, Any]:
+    with httpx.Client(timeout=20) as client:
+        response = client.get(
+            "https://graph.facebook.com/oauth/access_token",
+            params={
+                "grant_type": "fb_exchange_token",
+                "client_id": _meta_app_id(),
+                "client_secret": _meta_app_secret(),
+                "fb_exchange_token": token,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+def _meta_user_token() -> str:
+    token = _meta_token()
+    try:
+        debug = _meta_debug_token(token)
+    except Exception:
+        return token
+
+    expires_at = int(debug.get("expires_at") or 0)
+    now_ts = int(time.time())
+    should_refresh = not bool(debug.get("is_valid")) or (expires_at and (expires_at - now_ts) <= META_REFRESH_WINDOW_SECONDS)
+    if not should_refresh:
+        return token
+
+    try:
+        refreshed = _exchange_for_long_lived_meta_token(token)
+    except Exception:
+        return token
+
+    next_token = (refreshed.get("access_token") or "").strip()
+    if not next_token:
+        return token
+
+    updates = {"META_ACCESS_TOKEN": next_token}
+    if refreshed.get("expires_in"):
+        updates["META_ACCESS_TOKEN_EXPIRES_IN"] = str(refreshed["expires_in"])
+    _write_env_updates(updates)
+    return next_token
 
 
 def _meta_page_id() -> str:
@@ -174,7 +279,7 @@ def _meta_page_id() -> str:
 
 
 def _meta_page_token() -> str:
-    user_token = _meta_token()
+    user_token = _meta_user_token()
     page_id = _meta_page_id()
 
     with httpx.Client(timeout=20) as client:
@@ -794,7 +899,7 @@ def create_instagram_media_container(image_url: str, caption: str) -> dict[str, 
     if not caption:
         raise ValueError("caption do Instagram nao pode ficar vazio.")
 
-    payload = {"image_url": image_url, "caption": caption, "access_token": _meta_token()}
+    payload = {"image_url": image_url, "caption": caption, "access_token": _meta_user_token()}
 
     with httpx.Client(timeout=20) as client:
         response = client.post(f"{_meta_api_base()}/{_meta_instagram_account_id()}/media", data=payload)
@@ -817,7 +922,7 @@ def create_instagram_story_container(image_url: str) -> dict[str, Any]:
     payload = {
         "image_url": image_url,
         "media_type": "STORIES",
-        "access_token": _meta_token(),
+        "access_token": _meta_user_token(),
     }
 
     with httpx.Client(timeout=20) as client:
@@ -838,7 +943,7 @@ def publish_instagram_container(creation_id: str) -> dict[str, Any]:
     if not creation_id:
         raise ValueError("creation_id do Instagram nao pode ficar vazio.")
 
-    payload = {"creation_id": creation_id, "access_token": _meta_token()}
+    payload = {"creation_id": creation_id, "access_token": _meta_user_token()}
 
     with httpx.Client(timeout=20) as client:
         response = client.post(f"{_meta_api_base()}/{_meta_instagram_account_id()}/media_publish", data=payload)
