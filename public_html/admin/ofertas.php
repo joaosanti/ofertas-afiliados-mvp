@@ -18,7 +18,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       $pdo->prepare('UPDATE ofertas SET ativo = IF(ativo=1, 0, 1) WHERE id=?')->execute([$id]);
     }
     if ($acao === 'toggle_destaque') {
-      $pdo->prepare('UPDATE ofertas SET destaque = IF(destaque=1, 0, 1) WHERE id=?')->execute([$id]);
+      $storeStmt = $pdo->prepare('SELECT loja, destaque FROM ofertas WHERE id=? LIMIT 1');
+      $storeStmt->execute([$id]);
+      $offerRow = $storeStmt->fetch();
+
+      if ($offerRow) {
+        $nextHighlight = ((int) $offerRow['destaque'] === 1) ? 0 : 1;
+        $pdo->prepare('UPDATE ofertas SET destaque = ? WHERE id=?')->execute([$nextHighlight, $id]);
+
+        if ($nextHighlight === 1) {
+          admin_enforce_featured_limit($pdo, $offerRow['loja'], $id);
+        }
+      }
     }
   }
 

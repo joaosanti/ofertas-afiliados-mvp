@@ -8,6 +8,12 @@ $offers = $data['offers'];
 $stores = $data['stores'];
 $selectedStore = $data['store'];
 $categoryLabel = site_public_category_label($category);
+$pageHeading = 'Produtos';
+if ($selectedStore !== '') {
+  $pageHeading = site_store_label($selectedStore);
+} elseif (trim((string) $category) !== '' && strtolower(trim((string) $category)) !== 'geral') {
+  $pageHeading = $categoryLabel;
+}
 $siteHeaderCurrent = 'categories';
 $siteHeaderSearchPlaceholder = 'Buscar produto';
 ?>
@@ -29,18 +35,9 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
       <section class="section-panel" id="produtos">
         <div class="section-heading">
           <div>
-            <h2>Produtos em <?= h($categoryLabel) ?><?= $selectedStore !== '' ? ' · ' . h(site_store_label($selectedStore)) : '' ?></h2>
-            <div class="section-copy">Ofertas organizadas para abrir rápido, comparar o preço e seguir para a loja oficial.</div>
+            <h2><?= h($pageHeading) ?></h2>
           </div>
         </div>
-
-        <?php if ($stores): ?>
-          <div class="filters category-store-strip">
-            <?php foreach ($stores as $store): ?>
-              <span class="badge"><?= h(site_store_label($store['loja'])) ?> &bull; <?= (int) $store['total'] ?></span>
-            <?php endforeach; ?>
-          </div>
-        <?php endif; ?>
 
         <?php if ($offers): ?>
           <div class="grid">

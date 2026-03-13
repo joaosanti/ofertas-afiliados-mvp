@@ -18,7 +18,7 @@ $siteHeaderMenuChunks = array_chunk(
 );
 
 $siteHeaderNavItems = [
-    ['key' => 'selection', 'label' => 'Seleção', 'href' => '/#selecao-dia'],
+    ['key' => 'selection', 'label' => 'Home', 'href' => '/#selecao-dia'],
     ['key' => 'shopee', 'label' => 'Shopee', 'href' => '/#shopee-alta'],
     ['key' => 'mercado-livre', 'label' => 'Mercado Livre', 'href' => '/#mercado-livre-alta'],
     ['key' => 'amazon', 'label' => 'Amazon', 'href' => '/#amazon-alta'],

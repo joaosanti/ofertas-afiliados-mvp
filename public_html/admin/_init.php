@@ -213,3 +213,46 @@ function admin_affiliate_audit($store, $url) {
   ];
 }
 
+function admin_featured_limit_for_store($store) {
+  $normalized = strtolower(trim((string) $store));
+  if ($normalized === 'mercado livre') {
+    return 2;
+  }
+  return 0;
+}
+
+function admin_enforce_featured_limit(PDO $pdo, $store, $keepOfferId = 0) {
+  $limit = admin_featured_limit_for_store($store);
+  if ($limit <= 0) {
+    return;
+  }
+
+  $normalized = strtolower(trim((string) $store));
+  $stmt = $pdo->prepare("
+    SELECT id
+    FROM ofertas
+    WHERE LOWER(loja) = ?
+      AND destaque = 1
+    ORDER BY atualizado_em DESC, id DESC
+  ");
+  $stmt->execute([$normalized]);
+  $featuredIds = array_map('intval', array_column($stmt->fetchAll(), 'id'));
+
+  if ($keepOfferId > 0) {
+    $featuredIds = array_values(array_unique(array_merge([$keepOfferId], array_diff($featuredIds, [$keepOfferId]))));
+  }
+
+  if (count($featuredIds) <= $limit) {
+    return;
+  }
+
+  $idsToDisable = array_slice($featuredIds, $limit);
+  if (!$idsToDisable) {
+    return;
+  }
+
+  $placeholders = implode(',', array_fill(0, count($idsToDisable), '?'));
+  $disableStmt = $pdo->prepare("UPDATE ofertas SET destaque = 0 WHERE id IN ({$placeholders})");
+  $disableStmt->execute($idsToDisable);
+}
+

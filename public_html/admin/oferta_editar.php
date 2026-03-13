@@ -86,6 +86,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       $idPost = (int) $pdo->lastInsertId();
     }
 
+    if ($destaque === 1) {
+      admin_enforce_featured_limit($pdo, $loja, $idPost);
+    }
+
     header('Location: /admin/oferta_editar.php?id=' . $idPost . '&ok=1');
     exit;
   }

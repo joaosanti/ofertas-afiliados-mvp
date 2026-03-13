@@ -208,6 +208,26 @@ function site_mix_home_offers(array $offers, $limit = 6) {
   return $mixed;
 }
 
+function site_limit_store_in_selection(array $offers, $store, $maxItems) {
+  $normalizedStore = strtolower(trim((string) $store));
+  $maxItems = max(1, (int) $maxItems);
+  $selected = [];
+  $storeCount = 0;
+
+  foreach ($offers as $offer) {
+    $offerStore = strtolower(trim((string) ($offer['loja'] ?? '')));
+    if ($offerStore === $normalizedStore) {
+      if ($storeCount >= $maxItems) {
+        continue;
+      }
+      $storeCount++;
+    }
+    $selected[] = $offer;
+  }
+
+  return $selected;
+}
+
 function site_fetch_selection_candidates(PDO $pdo, $limit = 24) {
   $limit = max(6, min((int) $limit, 48));
   $stmt = $pdo->query("
@@ -294,6 +314,109 @@ function site_fetch_store_trending(PDO $pdo, $store, $limit = 6) {
   return array_slice(site_sort_offers_by_rank($stmt->fetchAll()), 0, $limit);
 }
 
+function site_exclude_offers_by_ids(array $offers, array $excludedIds, $limit = 0) {
+  $excludedMap = [];
+  foreach ($excludedIds as $offerId) {
+    $excludedMap[(int) $offerId] = true;
+  }
+
+  $items = [];
+  foreach ($offers as $offer) {
+    $offerId = (int) ($offer['id'] ?? $offer['offer_id'] ?? 0);
+    if ($offerId > 0 && isset($excludedMap[$offerId])) {
+      continue;
+    }
+
+    $items[] = $offer;
+    if ($limit > 0 && count($items) >= $limit) {
+      break;
+    }
+  }
+
+  return $items;
+}
+
+function site_fetch_social_published_offers(PDO $pdo, $limit = 12) {
+  $limit = max(1, min((int) $limit, 24));
+
+  try {
+    $runsStmt = $pdo->prepare("
+      SELECT id, canal, modo, criado_em, result_json
+      FROM automacao_execucoes
+      WHERE tipo = 'social'
+        AND status = 'success'
+        AND result_json IS NOT NULL
+      ORDER BY criado_em DESC, id DESC
+      LIMIT 40
+    ");
+    $runsStmt->execute();
+    $runs = $runsStmt->fetchAll();
+  } catch (Throwable $e) {
+    return [];
+  }
+
+  $publishedMap = [];
+  foreach ($runs as $run) {
+    $payload = json_decode((string) ($run['result_json'] ?? ''), true);
+    if (!is_array($payload) || empty($payload['items']) || !is_array($payload['items'])) {
+      continue;
+    }
+
+    foreach ($payload['items'] as $item) {
+      $offerId = (int) ($item['offer_id'] ?? 0);
+      if ($offerId <= 0 || isset($publishedMap[$offerId])) {
+        continue;
+      }
+
+      $publishedMap[$offerId] = [
+        'offer_id' => $offerId,
+        'canal' => (string) ($run['canal'] ?? ''),
+        'modo' => (string) ($run['modo'] ?? ''),
+        'published_at' => (string) ($run['criado_em'] ?? ''),
+      ];
+
+      if (count($publishedMap) >= $limit) {
+        break 2;
+      }
+    }
+  }
+
+  if (!$publishedMap) {
+    return [];
+  }
+
+  $offerIds = array_keys($publishedMap);
+  $placeholders = implode(',', array_fill(0, count($offerIds), '?'));
+  $offerStmt = $pdo->prepare("
+    SELECT id, slug, titulo, loja, categoria, preco, preco_antigo, imagem_url, destaque
+    FROM ofertas
+    WHERE ativo = 1
+      AND (expira_em IS NULL OR expira_em > NOW())
+      AND id IN ({$placeholders})
+  ");
+  $offerStmt->execute($offerIds);
+  $offers = $offerStmt->fetchAll();
+
+  $offersById = [];
+  foreach ($offers as $offer) {
+    $offersById[(int) $offer['id']] = $offer;
+  }
+
+  $items = [];
+  foreach ($publishedMap as $offerId => $meta) {
+    if (!isset($offersById[$offerId])) {
+      continue;
+    }
+
+    $items[] = $offersById[$offerId] + $meta;
+    if (count($items) >= $limit) {
+      break;
+    }
+  }
+
+  return $items;
+}
+
 function site_pick_home_categories(PDO $pdo, $preferred = [], $limit = 4) {
   $preferred = array_values(array_filter(array_map('trim', $preferred)));
   $rows = $pdo->query("
@@ -333,10 +456,12 @@ function site_pick_home_categories(PDO $pdo, $preferred = [], $limit = 4) {
 }
 
 function site_fetch_home_data(PDO $pdo) {
-  $selectionMix = site_mix_home_offers(site_fetch_selection_candidates_balanced($pdo, 12, 4), 6);
-  $meliTrending = site_fetch_store_trending($pdo, 'Mercado Livre', 8);
-  $shopeeTrending = site_fetch_store_trending($pdo, 'Shopee', 8);
-  $amazonTrending = site_fetch_store_trending($pdo, 'Amazon', 8);
+  $selectionMix = site_fetch_social_published_offers($pdo, 20);
+  $selectionIds = array_map(static fn($offer) => (int) ($offer['id'] ?? $offer['offer_id'] ?? 0), $selectionMix);
+
+  $meliTrending = site_exclude_offers_by_ids(site_fetch_store_trending($pdo, 'Mercado Livre', 60), $selectionIds, 8);
+  $shopeeTrending = site_exclude_offers_by_ids(site_fetch_store_trending($pdo, 'Shopee', 60), $selectionIds, 8);
+  $amazonTrending = site_exclude_offers_by_ids(site_fetch_store_trending($pdo, 'Amazon', 60), $selectionIds, 8);
 
   $categoryRows = site_pick_home_categories($pdo, [
     'MLB1714',
@@ -353,15 +478,20 @@ function site_fetch_home_data(PDO $pdo) {
       AND (expira_em IS NULL OR expira_em > NOW())
       AND categoria = ?
     ORDER BY atualizado_em DESC, criado_em DESC
-    LIMIT 4
+    LIMIT 12
   ");
 
   foreach ($categoryRows as $row) {
     $categoryStmt->execute([$row['categoria']]);
+    $categoryOffers = site_exclude_offers_by_ids($categoryStmt->fetchAll(), $selectionIds, 4);
+    if (!$categoryOffers) {
+      continue;
+    }
+
     $sectionsByCategory[] = [
       'name' => $row['categoria'],
       'total' => (int) $row['total'],
-      'offers' => $categoryStmt->fetchAll(),
+      'offers' => $categoryOffers,
     ];
   }
   return [

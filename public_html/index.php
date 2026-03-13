@@ -31,13 +31,13 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
       <section class="section-panel" id="selecao-dia">
         <div class="section-heading">
           <div>
-            <h2>Seleção do dia</h2>
+            <h2>Top Produtos</h2>
           </div>
         </div>
 
         <?php if ($selectionMix): ?>
           <div class="selection-columns">
-            <?php foreach (array_chunk($selectionMix, 3) as $column): ?>
+            <?php foreach (array_chunk($selectionMix, 5) as $column): ?>
               <div class="selection-column">
                 <?php foreach ($column as $offer): ?>
                   <article class="offer-spotlight">
@@ -59,16 +59,16 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
             <?php endforeach; ?>
           </div>
         <?php else: ?>
-          <div class="empty-state">Sem ofertas ainda para montar a seleção do dia.</div>
+          <div class="empty-state">Sem publicacoes em redes sociais ainda para montar a seleção do dia.</div>
         <?php endif; ?>
       </section>
 
       <section class="section-panel" id="shopee-alta">
         <div class="section-heading">
           <div>
-            <h2>Shopee em alta agora</h2>
+            <h2>Shopee</h2>
           </div>
-          <a class="cta-link" href="/categoria.php?cat=geral&amp;store=Shopee">Shopee</a>
+          <a class="cta-link" href="/categoria.php?cat=geral&amp;store=Shopee">Ver mais</a>
         </div>
 
         <?php if ($shopeeTrending): ?>
@@ -109,9 +109,9 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
       <section class="section-panel" id="mercado-livre-alta">
         <div class="section-heading">
           <div>
-            <h2>Mercado Livre em alta agora</h2>
+            <h2>Mercado Livre</h2>
           </div>
-          <a class="cta-link" href="/categoria.php?cat=geral&amp;store=Mercado%20Livre">Mercado Livre</a>
+          <a class="cta-link" href="/categoria.php?cat=geral&amp;store=Mercado%20Livre">Ver mais</a>
         </div>
 
         <?php if ($meliTrending): ?>
@@ -152,9 +152,9 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
       <section class="section-panel" id="amazon-alta">
         <div class="section-heading">
           <div>
-            <h2>Amazon em alta agora</h2>
+            <h2>Amazon</h2>
           </div>
-          <a class="cta-link" href="/categoria.php?cat=geral&amp;store=Amazon">Amazon</a>
+          <a class="cta-link" href="/categoria.php?cat=geral&amp;store=Amazon">Ver mais</a>
         </div>
 
         <?php if ($amazonTrending): ?>
@@ -197,7 +197,6 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
           <div class="section-heading">
             <div>
               <h2><?= h(site_public_category_label($section['name'])) ?></h2>
-              <div class="section-copy"><?= (int) $section['total'] ?> ofertas ativas nesta categoria.</div>
             </div>
             <a class="cta-link" href="<?= h(site_category_href($section['name'])) ?>">Ver mais</a>
           </div>

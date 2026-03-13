@@ -576,10 +576,9 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
     filename = f"offer-{offer['id']}-{_slugify(offer['slug'])}.jpg"
     destination = ensure_stories_dir() / filename
     destination_url = _destination_url(offer)
-    destination_host = _display_url(destination_url)
-    has_direct_store_link = bool((offer.get("url_afiliado") or "").strip())
-    destination_label = "Abrir na loja" if has_direct_store_link else "Ver no site"
-    destination_label_secondary = "Link direto deste produto" if has_direct_store_link else "Pagina do produto no Zero Preco"
+    site_host = _display_url(_site_base_url())
+    destination_label = "Acesse no site"
+    destination_label_secondary = "zeropreco.com.br"
 
     image = Image.new("RGB", (1080, 1920), "#0a2a67")
     draw = ImageDraw.Draw(image)
@@ -631,18 +630,20 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
         draw.rounded_rectangle((120, 800, 960, 1270), radius=28, fill="#d9e5ff")
         draw.text((180, 1015), "Imagem do produto", font=cta_font, fill="#0b2d78")
 
-    draw.rounded_rectangle((80, 1360, 760, 1496), radius=28, fill="#ffffff")
-    draw.text((120, 1392), destination_label, font=cta_font, fill="#0b2d78")
-    draw.text((120, 1438), destination_label_secondary, font=cta_small_font, fill="#0b2d78")
+    draw.rounded_rectangle((80, 1348, 910, 1518), radius=32, fill="#ffffff")
+    draw.rounded_rectangle((104, 1372, 886, 1494), radius=26, fill="#e8f0ff")
+    draw.text((136, 1382), destination_label, font=cta_small_font, fill="#0b2d78")
+    draw.text((136, 1426), destination_label_secondary, font=cta_font, fill="#0b2d78")
 
-    draw.text((80, 1560), destination_host, font=domain_font, fill="#ffffff")
+    draw.rounded_rectangle((80, 1540, 620, 1622), radius=22, fill="#1b4fc3")
+    draw.text((112, 1558), site_host, font=domain_font, fill="#ffffff")
     draw.text(
-        (80, 1616),
-        "Siga para a loja parceira." if has_direct_store_link else "Abra a pagina do produto no site.",
+        (80, 1660),
+        "Confira a oferta completa no site oficial.",
         font=text_font,
         fill="#dbe7ff",
     )
-    draw.text((80, 1660), "Use o link publicado junto da oferta.", font=micro_font, fill="#dbe7ff")
+    draw.text((80, 1704), "Use o link publicado junto da oferta.", font=micro_font, fill="#dbe7ff")
 
     coupon_text = (offer.get("cupom") or "").strip()
     if coupon_text:
