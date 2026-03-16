@@ -7,8 +7,8 @@ $recentOffers = $data['recent_offers'];
 $topClicked = $data['top_clicked'];
 $categories = $data['categories'];
 $categorySections = $data['category_sections'];
-$siteHeaderCurrent = 'shopee';
-$siteHeaderSearchPlaceholder = 'Buscar produto';
+$siteHeaderCurrent = 'deals';
+$siteHeaderSearchPlaceholder = 'Buscar oferta com desconto';
 ?>
 <!doctype html>
 <html lang="pt-br">
@@ -32,8 +32,8 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
             <h1>Ofertas quentes para abrir rápido e comprar na loja oficial.</h1>
             <p>Esta página foi pensada para quem veio do Instagram. Escolha uma oferta, veja os detalhes e siga para o link da loja parceira.</p>
             <div class="cta-row" style="justify-content:flex-start; flex-wrap:wrap; margin-top:20px;">
-              <a class="button button-primary" href="#recentes">Ver ofertas recentes</a>
-              <a class="button button-secondary" href="#categorias">Explorar categorias</a>
+              <a class="button button-primary" href="/ofertas-do-dia.php">Abrir Ofertas do Dia</a>
+              <a class="button button-secondary" href="#recentes">Ver ofertas recentes</a>
             </div>
           </div>
           <div class="instagram-hero-side">
@@ -79,7 +79,7 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
                 </div>
               </a>
               <div class="card-body">
-                <div class="kicker"><?= h(site_store_label($offer['loja'])) ?> &bull; <?= h(site_category_label($offer['categoria'])) ?></div>
+                <div class="kicker"><?= h(site_store_label($offer['loja'])) ?></div>
                 <div class="card-title"><?= h($offer['titulo']) ?></div>
                 <div class="price-row">
                   <span class="price-now"><?= h(site_money($offer['preco'])) ?></span>
@@ -88,8 +88,7 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
                   <?php endif; ?>
                 </div>
                 <div class="card-footer">
-                  <span class="meta-chip"><?= h(site_category_label($offer['categoria'])) ?></span>
-                  <a class="btn-link primary" href="<?= h(site_offer_href($offer['slug'])) ?>">Comprar no site</a>
+                  <a class="btn-link primary" href="<?= h(site_offer_href($offer['slug'])) ?>">Ver promoção</a>
                 </div>
               </div>
             </article>
@@ -126,7 +125,7 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
               <a class="instagram-list-card" href="<?= h(site_offer_href($offer['slug'])) ?>">
                 <img src="<?= h($offer['imagem_url'] ?: '/assets/img/sem-img.png') ?>" alt="">
                 <div>
-                  <div class="kicker"><?= h(site_store_label($offer['loja'])) ?> &bull; <?= h(site_category_label($offer['categoria'])) ?></div>
+                  <div class="kicker"><?= h(site_store_label($offer['loja'])) ?></div>
                   <div class="instagram-list-title"><?= h($offer['titulo']) ?></div>
                   <div class="price-row" style="margin-bottom:0;">
                     <span class="price-now"><?= h(site_money($offer['preco'])) ?></span>
@@ -162,8 +161,7 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
                     <span class="price-now"><?= h(site_money($offer['preco'])) ?></span>
                   </div>
                   <div class="card-footer compact-footer">
-                    <span class="meta-chip"><?= h(site_category_label($offer['categoria'])) ?></span>
-                    <a class="btn-link primary" href="<?= h(site_offer_href($offer['slug'])) ?>">Comprar no site</a>
+                    <a class="btn-link primary" href="<?= h(site_offer_href($offer['slug'])) ?>">Ver promoção</a>
                   </div>
                 </div>
               </article>

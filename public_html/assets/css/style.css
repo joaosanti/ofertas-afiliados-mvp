@@ -419,6 +419,8 @@ img { display: block; max-width: 100%; }
   font-size: 13px;
   font-weight: 800;
   text-decoration: none;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .btn-link.primary {
@@ -964,6 +966,57 @@ img { display: block; max-width: 100%; }
   scroll-margin-top: 110px;
 }
 
+.whatsapp-banner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 20px;
+  align-items: center;
+  margin-bottom: 22px;
+  padding: 24px 28px;
+  border-radius: var(--radius-xl);
+  background: linear-gradient(135deg, rgba(10, 42, 103, 0.98) 0%, rgba(18, 140, 126, 0.94) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow: var(--shadow);
+}
+
+.whatsapp-banner-kicker,
+.detail-whatsapp-kicker {
+  display: inline-flex;
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #f4f8ff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.whatsapp-banner h2,
+.detail-whatsapp-copy h3 {
+  margin: 0;
+}
+
+.whatsapp-banner h2 {
+  color: #f5f9ff;
+  font-size: clamp(28px, 3.8vw, 40px);
+  line-height: 1.04;
+}
+
+.whatsapp-banner p {
+  margin: 10px 0 0;
+  max-width: 58ch;
+  color: #dff9f2;
+  line-height: 1.6;
+}
+
+.whatsapp-banner-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
 .affiliate-note {
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -1441,6 +1494,50 @@ img { display: block; max-width: 100%; }
   margin: 18px 0;
 }
 
+.detail-whatsapp-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 180px;
+  gap: 20px;
+  align-items: center;
+  margin-top: 22px;
+  padding: 20px 22px;
+  border-radius: 24px;
+  background: linear-gradient(180deg, #f7fbff 0%, #edf7ff 100%);
+  border: 1px solid #d8e4f8;
+}
+
+.detail-whatsapp-copy h3 {
+  color: var(--navy);
+  font-size: 24px;
+  line-height: 1.15;
+}
+
+.detail-whatsapp-copy p {
+  margin: 10px 0 18px;
+  color: #476182;
+}
+
+.detail-whatsapp-kicker {
+  margin-bottom: 12px;
+  background: #0f43a8;
+}
+
+.detail-whatsapp-qr {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.detail-whatsapp-qr img {
+  width: 180px;
+  height: 180px;
+  padding: 12px;
+  border-radius: 24px;
+  background: #ffffff;
+  border: 1px solid #d8e4f8;
+  box-shadow: 0 18px 36px rgba(12, 29, 66, 0.10);
+}
+
 .detail-price-copy {
   color: #476182;
   font-size: 14px;
@@ -1651,6 +1748,199 @@ img { display: block; max-width: 100%; }
   object-fit: cover;
   border-radius: 18px;
   background: #eef3fb;
+}
+
+.home-conversion-hero,
+.deals-hero-panel,
+.category-hero-panel {
+  background:
+    linear-gradient(135deg, rgba(9, 40, 100, 0.96) 0%, rgba(21, 112, 255, 0.92) 56%, rgba(11, 61, 153, 0.96) 100%);
+  color: #f4f8ff;
+}
+
+.home-conversion-grid,
+.deals-hero-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 24px;
+  align-items: stretch;
+}
+
+.home-conversion-copy h1,
+.deals-hero-copy h1 {
+  margin: 0;
+  font-size: clamp(28px, 3.5vw, 42px);
+  line-height: 1.02;
+  max-width: none;
+}
+
+.home-conversion-copy {
+  max-width: none;
+}
+
+.deals-hero-panel {
+  display: grid;
+  gap: 22px;
+}
+
+.deals-hero-panel .deals-hero-copy h1 {
+  max-width: none;
+}
+
+.deals-hero-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.hero-chip-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #f3f8ff;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.home-conversion-copy p,
+.deals-hero-copy p,
+.home-conversion-hero .section-copy,
+.deals-hero-panel .section-copy,
+.category-hero-panel .section-copy {
+  color: #dce9ff;
+}
+
+.home-conversion-copy p,
+.deals-hero-copy p {
+  max-width: 56ch;
+  margin: 16px 0 0;
+  line-height: 1.6;
+}
+
+.home-conversion-side,
+.deals-hero-stats {
+  display: grid;
+  gap: 14px;
+}
+
+.deals-hero-stats-row {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.deals-mini-stat {
+  padding: 22px 20px;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 18px 36px rgba(6, 21, 56, 0.12);
+}
+
+.deals-mini-stat strong {
+  display: block;
+  color: #f3f8ff;
+  font-size: clamp(28px, 4vw, 40px);
+  line-height: 1;
+}
+
+.deals-mini-stat span {
+  display: block;
+  margin-top: 8px;
+  color: #dce9ff;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.rush-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.rush-grid .card.is-hidden {
+  display: none;
+}
+
+.rush-more-wrap {
+  display: flex;
+  justify-content: center;
+  margin-top: 20px;
+}
+
+.rush-more-wrap .button {
+  min-width: 172px;
+  justify-content: center;
+}
+
+.rush-more-wrap .button-secondary {
+  background: linear-gradient(180deg, #ffffff 0%, #edf4ff 100%);
+  color: var(--navy);
+  border: 1px solid rgba(11, 61, 153, 0.16);
+  box-shadow: 0 14px 32px rgba(10, 42, 103, 0.12);
+}
+
+.rush-more-wrap .button-secondary:hover {
+  background: linear-gradient(180deg, #f8fbff 0%, #e3eeff 100%);
+  color: var(--red-strong);
+}
+
+.hero-shortcut-card {
+  display: block;
+  padding: 24px 22px;
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 18px 36px rgba(6, 21, 56, 0.18);
+}
+
+.hero-shortcut-card strong {
+  display: block;
+  color: #f3f8ff;
+  font-size: 24px;
+  line-height: 1.1;
+}
+
+.hero-shortcut-card span {
+  display: block;
+  margin-top: 8px;
+  color: #dce9ff;
+  font-size: 15px;
+}
+
+.home-conversion-hero .stats-card,
+.deals-hero-panel .stats-card {
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.home-conversion-hero .stats-card strong,
+.home-conversion-hero .stats-card span,
+.deals-hero-panel .stats-card strong,
+.deals-hero-panel .stats-card span,
+.home-conversion-hero h1,
+.deals-hero-panel h1,
+.deals-hero-panel h2,
+.category-hero-panel h2 {
+  color: #f3f8ff;
+}
+
+.category-hero-panel .section-heading > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.category-hero-panel .section-copy {
+  max-width: none;
+  white-space: nowrap;
+}
+
+.deals-hero-actions {
+  margin-top: 20px;
 }
 
 .instagram-list-title {
@@ -1908,6 +2198,14 @@ img { display: block; max-width: 100%; }
     align-items: flex-start;
   }
 
+  .whatsapp-banner {
+    grid-template-columns: 1fr;
+  }
+
+  .whatsapp-banner-actions {
+    justify-content: flex-start;
+  }
+
   .hero-side,
   .section-panel,
   .surface,
@@ -1942,8 +2240,25 @@ img { display: block; max-width: 100%; }
     position: static;
   }
 
+  .detail-whatsapp-card {
+    grid-template-columns: 1fr;
+  }
+
   .instagram-hero-grid {
     grid-template-columns: 1fr;
+  }
+
+  .home-conversion-grid,
+  .deals-hero-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .deals-hero-stats-row {
+    grid-template-columns: 1fr;
+  }
+
+  .rush-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .promo-gallery {
@@ -2036,6 +2351,10 @@ img { display: block; max-width: 100%; }
     align-items: flex-start;
   }
 
+  .detail-whatsapp-qr {
+    justify-content: flex-start;
+  }
+
   .list-card {
     grid-template-columns: 52px 1fr;
   }
@@ -2053,6 +2372,10 @@ img { display: block; max-width: 100%; }
   .instagram-list-card img {
     width: 100%;
     height: 220px;
+  }
+
+  .rush-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
 }
@@ -2152,6 +2475,10 @@ img { display: block; max-width: 100%; }
     grid-template-columns: 1fr;
   }
 
+  .rush-grid {
+    grid-template-columns: 1fr;
+  }
+
   .promo-gallery,
   .coupon-item {
     grid-template-columns: 1fr;
@@ -2232,6 +2559,20 @@ img { display: block; max-width: 100%; }
   .detail-sales-box {
     padding: 16px;
     border-radius: 18px;
+  }
+
+  .detail-whatsapp-card {
+    padding: 16px;
+    border-radius: 18px;
+  }
+
+  .detail-whatsapp-copy h3 {
+    font-size: 20px;
+  }
+
+  .detail-whatsapp-qr img {
+    width: 156px;
+    height: 156px;
   }
 
   .detail-sales-box h2 {

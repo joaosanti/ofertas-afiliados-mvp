@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+from base64 import urlsafe_b64encode
 from html import unescape
 from typing import Any
 from urllib.parse import urlparse
@@ -77,6 +78,46 @@ def _extract_all(content: str, patterns: list[str]) -> list[str]:
     for pattern in patterns:
         values.extend(unescape((match or "").strip()) for match in re.findall(pattern, content, re.IGNORECASE | re.DOTALL))
     return [value for value in values if value]
+
+
+def _clean_media_url(value: str) -> str:
+    media_url = unescape(str(value or "").strip())
+    if not media_url:
+        return ""
+    media_url = media_url.replace("\\/", "/").replace("\\u0026", "&").replace("&amp;", "&")
+    if media_url.startswith("//"):
+        media_url = f"https:{media_url}"
+    return media_url if media_url.startswith(("http://", "https://")) else ""
+
+
+def _extract_video_urls_from_html(html_text: str) -> list[str]:
+    patterns = [
+        r'"videoUrl"\s*:\s*"([^"]+)"',
+        r'"video_url"\s*:\s*"([^"]+)"',
+        r'"play_url"\s*:\s*"([^"]+)"',
+        r'"playUrl"\s*:\s*"([^"]+)"',
+        r'"video_url_list"\s*:\s*\[([^\]]+)\]',
+        r'"videoUrlList"\s*:\s*\[([^\]]+)\]',
+        r'"video"\s*:\s*\{.*?"url"\s*:\s*"([^"]+)"',
+    ]
+
+    urls: list[str] = []
+    for pattern in patterns:
+        for match in re.findall(pattern, html_text, re.IGNORECASE | re.DOTALL):
+            if pattern.endswith(r"\[([^\]]+)\]"):
+                inner_matches = re.findall(r'"([^"]+)"', str(match or ""))
+                urls.extend(_clean_media_url(item) for item in inner_matches)
+                continue
+            urls.append(_clean_media_url(str(match or "")))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        deduped.append(url)
+    return deduped
 
 
 def _clean_coupon_text(value: Any) -> str | None:
@@ -248,6 +289,11 @@ def _manual_offer_from_html(source_url: str, final_url: str, html_text: str) -> 
             r'Voucher[:\s]+([A-Z0-9_-]{3,})',
         ],
     )
+    video_urls = _extract_video_urls_from_html(html_text)
+    tags = ["shopee", "manual"]
+    if video_urls:
+        encoded_video = urlsafe_b64encode(video_urls[0].encode("utf-8")).decode("ascii").rstrip("=")
+        tags.append(f"shopee_video_url:{encoded_video}")
 
     final_host = (urlparse(final_url).netloc or "").lower()
     if "shopee" not in final_host:
@@ -287,10 +333,12 @@ def _manual_offer_from_html(source_url: str, final_url: str, html_text: str) -> 
         "canonical_url": final_url,
         "image": image,
         "category": infer_category_label(title, description, source_url, final_url),
-        "tags": "shopee,manual",
+        "tags": ",".join(tags),
         "featured": 0,
         "coupon": _clean_coupon_text(coupon_text),
         "affiliate_tag": os.getenv("SHOPEE_AFFILIATE_TAG", "").strip(),
+        "video_url": video_urls[0] if video_urls else None,
+        "video_urls": video_urls,
     }
 
 

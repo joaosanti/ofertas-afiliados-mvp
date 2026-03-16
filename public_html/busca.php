@@ -83,12 +83,9 @@ $pageTitle = trim((string) $query) !== '' ? 'Busca por ' . trim((string) $query)
                       <span class="price-old"><?= h(site_money($offer['preco_antigo'])) ?></span>
                     <?php endif; ?>
                   </div>
-                  <div class="offer-meta-row">
-                    <span class="meta-chip"><?= h(site_public_category_label($offer['categoria'])) ?></span>
-                  </div>
                   <div class="card-footer">
                     <span class="meta"><?= h(site_store_label($offer['loja'])) ?></span>
-                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Comprar no site</a>
+                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promoção</a>
                   </div>
                 </div>
               </article>

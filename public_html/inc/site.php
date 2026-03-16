@@ -2,6 +2,63 @@
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/funcoes.php';
 
+function site_tags_to_list($tags) {
+  $items = array_filter(array_map('trim', explode(',', (string) $tags)));
+  return array_values(array_unique($items));
+}
+
+function site_offer_preferred_affiliate_url($offer) {
+  $store = strtolower(trim((string) ($offer['loja'] ?? '')));
+  $affiliateUrl = trim((string) ($offer['url_afiliado'] ?? ''));
+  if ($store !== 'mercado livre') {
+    return $affiliateUrl;
+  }
+
+  foreach (site_tags_to_list($offer['tags'] ?? '') as $tag) {
+    if (!str_starts_with($tag, 'meli_social_url:')) {
+      continue;
+    }
+
+    $encoded = substr($tag, strlen('meli_social_url:'));
+    if ($encoded === '') {
+      continue;
+    }
+
+    $padding = strlen($encoded) % 4;
+    if ($padding > 0) {
+      $encoded .= str_repeat('=', 4 - $padding);
+    }
+
+    $decoded = base64_decode(strtr($encoded, '-_', '+/'), true);
+    if ($decoded !== false && str_contains((string) $decoded, '/social/')) {
+      return trim((string) $decoded);
+    }
+  }
+
+  return $affiliateUrl;
+}
+
+function site_whatsapp_group_link() {
+  $value = trim((string) getenv('WHATSAPP_GROUP_LINK'));
+  if ($value !== '') {
+    return $value;
+  }
+  return 'https://chat.whatsapp.com/IavSEP6OPh5ISM4WHluOax?mode=gi_t';
+}
+
+function site_whatsapp_group_label() {
+  $value = trim((string) getenv('WHATSAPP_GROUP_LABEL'));
+  return $value !== '' ? $value : 'Grupo de WhatsApp';
+}
+
+function site_whatsapp_group_qr_url() {
+  $value = trim((string) getenv('WHATSAPP_GROUP_QR_URL'));
+  if ($value !== '') {
+    return $value;
+  }
+  return 'https://quickchart.io/qr?size=420&text=' . rawurlencode(site_whatsapp_group_link());
+}
+
 function site_store_slug($store) {
   $value = strtolower(trim((string) $store));
   $value = preg_replace('/[^a-z0-9]+/', '-', $value);
@@ -30,6 +87,26 @@ function site_category_label($category) {
   if ($value === '' || strtolower($value) === 'geral') {
     return 'Todas as categorias';
   }
+
+  $displayMap = [
+    'utilidades domesticas' => 'Utilidades Domésticas',
+    'escovas eletricas' => 'Escovas Elétricas',
+    'panelas eletricas' => 'Panelas Elétricas',
+    'caixas acusticas' => 'Caixas Acústicas',
+    'fritadeiras eletricas' => 'Fritadeiras Elétricas',
+    'cadeiras de escritorio' => 'Cadeiras de Escritório',
+    'moveis' => 'Móveis',
+    'eletroportateis' => 'Eletroportáteis',
+    'calcados' => 'Calçados',
+    'bebe' => 'Bebê',
+    'caçarolas e caldeiroes' => 'Caçarolas e Caldeirões',
+    'panelas de oleo' => 'Panelas de Óleo',
+    'difusores de aromas eletricos' => 'Difusores de Aromas Elétricos',
+    'cama e banho' => 'Cama e Banho',
+    'fones de ouvido' => 'Fones de Ouvido',
+    'pet shop' => 'Pet Shop',
+    'smart tvs' => 'Smart TVs',
+  ];
 
   $meliCategoryMap = [
     'MLB1055' => 'Celulares e Smartphones',
@@ -62,6 +139,11 @@ function site_category_label($category) {
     return 'Categoria Mercado Livre';
   }
 
+  $normalized = strtolower(str_replace(['-', '_'], ' ', $value));
+  if (isset($displayMap[$normalized])) {
+    return $displayMap[$normalized];
+  }
+
   return ucwords(str_replace(['-', '_'], ' ', $value));
 }
 
@@ -76,11 +158,6 @@ function site_discount_percent($price, $oldPrice) {
     return null;
   }
   return (int) round((($oldPrice - $price) / $oldPrice) * 100);
-}
-
-function site_tags_to_list($tags) {
-  $items = array_filter(array_map('trim', explode(',', (string) $tags)));
-  return array_values(array_unique($items));
 }
 
 function site_extract_sold_count($tags) {
@@ -111,9 +188,9 @@ function site_store_catalog_href($store, $category = 'geral') {
 function site_public_category_label($category) {
   $value = trim((string) $category);
   $overrides = [
-    'MLB456045' => 'Fritadeiras Eletricas',
-    'MLB48666' => 'Panelas Eletricas',
-    'MLB11507' => 'Caixas Acusticas',
+    'MLB456045' => 'Fritadeiras Elétricas',
+    'MLB48666' => 'Panelas Elétricas',
+    'MLB11507' => 'Caixas Acústicas',
     'MLB418472' => 'Teclados',
   ];
 
@@ -122,6 +199,45 @@ function site_public_category_label($category) {
   }
 
   return site_category_label($category);
+}
+
+function site_category_description($category) {
+  $value = trim((string) $category);
+  $label = site_public_category_label($category);
+
+  $map = [
+    'geral' => 'Confira uma seleção de ofertas atualizadas com produtos de diferentes lojas e faixas de preço.',
+    'MLB456045' => 'Veja ofertas de fritadeiras elétricas com diferentes capacidades, marcas e faixas de preço.',
+    'MLB48666' => 'Encontre panelas elétricas para arroz, pressão e preparo rápido em ofertas atualizadas.',
+    'MLB11507' => 'Explore caixas acústicas e opções de som com preços competitivos e modelos variados.',
+    'MLB418472' => 'Compare teclados para trabalho e jogos com ofertas ativas e marcas conhecidas.',
+    'utilidades domesticas' => 'Veja utilidades domésticas para cozinha, limpeza e organização com ofertas atualizadas.',
+    'cama e banho' => 'Encontre itens de cama e banho com ofertas para renovar conforto, proteção e praticidade.',
+    'beleza' => 'Confira produtos de beleza e cuidados pessoais com preços promocionais e marcas populares.',
+    'celulares e smartphones' => 'Compare celulares e smartphones com diferentes marcas, memória e faixa de preço.',
+    'fones' => 'Veja fones com fio, bluetooth e modelos para uso diário, trabalho e treino.',
+    'fones de ouvido' => 'Confira fones de ouvido com preços atualizados, modelos bluetooth e opções com bom custo-benefício.',
+    'caixas bluetooth' => 'Explore caixas bluetooth com diferentes potências, tamanhos e autonomia de bateria.',
+    'smartwatches' => 'Encontre smartwatches com funções de esporte, notificações e monitoramento do dia a dia.',
+    'mouses' => 'Compare mouses para trabalho, estudo e jogos com ofertas ativas e marcas conhecidas.',
+  ];
+
+  $normalized = strtolower(str_replace(['_', '-'], ' ', $value));
+  $normalizedLabel = strtolower(str_replace(['_', '-'], ' ', $label));
+
+  if (isset($map[$value])) {
+    return $map[$value];
+  }
+
+  if (isset($map[$normalized])) {
+    return $map[$normalized];
+  }
+
+  if (isset($map[$normalizedLabel])) {
+    return $map[$normalizedLabel];
+  }
+
+  return 'Confira ofertas atualizadas de ' . mb_strtolower($label, 'UTF-8') . ' com opções de preço, marcas e modelos variados.';
 }
 
 function site_offer_rank_score($offer) {
@@ -171,6 +287,15 @@ function site_build_filters(PDO $pdo) {
     'categories' => $categories,
     'stores' => $stores,
   ];
+}
+
+function site_count_active_offers(PDO $pdo) {
+  return (int) $pdo->query("
+    SELECT COUNT(*)
+    FROM ofertas
+    WHERE ativo = 1
+      AND (expira_em IS NULL OR expira_em > NOW())
+  ")->fetchColumn();
 }
 
 function site_mix_home_offers(array $offers, $limit = 6) {
@@ -336,8 +461,36 @@ function site_exclude_offers_by_ids(array $offers, array $excludedIds, $limit = 
   return $items;
 }
 
+function site_fill_store_section(array $offers, array $selectionIds, $limit = 8) {
+  $limit = max(1, (int) $limit);
+  $primary = site_exclude_offers_by_ids($offers, $selectionIds, $limit);
+  if (count($primary) >= $limit) {
+    return $primary;
+  }
+
+  $selectedIds = [];
+  foreach ($primary as $offer) {
+    $selectedIds[(int) ($offer['id'] ?? 0)] = true;
+  }
+
+  foreach ($offers as $offer) {
+    $offerId = (int) ($offer['id'] ?? 0);
+    if ($offerId <= 0 || isset($selectedIds[$offerId])) {
+      continue;
+    }
+    $primary[] = $offer;
+    $selectedIds[$offerId] = true;
+    if (count($primary) >= $limit) {
+      break;
+    }
+  }
+
+  return array_slice($primary, 0, $limit);
+}
+
 function site_fetch_social_published_offers(PDO $pdo, $limit = 12) {
   $limit = max(1, min((int) $limit, 24));
+  $candidateLimit = max($limit * 4, 40);
 
   try {
     $runsStmt = $pdo->prepare("
@@ -345,9 +498,10 @@ function site_fetch_social_published_offers(PDO $pdo, $limit = 12) {
       FROM automacao_execucoes
       WHERE tipo = 'social'
         AND status = 'success'
+        AND canal <> 'whatsapp'
         AND result_json IS NOT NULL
       ORDER BY criado_em DESC, id DESC
-      LIMIT 40
+      LIMIT 80
     ");
     $runsStmt->execute();
     $runs = $runsStmt->fetchAll();
@@ -375,7 +529,7 @@ function site_fetch_social_published_offers(PDO $pdo, $limit = 12) {
         'published_at' => (string) ($run['criado_em'] ?? ''),
       ];
 
-      if (count($publishedMap) >= $limit) {
+      if (count($publishedMap) >= $candidateLimit) {
         break 2;
       }
     }
@@ -456,12 +610,40 @@ function site_pick_home_categories(PDO $pdo, $preferred = [], $limit = 4) {
 }
 
 function site_fetch_home_data(PDO $pdo) {
-  $selectionMix = site_fetch_social_published_offers($pdo, 20);
+  $selectionMix = site_fetch_social_published_offers($pdo, 14);
   $selectionIds = array_map(static fn($offer) => (int) ($offer['id'] ?? $offer['offer_id'] ?? 0), $selectionMix);
 
-  $meliTrending = site_exclude_offers_by_ids(site_fetch_store_trending($pdo, 'Mercado Livre', 60), $selectionIds, 8);
-  $shopeeTrending = site_exclude_offers_by_ids(site_fetch_store_trending($pdo, 'Shopee', 60), $selectionIds, 8);
-  $amazonTrending = site_exclude_offers_by_ids(site_fetch_store_trending($pdo, 'Amazon', 60), $selectionIds, 8);
+  $topClicked = $pdo->query("
+    SELECT o.*, COUNT(c.id) AS clicks
+    FROM ofertas o
+    LEFT JOIN cliques c ON c.oferta_id = o.id
+    WHERE o.ativo = 1
+      AND (o.expira_em IS NULL OR o.expira_em > NOW())
+    GROUP BY o.id
+    ORDER BY clicks DESC, o.destaque DESC, o.atualizado_em DESC
+    LIMIT 4
+  ")->fetchAll();
+
+  $dealRush = $pdo->query("
+    SELECT o.*, COUNT(c.id) AS clicks
+    FROM ofertas o
+    LEFT JOIN cliques c ON c.oferta_id = o.id
+    WHERE o.ativo = 1
+      AND (o.expira_em IS NULL OR o.expira_em > NOW())
+      AND o.preco > 0
+      AND o.preco <= 199.90
+    GROUP BY o.id
+    ORDER BY
+      (CASE WHEN o.preco_antigo IS NOT NULL AND o.preco_antigo > o.preco THEN 1 ELSE 0 END) DESC,
+      o.destaque DESC,
+      clicks DESC,
+      o.atualizado_em DESC
+    LIMIT 16
+  ")->fetchAll();
+
+  $meliTrending = site_fill_store_section(site_fetch_store_trending($pdo, 'Mercado Livre', 60), $selectionIds, 16);
+  $shopeeTrending = site_fill_store_section(site_fetch_store_trending($pdo, 'Shopee', 60), $selectionIds, 16);
+  $amazonTrending = site_fill_store_section(site_fetch_store_trending($pdo, 'Amazon', 60), $selectionIds, 16);
 
   $categoryRows = site_pick_home_categories($pdo, [
     'MLB1714',
@@ -483,7 +665,7 @@ function site_fetch_home_data(PDO $pdo) {
 
   foreach ($categoryRows as $row) {
     $categoryStmt->execute([$row['categoria']]);
-    $categoryOffers = site_exclude_offers_by_ids($categoryStmt->fetchAll(), $selectionIds, 4);
+    $categoryOffers = site_exclude_offers_by_ids($categoryStmt->fetchAll(), $selectionIds, 16);
     if (!$categoryOffers) {
       continue;
     }
@@ -496,11 +678,14 @@ function site_fetch_home_data(PDO $pdo) {
   }
   return [
     'selection_mix' => $selectionMix,
+    'top_clicked' => $topClicked,
+    'deal_rush' => $dealRush,
     'meli_trending' => $meliTrending,
     'shopee_trending' => $shopeeTrending,
     'amazon_trending' => $amazonTrending,
     'sections_by_category' => $sectionsByCategory,
     'filters' => site_build_filters($pdo),
+    'active_offer_count' => site_count_active_offers($pdo),
   ];
 }
 
@@ -751,5 +936,101 @@ function site_fetch_instagram_landing_data(PDO $pdo) {
     'top_clicked' => $topClicked,
     'categories' => $categoryRows,
     'category_sections' => $categorySections,
+  ];
+}
+
+function site_fetch_deals_of_day_data(PDO $pdo) {
+  $bestDeals = $pdo->query("
+    SELECT o.*, COUNT(c.id) AS clicks
+    FROM ofertas o
+    LEFT JOIN cliques c ON c.oferta_id = o.id
+    WHERE o.ativo = 1
+      AND (o.expira_em IS NULL OR o.expira_em > NOW())
+    GROUP BY o.id
+    ORDER BY
+      o.destaque DESC,
+      (CASE WHEN o.cupom IS NOT NULL AND o.cupom <> '' THEN 1 ELSE 0 END) DESC,
+      (CASE WHEN o.preco_antigo IS NOT NULL AND o.preco_antigo > o.preco THEN ((o.preco_antigo - o.preco) / o.preco_antigo) ELSE 0 END) DESC,
+      clicks DESC,
+      o.atualizado_em DESC
+    LIMIT 12
+  ")->fetchAll();
+
+  $budgetDeals = $pdo->query("
+    SELECT o.*, COUNT(c.id) AS clicks
+    FROM ofertas o
+    LEFT JOIN cliques c ON c.oferta_id = o.id
+    WHERE o.ativo = 1
+      AND (o.expira_em IS NULL OR o.expira_em > NOW())
+      AND o.preco > 0
+      AND o.preco <= 149.90
+    GROUP BY o.id
+    ORDER BY
+      (CASE WHEN o.preco_antigo IS NOT NULL AND o.preco_antigo > o.preco THEN 1 ELSE 0 END) DESC,
+      o.destaque DESC,
+      clicks DESC,
+      o.atualizado_em DESC
+    LIMIT 10
+  ")->fetchAll();
+
+  $budgetStrictCount = count($budgetDeals);
+  if ($budgetStrictCount < 10) {
+    $existingIds = array_map(static fn($offer) => (int) ($offer['id'] ?? 0), $budgetDeals);
+    $placeholders = implode(',', array_fill(0, max(1, count($existingIds)), '?'));
+    $excludedIds = $existingIds ?: [0];
+    $fallbackLimit = 10 - $budgetStrictCount;
+
+    $fallbackStmt = $pdo->prepare("
+      SELECT o.*, COUNT(c.id) AS clicks
+      FROM ofertas o
+      LEFT JOIN cliques c ON c.oferta_id = o.id
+      WHERE o.ativo = 1
+        AND (o.expira_em IS NULL OR o.expira_em > NOW())
+        AND o.preco > 149.90
+        AND o.preco <= 199.90
+        AND o.id NOT IN ({$placeholders})
+      GROUP BY o.id
+      ORDER BY
+        (CASE WHEN o.preco_antigo IS NOT NULL AND o.preco_antigo > o.preco THEN 1 ELSE 0 END) DESC,
+        o.destaque DESC,
+        clicks DESC,
+        o.atualizado_em DESC
+      LIMIT {$fallbackLimit}
+    ");
+    $fallbackStmt->execute($excludedIds);
+    $budgetDeals = array_merge($budgetDeals, $fallbackStmt->fetchAll());
+  }
+
+  $couponDeals = $pdo->query("
+    SELECT o.*, COUNT(c.id) AS clicks
+    FROM ofertas o
+    LEFT JOIN cliques c ON c.oferta_id = o.id
+    WHERE o.ativo = 1
+      AND (o.expira_em IS NULL OR o.expira_em > NOW())
+      AND o.cupom IS NOT NULL
+      AND o.cupom <> ''
+    GROUP BY o.id
+    ORDER BY o.destaque DESC, clicks DESC, o.atualizado_em DESC
+    LIMIT 6
+  ")->fetchAll();
+
+  $topClicked = $pdo->query("
+    SELECT o.*, COUNT(c.id) AS clicks
+    FROM ofertas o
+    LEFT JOIN cliques c ON c.oferta_id = o.id
+    WHERE o.ativo = 1
+      AND (o.expira_em IS NULL OR o.expira_em > NOW())
+    GROUP BY o.id
+    ORDER BY clicks DESC, o.destaque DESC, o.atualizado_em DESC
+    LIMIT 5
+  ")->fetchAll();
+
+  return [
+    'best_deals' => $bestDeals,
+    'budget_deals' => $budgetDeals,
+    'budget_strict_count' => $budgetStrictCount,
+    'coupon_deals' => $couponDeals,
+    'top_clicked' => $topClicked,
+    'active_offer_count' => site_count_active_offers($pdo),
   ];
 }

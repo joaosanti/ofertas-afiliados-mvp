@@ -18,7 +18,8 @@ $siteHeaderMenuChunks = array_chunk(
 );
 
 $siteHeaderNavItems = [
-    ['key' => 'selection', 'label' => 'Home', 'href' => '/#selecao-dia'],
+    ['key' => 'selection', 'label' => 'Home', 'href' => '/'],
+    ['key' => 'deals', 'label' => 'Ofertas do Dia', 'href' => '/ofertas-do-dia.php'],
     ['key' => 'shopee', 'label' => 'Shopee', 'href' => '/#shopee-alta'],
     ['key' => 'mercado-livre', 'label' => 'Mercado Livre', 'href' => '/#mercado-livre-alta'],
     ['key' => 'amazon', 'label' => 'Amazon', 'href' => '/#amazon-alta'],
@@ -58,7 +59,7 @@ $siteHeaderNavItems = [
     <div class="header-nav-row">
       <nav class="nav-links nav-links-desktop">
         <?php foreach ($siteHeaderNavItems as $item): ?>
-          <a class="nav-link<?= ($item['key'] !== 'selection' && $siteHeaderCurrent === $item['key']) ? ' is-current' : '' ?>" href="<?= h($item['href']) ?>"><?= h($item['label']) ?></a>
+          <a class="nav-link<?= $siteHeaderCurrent === $item['key'] ? ' is-current' : '' ?>" href="<?= h($item['href']) ?>"><?= h($item['label']) ?></a>
         <?php endforeach; ?>
         <div class="nav-item nav-dropdown">
           <a class="nav-link<?= $siteHeaderCurrent === 'categories' ? ' is-current' : '' ?>" href="/categoria.php?cat=geral">

@@ -8,6 +8,9 @@ $offers = $data['offers'];
 $stores = $data['stores'];
 $selectedStore = $data['store'];
 $categoryLabel = site_public_category_label($category);
+$categoryDescription = $selectedStore !== ''
+  ? 'Confira ofertas atualizadas de ' . site_store_label($selectedStore) . ' nesta seleção de produtos.'
+  : site_category_description($category);
 $pageHeading = 'Produtos';
 if ($selectedStore !== '') {
   $pageHeading = site_store_label($selectedStore);
@@ -15,7 +18,7 @@ if ($selectedStore !== '') {
   $pageHeading = $categoryLabel;
 }
 $siteHeaderCurrent = 'categories';
-$siteHeaderSearchPlaceholder = 'Buscar produto';
+$siteHeaderSearchPlaceholder = 'Buscar oferta com desconto';
 ?>
 <!doctype html>
 <html lang="pt-br">
@@ -32,10 +35,20 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
 
   <main class="page-shell" style="padding-top:18px;">
     <div class="container">
-      <section class="section-panel" id="produtos">
+      <section class="section-panel category-hero-panel">
         <div class="section-heading">
           <div>
             <h2><?= h($pageHeading) ?></h2>
+            <div class="section-copy"><?= h($categoryDescription) ?></div>
+          </div>
+          <a class="button button-secondary" href="/ofertas-do-dia.php">Ir para Ofertas do Dia</a>
+        </div>
+      </section>
+
+      <section class="section-panel" id="produtos">
+        <div class="section-heading">
+          <div>
+            <h2>Ofertas disponíveis</h2>
           </div>
         </div>
 
@@ -66,7 +79,7 @@ $siteHeaderSearchPlaceholder = 'Buscar produto';
                     <?php endif; ?>
                   </div>
                   <div class="card-footer compact-footer">
-                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Comprar no site</a>
+                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promoção</a>
                   </div>
                 </div>
               </article>

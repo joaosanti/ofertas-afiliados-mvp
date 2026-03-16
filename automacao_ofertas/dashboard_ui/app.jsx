@@ -10,14 +10,43 @@ const IMPORT_OPTIONS = [
 const SOCIAL_OPTIONS = [
   { key: "facebook:feed", label: "Facebook Feed", note: "Posta direto na pagina do projeto." },
   { key: "facebook:reel", label: "Facebook Reel", note: "Gera um MP4 vertical e publica na pagina do Facebook." },
-  { key: "both:feed", label: "Facebook + Instagram Feed", note: "Publica a mesma oferta nos dois canais." },
-  { key: "both:feed_story", label: "Facebook + Instagram Feed + Story", note: "Publica Facebook feed, Instagram feed e Instagram story na mesma execucao." },
+  { key: "both:reel", label: "Facebook + Instagram Reel", note: "Publica reel nos dois canais para a mesma oferta." },
+  { key: "both:feed_story", label: "Facebook + Instagram Feed + Story", note: "Publica Facebook feed, Facebook story, Instagram feed e Instagram story na mesma execucao." },
   { key: "instagram:feed", label: "Instagram Feed", note: "Publica no feed do Instagram via Graph API." },
+  { key: "instagram:reel", label: "Instagram Reel", note: "Usa video da Shopee quando existir e cai para MP4 gerado quando nao existir." },
   { key: "instagram:feed_story", label: "Instagram Feed + Story", note: "Publica o feed e o story juntos para a mesma oferta." },
   { key: "instagram:story", label: "Instagram Story", note: "Usa a arte gerada automaticamente." },
   { key: "whatsapp:web", label: "WhatsApp Web Local", note: "Modo gratis: monta a mensagem e abre o WhatsApp Web para envio manual." },
   { key: "whatsapp:group", label: "WhatsApp Grupo", note: "Prepara o lote e a mensagem para grupo; envio real entra na proxima etapa." },
 ];
+
+const AUTO_SOCIAL_MODE_OPTIONS = {
+  facebook: [
+    { value: "feed", label: "Feed" },
+    { value: "reel", label: "Reel" },
+  ],
+  instagram: [
+    { value: "feed", label: "Feed" },
+    { value: "reel", label: "Reel" },
+  ],
+  both: [
+    { value: "reel", label: "Reel" },
+    { value: "feed_story", label: "Feed + Story" },
+  ],
+  whatsapp: [
+    { value: "group", label: "Grupo" },
+  ],
+};
+
+function normalizeAutoSocialAction(platform, mode) {
+  const normalizedPlatform = AUTO_SOCIAL_MODE_OPTIONS[platform] ? platform : "facebook";
+  const allowedModes = AUTO_SOCIAL_MODE_OPTIONS[normalizedPlatform] || AUTO_SOCIAL_MODE_OPTIONS.facebook;
+  const preferredMode = normalizedPlatform === "both" && mode === "feed" ? "feed_story" : mode;
+  const normalizedMode = allowedModes.some((item) => item.value === preferredMode) ? preferredMode : allowedModes[0].value;
+  return { platform: normalizedPlatform, mode: normalizedMode };
+}
+
+const SOCIAL_STORE_FALLBACK_OPTIONS = ["Amazon", "Mercado Livre", "Shopee"];
 
 const NAV_ITEMS = [
   { id: "painel", label: "Painel", note: "Resumo geral do projeto, métricas e atalhos rápidos." },
@@ -127,6 +156,9 @@ function humanizeSocialError(message) {
   const text = String(message || "").trim();
   const lowered = text.toLowerCase();
   if (!text) return "Falha ao publicar nas redes sociais.";
+  if (lowered.includes("limite da api do instagram") || lowered.includes("número máximo de posts") || lowered.includes("numero maximo de posts") || lowered.includes("too many actions")) {
+    return "Instagram bloqueado por cota da API de publicação. A conta atingiu o limite da janela de 24h e precisa aguardar liberar saldo.";
+  }
   if (lowered.includes("token da meta expirou") || lowered.includes("\"code\":190") || lowered.includes("session has expired")) {
     return "Token da Meta expirado. Gere um novo token no Graph API Explorer e salve no manager para voltar a publicar.";
   }
@@ -164,8 +196,10 @@ function socialChannelPreviewTitle(platform, mode) {
   if (platform === "facebook" && mode === "feed") return "Preview Facebook Feed";
   if (platform === "facebook" && mode === "reel") return "Preview Facebook Reel";
   if (platform === "instagram" && mode === "feed") return "Preview Instagram Feed";
+  if (platform === "instagram" && mode === "reel") return "Preview Instagram Reel";
   if (platform === "instagram" && mode === "story") return "Preview Instagram Story";
   if (platform === "instagram" && mode === "feed_story") return "Preview Instagram Feed + Story";
+  if ((platform === "both" || platform === "facebook_instagram") && mode === "reel") return "Preview Facebook + Instagram Reel";
   if ((platform === "both" || platform === "facebook_instagram") && mode === "feed") return "Preview Facebook + Instagram Feed";
   if ((platform === "both" || platform === "facebook_instagram") && mode === "feed_story") return "Preview Facebook + Instagram Feed + Story";
   return "Preview social";
@@ -332,33 +366,6 @@ function Toast({ toast, onClose }) {
   return <div className={`toast ${toast.type === "error" ? "is-error" : toast.type === "info" ? "is-info" : "is-success"}`}>{toast.message}</div>;
 }
 
-function balanceSocialItems(items, activeStoreFilter) {
-  if (activeStoreFilter !== "all") return items;
-  const groups = new Map();
-  const order = [];
-  items.forEach((item) => {
-    const key = item.store || "Loja";
-    if (!groups.has(key)) {
-      groups.set(key, []);
-      order.push(key);
-    }
-    groups.get(key).push(item);
-  });
-  const mixed = [];
-  let hasItems = true;
-  while (hasItems) {
-    hasItems = false;
-    order.forEach((key) => {
-      const bucket = groups.get(key) || [];
-      if (bucket.length) {
-        mixed.push(bucket.shift());
-        hasItems = true;
-      }
-    });
-  }
-  return mixed;
-}
-
 function App() {
   const [snapshot, setSnapshot] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -372,6 +379,7 @@ function App() {
   const [socialRunPreview, setSocialRunPreview] = useState(null);
   const [socialHiddenIds, setSocialHiddenIds] = useState([]);
   const [socialCheckedIds, setSocialCheckedIds] = useState([]);
+  const [socialSelectedItems, setSocialSelectedItems] = useState([]);
   const [importLoading, setImportLoading] = useState(false);
   const [manualLinkLoading, setManualLinkLoading] = useState(false);
   const [mlRelinkLoading, setMlRelinkLoading] = useState(false);
@@ -401,6 +409,7 @@ function App() {
   const [productResults, setProductResults] = useState([]);
   const [productsLoading, setProductsLoading] = useState(false);
   const [productSaving, setProductSaving] = useState(false);
+  const [productDeleting, setProductDeleting] = useState(false);
   const [selectedProductId, setSelectedProductId] = useState(null);
   const [productForm, setProductForm] = useState({
     titulo: "",
@@ -418,7 +427,26 @@ function App() {
     ativo: true,
     expira_em: "",
   });
-  const [socialForm, setSocialForm] = useState({ selected: "facebook:feed", limit: 120, query: "" });
+
+  function resetProductForm() {
+    setProductForm({
+      titulo: "",
+      slug: "",
+      descricao: "",
+      preco: "",
+      preco_antigo: "",
+      loja: "",
+      url_afiliado: "",
+      cupom: "",
+      imagem_url: "",
+      categoria: "",
+      tags: "",
+      destaque: false,
+      ativo: true,
+      expira_em: "",
+    });
+  }
+  const [socialForm, setSocialForm] = useState({ selected: "both:feed_story", limit: 120, query: "" });
   const [socialFilters, setSocialFilters] = useState({ store: "all", category: "all" });
   const [activeSection, setActiveSection] = useState("painel");
   const [whatsappGroups, setWhatsappGroups] = useState([]);
@@ -435,6 +463,7 @@ function App() {
     auto_social_platform: "facebook",
     auto_social_mode: "feed",
     auto_social_limit: 3,
+    auto_social_repeat_block_minutes: 1440,
     auto_story_enabled: false,
     auto_story_times: "07:05,13:05,19:05",
     auto_story_platform: "instagram",
@@ -456,10 +485,16 @@ function App() {
   }, [socialForm.selected]);
   const isWhatsappGroupSelected = socialSplit.platform === "whatsapp" && socialSplit.mode === "group";
   const isWhatsappWebSelected = socialSplit.platform === "whatsapp" && socialSplit.mode === "web";
+  const normalizedAutoSocial = useMemo(
+    () => normalizeAutoSocialAction(settingsForm.auto_social_platform, settingsForm.auto_social_mode),
+    [settingsForm.auto_social_platform, settingsForm.auto_social_mode]
+  );
+  const autoSocialModeOptions = AUTO_SOCIAL_MODE_OPTIONS[normalizedAutoSocial.platform] || AUTO_SOCIAL_MODE_OPTIONS.facebook;
+  const isCombinedFeedStoryAuto = normalizedAutoSocial.platform === "both" && normalizedAutoSocial.mode === "feed_story";
 
   const socialCandidates = useMemo(() => socialPreview?.items || [], [socialPreview]);
   const socialStoreOptions = useMemo(() => {
-    const values = [...new Set(socialCandidates.map((item) => item.store).filter(Boolean))];
+    const values = [...new Set([...SOCIAL_STORE_FALLBACK_OPTIONS, ...socialCandidates.map((item) => item.store).filter(Boolean)])];
     return values.sort((a, b) => a.localeCompare(b, "pt-BR"));
   }, [socialCandidates]);
   const socialCategoryOptions = useMemo(() => {
@@ -480,13 +515,13 @@ function App() {
     }),
     [socialCandidates, socialFilters, socialForm.query]
   );
-  const balancedSocialCandidates = useMemo(
-    () => balanceSocialItems(filteredSocialCandidates, socialFilters.store),
-    [filteredSocialCandidates, socialFilters.store]
-  );
   const socialQueue = useMemo(
-    () => balancedSocialCandidates.filter((item) => !socialHiddenIds.includes(item.offer_id)),
-    [balancedSocialCandidates, socialHiddenIds]
+    () => filteredSocialCandidates.filter((item) => !socialHiddenIds.includes(item.offer_id)),
+    [filteredSocialCandidates, socialHiddenIds]
+  );
+  const socialPinnedQueue = useMemo(
+    () => socialSelectedItems.filter((item) => item && socialCheckedIds.includes(item.offer_id)),
+    [socialSelectedItems, socialCheckedIds]
   );
   const whatsappPreviewItems = useMemo(() => {
     if (
@@ -563,6 +598,7 @@ function App() {
   useEffect(() => {
     const settings = snapshot?.settings;
     if (!settings) return;
+    const normalizedAuto = normalizeAutoSocialAction(settings.auto_social_platform || "facebook", settings.auto_social_mode || "feed");
     setSettingsForm((current) => ({
       ...current,
       manager_username: settings.manager_username || "admin",
@@ -573,9 +609,10 @@ function App() {
       auto_import_providers: settings.auto_import_providers || ["mercadolivre"],
       auto_social_enabled: Boolean(settings.auto_social_enabled),
       auto_social_times: settings.auto_social_times || "",
-      auto_social_platform: settings.auto_social_platform || "facebook",
-      auto_social_mode: settings.auto_social_mode || "feed",
+      auto_social_platform: normalizedAuto.platform,
+      auto_social_mode: normalizedAuto.mode,
       auto_social_limit: Number(settings.auto_social_limit || 3),
+      auto_social_repeat_block_minutes: Number(settings.auto_social_repeat_block_minutes || 1440),
       auto_story_enabled: Boolean(settings.auto_story_enabled),
       auto_story_times: settings.auto_story_times || "",
       auto_story_platform: settings.auto_story_platform || "instagram",
@@ -600,6 +637,7 @@ function App() {
       });
       const normalizedQuery = String(query || "").trim();
       if (normalizedQuery) params.set("q", normalizedQuery);
+      if (socialFilters.store && socialFilters.store !== "all") params.set("store", socialFilters.store);
       setSocialPreview(await fetchJson(`/social/meta/post-previews?${params.toString()}`));
     } catch (error) {
       setToast({ type: "error", message: `Falha ao montar previews sociais: ${error.message}` });
@@ -613,6 +651,10 @@ function App() {
     loadSocialPreview();
     handleProductSearch("");
   }, []);
+
+  useEffect(() => {
+    loadSocialPreview(socialForm.limit, socialForm.query);
+  }, [socialFilters.store]);
 
   useEffect(() => {
     setSocialRunPreview(null);
@@ -648,9 +690,17 @@ function App() {
   }, [socialCandidates]);
 
   useEffect(() => {
-    const visibleIds = socialQueue.map((item) => item.offer_id);
-    setSocialCheckedIds((current) => current.filter((id) => visibleIds.includes(id)));
-  }, [socialQueue]);
+    setSocialSelectedItems((current) => {
+      if (!current.length) return current;
+      const nextById = new Map(current.map((item) => [item.offer_id, item]));
+      socialCandidates.forEach((item) => {
+        if (nextById.has(item.offer_id)) {
+          nextById.set(item.offer_id, item);
+        }
+      });
+      return socialCheckedIds.map((id) => nextById.get(id)).filter(Boolean);
+    });
+  }, [socialCandidates, socialCheckedIds]);
 
   function toggleProvider(providerKey) {
     setImportForm((current) => {
@@ -931,6 +981,35 @@ function App() {
     }
   }
 
+  async function handleProductDelete() {
+    if (!selectedProductId) {
+      setToast({ type: "error", message: "Selecione um produto para excluir." });
+      return;
+    }
+    const title = String(productForm.titulo || "").trim() || `#${selectedProductId}`;
+    if (!window.confirm(`Excluir o produto "${title}"? Essa acao nao pode ser desfeita.`)) {
+      return;
+    }
+    setProductDeleting(true);
+    try {
+      const data = await fetchJson(`/dashboard/api/offers/${selectedProductId}`, {
+        method: "DELETE",
+      });
+      setToast({ type: "success", message: `Produto excluido: ${data.deleted?.titulo || title}.` });
+      setProductResults((current) => current.filter((item) => item.id !== selectedProductId));
+      setSelectedProductId(null);
+      resetProductForm();
+      if (String(productQuery || "").trim()) {
+        await handleProductSearch(productQuery);
+      }
+      await loadSnapshot();
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao excluir produto: ${error.message}` });
+    } finally {
+      setProductDeleting(false);
+    }
+  }
+
   async function handleMercadoLivreExistingPreview() {
     setMlRelinkLoading(true);
     try {
@@ -1094,9 +1173,12 @@ function App() {
   async function handleSocialRun() {
     setRunLoading((state) => ({ ...state, social: true }));
     try {
-      const selectedIds = socialCheckedIds.filter((id) => socialQueue.some((item) => item.offer_id === id));
+      const selectedIds = [...socialCheckedIds];
       if (!selectedIds.length) {
         throw new Error("Selecione ao menos uma oferta da fila pronta.");
+      }
+      if (socialSplit.platform === "whatsapp") {
+        setSocialRunPreview(null);
       }
       const payload = { ...socialSplit, limit: selectedIds.length, offer_ids: selectedIds };
       const data = await fetchJson("/dashboard/api/social/run", {
@@ -1104,6 +1186,9 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      if (payload.platform === "whatsapp" && (!Array.isArray(data.items) || !data.items.length)) {
+        throw new Error("Nenhuma oferta elegivel voltou do backend para montar o lote do WhatsApp.");
+      }
       if (payload.platform === "whatsapp") {
         setSocialRunPreview(data);
       } else {
@@ -1111,17 +1196,25 @@ function App() {
       }
       const errorCount = Number((data.errors || []).length);
       const errorSummary = humanizeSocialError(data.error_summary || (data.errors || [])[0]?.error || "");
+      const warningSummary = humanizeSocialError(data.warning_summary || (data.warnings || [])[0]?.warning || "");
       setToast({
         type: errorCount ? "error" : "success",
         message: payload.platform === "whatsapp"
           ? `${payload.mode === "web" ? "WhatsApp Web" : "WhatsApp grupo"}: ${data.count} item(ns) preparado(s) para envio.`
           : errorCount
             ? `Publicacao ${payload.platform}/${payload.mode}: ${data.count} concluido(s), ${errorCount} erro(s). ${errorSummary}`
+            : warningSummary && warningSummary !== "Falha ao publicar nas redes sociais."
+              ? `Publicacao ${payload.platform}/${payload.mode}: ${data.count} concluido(s). ${warningSummary}`
             : `Publicacao ${payload.platform}/${payload.mode}: ${data.count} concluido(s), ${errorCount} erro(s).`,
       });
       setSocialHiddenIds((current) => [...new Set([...current, ...selectedIds])]);
+      setSocialCheckedIds((current) => current.filter((id) => !selectedIds.includes(id)));
+      setSocialSelectedItems((current) => current.filter((item) => !selectedIds.includes(item.offer_id)));
       await Promise.all([loadSnapshot(), loadSocialPreview(socialForm.limit, socialForm.query)]);
     } catch (error) {
+      if (socialSplit.platform === "whatsapp") {
+        setSocialRunPreview(null);
+      }
       setToast({ type: "error", message: `Falha na publicacao social: ${error.message}` });
     } finally {
       setRunLoading((state) => ({ ...state, social: false }));
@@ -1131,7 +1224,7 @@ function App() {
   async function handleFacebookBatch() {
     setRunLoading((state) => ({ ...state, batch: true }));
     try {
-      const selectedIds = socialCheckedIds.filter((id) => socialQueue.some((item) => item.offer_id === id));
+      const selectedIds = [...socialCheckedIds];
       if (!selectedIds.length) {
         throw new Error("Selecione ao menos uma oferta da fila pronta.");
       }
@@ -1142,6 +1235,8 @@ function App() {
       });
       setToast({ type: "success", message: `Facebook em lote: ${data.count} publicacao(oes) concluida(s).` });
       setSocialHiddenIds((current) => [...new Set([...current, ...selectedIds])]);
+      setSocialCheckedIds((current) => current.filter((id) => !selectedIds.includes(id)));
+      setSocialSelectedItems((current) => current.filter((item) => !selectedIds.includes(item.offer_id)));
       await Promise.all([loadSnapshot(), loadSocialPreview(socialForm.limit, socialForm.query)]);
     } catch (error) {
       setToast({ type: "error", message: `Falha no lote do Facebook: ${error.message}` });
@@ -1153,6 +1248,7 @@ function App() {
   async function handleRunJobNow(jobKey) {
     setJobRunLoading((state) => ({ ...state, [jobKey]: true }));
     try {
+      const normalizedAuto = normalizeAutoSocialAction(settingsForm.auto_social_platform, settingsForm.auto_social_mode);
       const url = jobKey === "import"
         ? "/dashboard/api/automation/import/run-now"
         : jobKey === "story"
@@ -1167,8 +1263,8 @@ function App() {
               limit: Number(settingsForm.auto_story_limit || 1),
             }
         : {
-            platform: settingsForm.auto_social_platform,
-            mode: settingsForm.auto_social_mode,
+            platform: normalizedAuto.platform,
+            mode: normalizedAuto.mode,
             limit: Number(settingsForm.auto_social_limit || 1),
           };
       const data = await fetchJson(url, {
@@ -1207,6 +1303,7 @@ function App() {
   async function handleSettingsSave() {
     setSettingsLoading(true);
     try {
+      const normalizedAuto = normalizeAutoSocialAction(settingsForm.auto_social_platform, settingsForm.auto_social_mode);
       const payload = {
         manager_username: settingsForm.manager_username,
         manager_password: settingsForm.manager_password || null,
@@ -1216,9 +1313,10 @@ function App() {
         auto_import_providers: settingsForm.auto_import_providers,
         auto_social_enabled: settingsForm.auto_social_enabled,
         auto_social_times: settingsForm.auto_social_times,
-        auto_social_platform: settingsForm.auto_social_platform,
-        auto_social_mode: settingsForm.auto_social_mode,
+        auto_social_platform: normalizedAuto.platform,
+        auto_social_mode: normalizedAuto.mode,
         auto_social_limit: Number(settingsForm.auto_social_limit || 1),
+        auto_social_repeat_block_minutes: Number(settingsForm.auto_social_repeat_block_minutes || 1440),
         auto_story_enabled: settingsForm.auto_story_enabled,
         auto_story_times: settingsForm.auto_story_times,
         auto_story_platform: settingsForm.auto_story_platform,
@@ -1319,16 +1417,29 @@ function App() {
   const metaTokenConfigured = Boolean(snapshot?.settings?.meta_access_token_configured);
   const activeNavItem = NAV_ITEMS.find((item) => item.id === activeSection) || NAV_ITEMS[0];
 
-  function toggleSocialSelection(offerId) {
+  function toggleSocialSelection(item) {
+    if (!item?.offer_id) return;
     setSocialCheckedIds((current) => (
-      current.includes(offerId)
-        ? current.filter((id) => id !== offerId)
-        : [...current, offerId]
+      current.includes(item.offer_id)
+        ? current.filter((id) => id !== item.offer_id)
+        : [...current, item.offer_id]
     ));
+    setSocialSelectedItems((current) => {
+      const exists = current.some((entry) => entry.offer_id === item.offer_id);
+      if (exists) {
+        return current.filter((entry) => entry.offer_id !== item.offer_id);
+      }
+      return [...current, item];
+    });
   }
 
   function dismissSocialOffer(offerId) {
     setSocialHiddenIds((current) => [...new Set([...current, offerId])]);
+  }
+
+  function clearSocialSelection() {
+    setSocialCheckedIds([]);
+    setSocialSelectedItems([]);
   }
 
   return (
@@ -1588,8 +1699,16 @@ function App() {
                       </label>
                     </div>
                     <div className="product-edit-actions">
-                      <button className="button is-primary" onClick={handleProductSave} disabled={productSaving}>
+                      <button className="button is-primary" onClick={handleProductSave} disabled={productSaving || productDeleting}>
                         {productSaving ? "Salvando..." : "Salvar produto"}
+                      </button>
+                      <button
+                        className="button is-secondary"
+                        onClick={handleProductDelete}
+                        disabled={productSaving || productDeleting}
+                        style={{ background: "#9f2432", color: "#fff", borderColor: "#9f2432" }}
+                      >
+                        {productDeleting ? "Excluindo..." : "Excluir produto"}
                       </button>
                       <a className="tiny-button is-soft" href={siteOfferUrl(productForm.slug)} target="_blank" rel="noreferrer">Abrir página</a>
                       <a className="tiny-button" href={siteStoreUrl(productForm.slug)} target="_blank" rel="noreferrer">Abrir loja</a>
@@ -1612,13 +1731,23 @@ function App() {
               </div>
             </div>
             <div className="status-grid">
-              {["import", "social", "story"].map((jobKey) => {
+              {["import", "social", "story"].filter((jobKey) => !(jobKey === "story" && isCombinedFeedStoryAuto)).map((jobKey) => {
                 const job = automation?.jobs?.[jobKey] || {};
                 return (
                   <article className={`status-card ${job.last_status === "error" ? "is-error" : job.last_status === "success" ? "is-success" : ""}`} key={jobKey}>
                     <div className="status-card-head">
-                      <h4>{jobKey === "import" ? "Job de importacao" : jobKey === "story" ? "Job de stories" : "Job de feed"}</h4>
-                      <span className={`badge ${job.enabled ? "is-success" : "is-neutral"}`}>{job.enabled ? "Ativo" : "Desligado"}</span>
+                      <h4>
+                        {jobKey === "import"
+                          ? "Job de importacao"
+                          : jobKey === "story"
+                            ? "Job de stories"
+                            : isCombinedFeedStoryAuto
+                              ? "Job automatico Feed + Story"
+                              : "Job de feed"}
+                      </h4>
+                      <span className={`badge ${job.enabled ? "is-success" : job.last_run_at ? "is-warning" : "is-neutral"}`}>
+                        {job.enabled ? "Ativo" : job.last_run_at ? "Manual somente" : "Desligado"}
+                      </span>
                     </div>
                     <p>{jobKey === "import" ? `Provedores: ${(job.providers || []).join(", ") || "nenhum"}` : `Canal: ${job.platform || "-"} / ${job.mode || "-"} / limite ${job.limit || 0}`}</p>
                     <p>Intervalo de fallback: {job.interval_minutes || 0} min</p>
@@ -1638,7 +1767,13 @@ function App() {
                         onClick={() => handleRunJobNow(jobKey)}
                         disabled={jobRunLoading[jobKey]}
                       >
-                        {jobRunLoading[jobKey] ? "Rodando..." : "Rodar agora"}
+                        {jobRunLoading[jobKey]
+                          ? "Rodando..."
+                          : jobKey === "social"
+                            ? "Testar job social automatico agora"
+                            : jobKey === "story"
+                              ? "Testar job de story agora"
+                              : "Rodar agora"}
                       </button>
                     </div>
                   </article>
@@ -1722,7 +1857,7 @@ function App() {
                 </div>
                 <div className="field">
                   <label>Canal automatico</label>
-                  <select value={settingsForm.auto_social_platform} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_platform: e.target.value }))}>
+                  <select value={normalizedAutoSocial.platform} onChange={(e) => setSettingsForm((state) => ({ ...state, ...normalizeAutoSocialAction(e.target.value, state.auto_social_mode) }))}>
                     <option value="facebook">Facebook</option>
                     <option value="instagram">Instagram</option>
                     <option value="both">Facebook + Instagram</option>
@@ -1734,15 +1869,20 @@ function App() {
               <div className="field-grid" style={{ marginTop: 12 }}>
                 <div className="field">
                   <label>Modo automatico</label>
-                  <select value={settingsForm.auto_social_mode} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_mode: e.target.value }))}>
-                    <option value="feed">Feed</option>
-                    <option value="reel">Reel</option>
-                    <option value="group">Grupo</option>
+                  <select value={normalizedAutoSocial.mode} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_mode: e.target.value }))}>
+                    {autoSocialModeOptions.map((item) => (
+                      <option key={item.value} value={item.value}>{item.label}</option>
+                    ))}
                   </select>
                 </div>
                 <div className="field">
                   <label>Limite do social</label>
                   <input type="number" min="1" max="20" value={settingsForm.auto_social_limit} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_limit: Number(e.target.value || 1) }))} />
+                </div>
+                <div className="field">
+                  <label>Prazo para repetir oferta</label>
+                  <input type="number" min="60" step="60" value={settingsForm.auto_social_repeat_block_minutes} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_social_repeat_block_minutes: Number(e.target.value || 1440) }))} />
+                  <small>Em minutos. Ex.: 1440 = 24 horas sem repetir no auto social/story.</small>
                 </div>
                 <div className="field">
                   <label>Status do token</label>
@@ -1753,79 +1893,43 @@ function App() {
               </div>
 
               <div className="field-grid" style={{ marginTop: 12 }}>
-                <div className="field">
-                  <label>WhatsApp grupo</label>
-                  <input type="text" value={settingsForm.whatsapp_group_target} onChange={(e) => setSettingsForm((state) => ({ ...state, whatsapp_group_target: e.target.value }))} />
-                  <small>Ex.: group id alvo no 360dialog.</small>
-                </div>
-                <div className="field">
-                  <label>WhatsApp API base (360dialog)</label>
-                  <input type="text" value={settingsForm.whatsapp_api_base_url} onChange={(e) => setSettingsForm((state) => ({ ...state, whatsapp_api_base_url: e.target.value }))} />
-                </div>
-                <div className="field">
-                  <label>WhatsApp token (360dialog)</label>
-                  <input type="password" placeholder={settingsForm.whatsapp_api_base_url ? "Deixe vazio para manter" : "Informe depois"} value={settingsForm.whatsapp_api_token} onChange={(e) => setSettingsForm((state) => ({ ...state, whatsapp_api_token: e.target.value }))} />
-                </div>
-              </div>
-
-              <div className="field-grid" style={{ marginTop: 12 }}>
-                <div className="field">
-                  <label>Grupos detectados</label>
-                  <select
-                    value={settingsForm.whatsapp_group_target}
-                    onChange={(e) => setSettingsForm((state) => ({ ...state, whatsapp_group_target: e.target.value }))}
-                  >
-                    <option value="">Selecione um grupo carregado</option>
-                    {whatsappGroups.map((item) => (
-                      <option key={item.group_id} value={item.group_id}>
-                        {item.subject} ({item.group_id})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="field">
-                  <label>Ação</label>
-                  <div className="provider-actions" style={{ marginTop: 4 }}>
-                    <button className="tiny-button is-soft" type="button" onClick={handleLoadWhatsappGroups} disabled={whatsappGroupsLoading}>
-                      {whatsappGroupsLoading ? "Carregando grupos..." : "Carregar grupos do 360dialog"}
-                    </button>
+                {isCombinedFeedStoryAuto ? (
+                  <div className="field" style={{ gridColumn: "1 / -1" }}>
+                    <label>Stories automaticos</label>
+                    <div className="inline-note is-info">
+                      Com `both / feed_story`, o story ja roda junto no mesmo job automatico. O card separado de stories fica oculto para evitar duplicidade.
+                    </div>
                   </div>
-                </div>
-                <div className="field">
-                  <label>Status</label>
-                  <div className="check-grid">
-                    <span className={`badge ${settingsForm.whatsapp_group_target ? "is-success" : "is-neutral"}`}>
-                      {settingsForm.whatsapp_group_target ? "Grupo selecionado" : "Grupo pendente"}
-                    </span>
+                ) : (
+                  <>
+                    <div className="field">
+                      <label>Auto story</label>
+                      <label className="check-chip">
+                        <input type="checkbox" checked={settingsForm.auto_story_enabled} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_enabled: e.target.checked }))} />
+                        Ativar story automatico
+                      </label>
+                    </div>
+                    <div className="field">
+                      <label>Horarios do story</label>
+                      <input type="text" value={settingsForm.auto_story_times} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_times: e.target.value }))} />
+                    </div>
+                    <div className="field">
+                      <label>Plataforma do story</label>
+                      <select value={settingsForm.auto_story_platform} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_platform: e.target.value }))}>
+                        <option value="instagram">Instagram</option>
+                      </select>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="field-grid" style={{ marginTop: 12 }}>
+                {!isCombinedFeedStoryAuto ? (
+                  <div className="field">
+                    <label>Limite do story</label>
+                    <input type="number" min="1" max="10" value={settingsForm.auto_story_limit} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_limit: Number(e.target.value || 1) }))} />
                   </div>
-                </div>
-              </div>
-
-              <div className="field-grid" style={{ marginTop: 12 }}>
-                <div className="field">
-                  <label>Auto story</label>
-                  <label className="check-chip">
-                    <input type="checkbox" checked={settingsForm.auto_story_enabled} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_enabled: e.target.checked }))} />
-                    Ativar story automatico
-                  </label>
-                </div>
-                <div className="field">
-                  <label>Horarios do story</label>
-                  <input type="text" value={settingsForm.auto_story_times} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_times: e.target.value }))} />
-                </div>
-                <div className="field">
-                  <label>Plataforma do story</label>
-                  <select value={settingsForm.auto_story_platform} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_platform: e.target.value }))}>
-                    <option value="instagram">Instagram</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="field-grid" style={{ marginTop: 12 }}>
-                <div className="field">
-                  <label>Limite do story</label>
-                  <input type="number" min="1" max="10" value={settingsForm.auto_story_limit} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_limit: Number(e.target.value || 1) }))} />
-                </div>
+                ) : null}
                 <div className="field">
                   <label>SFTP host</label>
                   <input type="text" value={settingsForm.sftp_host} onChange={(e) => setSettingsForm((state) => ({ ...state, sftp_host: e.target.value }))} />
@@ -2335,7 +2439,9 @@ function App() {
                         </div>
                         <div className="offer-meta" style={{ marginTop: 12 }}>
                           {item.image ? <a className="tiny-button is-soft" href={item.image} target="_blank" rel="noreferrer">Abrir imagem</a> : null}
+                          {item.video_url ? <a className="tiny-button is-soft" href={item.video_url} target="_blank" rel="noreferrer">Abrir video</a> : null}
                           {item.url ? <span className="meta-chip">link ok</span> : null}
+                          {item.video_url ? <span className="meta-chip">video existente</span> : null}
                           {item.provider === "mercadolivre" ? (
                             <span className="meta-chip">{item.affiliate_detected ? "link afiliado oficial" : "link ML sem afiliado oficial"}</span>
                           ) : null}
@@ -2473,7 +2579,9 @@ function App() {
                         </div>
                         <div className="offer-meta" style={{ marginTop: 12 }}>
                           {item.image ? <a className="tiny-button is-soft" href={item.image} target="_blank" rel="noreferrer">Abrir imagem</a> : null}
+                          {item.video_url ? <a className="tiny-button is-soft" href={item.video_url} target="_blank" rel="noreferrer">Abrir video</a> : null}
                           {item.canonical_url ? <a className="tiny-button is-soft" href={item.canonical_url} target="_blank" rel="noreferrer">Abrir produto</a> : null}
+                          {item.video_url ? <span className="meta-chip">video existente</span> : null}
                           {item.provider === "mercadolivre" ? (
                             <span className="meta-chip">{item.affiliate_detected ? "link afiliado oficial" : "link ML sem afiliado oficial"}</span>
                           ) : null}
@@ -2568,6 +2676,9 @@ function App() {
                   <button className="button is-secondary" onClick={() => loadSocialPreview(Number(socialForm.limit))} disabled={socialLoading}>
                     {socialLoading ? "Atualizando fila..." : "Atualizar fila"}
                   </button>
+                  <button className="button is-secondary" onClick={() => handleRunJobNow("social")} disabled={jobRunLoading.social}>
+                    {jobRunLoading.social ? "Testando job..." : "Testar job automatico"}
+                  </button>
                   <button className="button is-primary" onClick={handleSocialRun} disabled={runLoading.social}>
                     {runLoading.social ? ((isWhatsappGroupSelected || isWhatsappWebSelected) ? "Preparando..." : "Publicando...") : ((isWhatsappGroupSelected || isWhatsappWebSelected) ? "Preparar lote" : "Publicar selecionados")}
                   </button>
@@ -2633,6 +2744,34 @@ function App() {
                 <span className="meta-chip">{fmtInt(socialCandidates.length)} carregada(s)</span>
                 {socialPreview?.database?.ok === false ? <span className="meta-chip">Banco indisponivel</span> : null}
               </div>
+
+              {socialPinnedQueue.length ? (
+                <div className="surface social-pinned-panel" style={{ marginTop: 18 }}>
+                  <div className="panel-head social-pinned-head">
+                    <div>
+                      <h4 className="panel-title" style={{ fontSize: "1.05rem" }}>Selecionados para envio</h4>
+                      <p className="panel-subtitle">Esses itens continuam salvos mesmo mudando a busca, loja ou categoria.</p>
+                    </div>
+                    <button className="tiny-button is-soft" type="button" onClick={clearSocialSelection}>
+                      Limpar selecao
+                    </button>
+                  </div>
+                  <div className="social-pinned-list">
+                    {socialPinnedQueue.map((item) => (
+                      <div className="social-pinned-chip" key={`selected-${item.offer_id}`}>
+                        {item.image_url ? <img src={item.image_url} alt={item.title} className="social-pinned-thumb" loading="lazy" /> : null}
+                        <div className="social-pinned-copy">
+                          <strong>{truncateText(item.title, 80)}</strong>
+                          <span>{item.store || "Loja"}{item.category ? ` | ${item.category}` : ""}</span>
+                        </div>
+                        <button className="tiny-button is-soft" type="button" onClick={() => toggleSocialSelection(item)}>
+                          Remover
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
 
               {(isWhatsappGroupSelected || isWhatsappWebSelected) ? (
                 <div className="surface" style={{ marginTop: 18, padding: 0, overflow: "hidden" }}>
@@ -2738,7 +2877,7 @@ function App() {
                           <input
                             type="checkbox"
                             checked={socialCheckedIds.includes(item.offer_id)}
-                            onChange={() => toggleSocialSelection(item.offer_id)}
+                            onChange={() => toggleSocialSelection(item)}
                           />
                           <span>Selecionar</span>
                         </label>

@@ -43,20 +43,26 @@ from app.services.sftp_deploy import (
     deploy_public_site_via_sftp,
     deploy_stories_via_sftp,
     ensure_stories_dir,
+    prune_local_generated_story_assets,
+    prune_remote_generated_story_assets,
     sftp_settings_snapshot,
 )
 from app.services.social_meta import (
     build_meta_post_previews,
     create_instagram_media_container,
+    create_instagram_reel_container,
     create_instagram_story_container,
+    download_source_video_asset,
     generate_reel_asset,
     generate_story_asset,
+    get_instagram_content_publishing_limit,
     publish_facebook_offer_batch,
     publish_facebook_photo,
     publish_facebook_post,
     publish_facebook_reel,
     publish_facebook_story_photo,
     publish_instagram_container,
+    wait_for_instagram_container_ready,
 )
 from app.services.whatsapp_social import (
     list_whatsapp_groups,
@@ -70,6 +76,46 @@ app = FastAPI(title="Automacao de Ofertas")
 UI_DIR = Path(__file__).resolve().parents[1] / "dashboard_ui"
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 scheduler: AutomationScheduler | None = None
+
+AUTO_SOCIAL_SUPPORTED_MODES: dict[str, tuple[str, ...]] = {
+    "facebook": ("feed", "reel"),
+    "instagram": ("feed", "reel"),
+    "both": ("feed", "reel", "feed_story"),
+    "facebook_instagram": ("feed", "reel", "feed_story"),
+    "whatsapp": ("group",),
+}
+
+
+def _normalize_auto_social_action(platform: str | None, mode: str | None) -> tuple[str, str]:
+    normalized_platform = (platform or "facebook").strip().lower() or "facebook"
+    if normalized_platform not in AUTO_SOCIAL_SUPPORTED_MODES:
+        normalized_platform = "facebook"
+    allowed_modes = AUTO_SOCIAL_SUPPORTED_MODES[normalized_platform]
+    normalized_mode = (mode or allowed_modes[0]).strip().lower() or allowed_modes[0]
+    if normalized_platform in {"both", "facebook_instagram"} and normalized_mode == "feed":
+        normalized_mode = "feed_story"
+    if normalized_mode not in allowed_modes:
+        normalized_mode = allowed_modes[0]
+    if normalized_platform == "facebook_instagram":
+        normalized_platform = "both"
+    return normalized_platform, normalized_mode
+
+
+def _cleanup_generated_publish_assets() -> dict[str, Any]:
+    local_result = prune_local_generated_story_assets()
+    remote_result: dict[str, Any] | None = None
+    if sftp_settings_snapshot().get("enabled"):
+        try:
+            remote_result = prune_remote_generated_story_assets()
+        except Exception as exc:  # noqa: BLE001
+            remote_result = {"ok": False, "error": str(exc), "count": 0, "items": []}
+    return {
+        "ok": True,
+        "retention_days": int(local_result.get("retention_days") or 0),
+        "deleted_count": int(local_result.get("count") or 0) + int((remote_result or {}).get("count") or 0),
+        "local": local_result,
+        "remote": remote_result,
+    }
 
 
 def _database_error_message(exc: Exception) -> str:
@@ -229,6 +275,7 @@ class DashboardSettingsPayload(BaseModel):
     auto_social_platform: str | None = None
     auto_social_mode: str | None = None
     auto_social_limit: int | None = None
+    auto_social_repeat_block_minutes: int | None = None
     auto_story_enabled: bool | None = None
     auto_story_times: str | None = None
     auto_story_platform: str | None = None
@@ -290,6 +337,207 @@ def _bool_env(name: str, default: bool = False) -> bool:
 
 def _site_base_url() -> str:
     return (os.getenv("SITE_BASE_URL") or "https://zeropreco.com.br").rstrip("/")
+
+
+def _recent_site_social_offer_ids(db, limit: int = 20) -> list[int]:
+    rows = db.execute(
+        text(
+            """
+            SELECT result_json
+            FROM automacao_execucoes
+            WHERE tipo = 'social'
+              AND status <> 'running'
+              AND canal <> 'whatsapp'
+              AND result_json IS NOT NULL
+            ORDER BY criado_em DESC, id DESC
+            LIMIT 80
+            """
+        )
+    ).mappings().all()
+
+    offer_ids: list[int] = []
+    seen: set[int] = set()
+    for row in rows:
+        payload = row.get("result_json")
+        if isinstance(payload, str):
+            try:
+                import json
+
+                payload = json.loads(payload)
+            except Exception:
+                payload = None
+        if not isinstance(payload, dict):
+            continue
+        items = payload.get("items") or []
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            offer_id = int((item or {}).get("offer_id") or 0)
+            if offer_id <= 0 or offer_id in seen:
+                continue
+            seen.add(offer_id)
+            offer_ids.append(offer_id)
+            if len(offer_ids) >= limit:
+                return offer_ids
+    return offer_ids
+
+
+def _recent_social_offer_ids_within_minutes(db, minutes: int = 360) -> set[int]:
+    minutes = max(1, int(minutes))
+    rows = db.execute(
+        text(
+            """
+            SELECT result_json
+            FROM automacao_execucoes
+            WHERE tipo = 'social'
+              AND status <> 'running'
+              AND canal <> 'whatsapp'
+              AND result_json IS NOT NULL
+              AND criado_em >= (NOW() - INTERVAL :minutes MINUTE)
+            ORDER BY criado_em DESC, id DESC
+            LIMIT 80
+            """
+        ),
+        {"minutes": minutes},
+    ).mappings().all()
+
+    blocked_ids: set[int] = set()
+    for row in rows:
+        payload = row.get("result_json")
+        if isinstance(payload, str):
+            try:
+                import json
+
+                payload = json.loads(payload)
+            except Exception:
+                payload = None
+        if not isinstance(payload, dict):
+            continue
+        items = payload.get("items") or []
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            offer_id = int((item or {}).get("offer_id") or 0)
+            if offer_id > 0:
+                blocked_ids.add(offer_id)
+    return blocked_ids
+
+
+def _auto_social_candidate_score(item: dict[str, Any]) -> float:
+    clicks = float(item.get("clicks") or 0)
+    price = float(item.get("price") or 0)
+    old_price = float(item.get("old_price") or 0)
+    discount = 0.0
+    if old_price > price > 0:
+        discount = ((old_price - price) / old_price) * 100.0
+    coupon_bonus = 5.0 if str(item.get("coupon") or "").strip() else 0.0
+    return (clicks * 12.0) + (discount * 4.0) + coupon_bonus + min(price / 100.0, 15.0)
+
+
+def _pick_auto_social_offer_ids(db, platform: str, mode: str, limit: int = 1) -> list[int]:
+    candidate_limit = max(24, min(160, max(1, limit) * 40))
+    recent_id_list = _recent_site_social_offer_ids(db, 20)
+    recent_ids = set(recent_id_list)
+    recent_block_minutes = _auto_social_repeat_block_minutes()
+    blocked_recent_ids = _recent_social_offer_ids_within_minutes(db, recent_block_minutes)
+    previews = build_meta_post_previews(
+        db,
+        limit=candidate_limit,
+        include_story_assets=False,
+        include_square_card_assets=False,
+    )
+    candidates = [
+        item
+        for item in previews
+        if int(item.get("offer_id") or 0) not in recent_ids
+        and int(item.get("offer_id") or 0) not in blocked_recent_ids
+    ]
+    if not candidates:
+        candidates = [item for item in previews if int(item.get("offer_id") or 0) not in blocked_recent_ids]
+    if not candidates:
+        candidates = [item for item in previews if int(item.get("offer_id") or 0) not in recent_ids]
+    if not candidates:
+        candidates = previews
+    if not candidates:
+        return []
+
+    recent_store_counts: dict[str, int] = {}
+    if recent_ids:
+        placeholders = ",".join(str(int(offer_id)) for offer_id in sorted(recent_ids))
+        store_rows = db.execute(
+            text(
+                f"""
+                SELECT id, loja
+                FROM ofertas
+                WHERE id IN ({placeholders})
+                """
+            )
+        ).mappings().all()
+        for row in store_rows:
+            store_key = (str(row.get("loja") or "") or "loja").strip().lower()
+            recent_store_counts[store_key] = recent_store_counts.get(store_key, 0) + 1
+        recent_store_map = {int(row["id"]): (str(row.get("loja") or "") or "loja").strip().lower() for row in store_rows}
+        last_store_key = recent_store_map.get(int(recent_id_list[0])) if recent_id_list else None
+    else:
+        last_store_key = None
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in candidates:
+        store_key = (str(item.get("store") or "") or "loja").strip().lower()
+        grouped.setdefault(store_key, []).append(item)
+
+    for store_key, bucket in grouped.items():
+        bucket.sort(
+            key=lambda item: (
+                -_auto_social_candidate_score(item),
+                -float(item.get("clicks") or 0),
+                str(item.get("title") or ""),
+            )
+        )
+
+    ordered_store_keys = sorted(
+        grouped.keys(),
+        key=lambda key: (
+            1 if last_store_key and key == last_store_key else 0,
+            recent_store_counts.get(key, 0),
+            -_auto_social_candidate_score(grouped[key][0]),
+            key,
+        ),
+    )
+
+    picked: list[int] = []
+    used_offer_ids: set[int] = set()
+    while len(picked) < limit:
+        progressed = False
+        for store_key in ordered_store_keys:
+            bucket = grouped.get(store_key) or []
+            while bucket and int(bucket[0].get("offer_id") or 0) in used_offer_ids:
+                bucket.pop(0)
+            if not bucket:
+                continue
+            offer_id = int(bucket.pop(0).get("offer_id") or 0)
+            if offer_id <= 0 or offer_id in used_offer_ids:
+                continue
+            picked.append(offer_id)
+            used_offer_ids.add(offer_id)
+            progressed = True
+            if len(picked) >= limit:
+                break
+        if not progressed:
+            break
+
+    return picked
+
+
+def _auto_social_repeat_block_minutes() -> int:
+    return max(60, int((os.getenv("AUTO_SOCIAL_REPEAT_BLOCK_MINUTES") or "1440").strip() or "1440"))
+
+
+def _exclude_recent_social_offer_ids(db, offer_ids: list[int]) -> list[int]:
+    if not offer_ids:
+        return []
+    blocked_recent_ids = _recent_social_offer_ids_within_minutes(db, _auto_social_repeat_block_minutes())
+    return [offer_id for offer_id in offer_ids if int(offer_id) not in blocked_recent_ids]
 
 
 def _parse_decimal(value: Any, default: float = 0.0) -> float:
@@ -420,6 +668,10 @@ def _manager_login_html(error: str | None = None) -> str:
 
 
 def _env_settings_snapshot() -> dict:
+    auto_social_platform, auto_social_mode = _normalize_auto_social_action(
+        os.getenv("AUTO_SOCIAL_PLATFORM") or "facebook",
+        os.getenv("AUTO_SOCIAL_MODE") or "feed",
+    )
     return {
         "manager_username": _manager_credentials()[0],
         "meta_access_token_configured": bool((os.getenv("META_ACCESS_TOKEN") or "").strip()),
@@ -428,9 +680,10 @@ def _env_settings_snapshot() -> dict:
         "auto_import_providers": [item.strip() for item in (os.getenv("AUTO_IMPORT_PROVIDERS") or "mercadolivre").split(",") if item.strip()],
         "auto_social_enabled": _bool_env("AUTO_SOCIAL_ENABLED", False),
         "auto_social_times": os.getenv("AUTO_SOCIAL_TIMES") or "",
-        "auto_social_platform": (os.getenv("AUTO_SOCIAL_PLATFORM") or "facebook").strip().lower(),
-        "auto_social_mode": (os.getenv("AUTO_SOCIAL_MODE") or "feed").strip().lower(),
-        "auto_social_limit": max(1, int((os.getenv("AUTO_SOCIAL_LIMIT") or "3").strip() or "3")),
+        "auto_social_platform": auto_social_platform,
+        "auto_social_mode": auto_social_mode,
+        "auto_social_limit": max(1, int((os.getenv("AUTO_SOCIAL_LIMIT") or "1").strip() or "1")),
+        "auto_social_repeat_block_minutes": max(60, int((os.getenv("AUTO_SOCIAL_REPEAT_BLOCK_MINUTES") or "1440").strip() or "1440")),
         "auto_story_enabled": _bool_env("AUTO_STORY_ENABLED", False),
         "auto_story_times": os.getenv("AUTO_STORY_TIMES") or "",
         "auto_story_platform": (os.getenv("AUTO_STORY_PLATFORM") or "instagram").strip().lower(),
@@ -502,6 +755,37 @@ def _raise_meta_http_error(exc: httpx.HTTPStatusError) -> HTTPException:
             "e atualize o .env antes de rodar a publicacao social."
         )
     return HTTPException(status_code=status_code, detail=detail)
+
+
+def _http_error_detail(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+        detail = (exc.response.text or "").strip()
+        if detail:
+            return detail
+    return str(exc)
+
+
+def _instagram_publish_capacity(required_posts: int = 1) -> dict[str, int]:
+    limit_payload = get_instagram_content_publishing_limit()
+    result = limit_payload.get("result") or {}
+    quota_total = int(result.get("quota_total") or 0)
+    quota_usage = int(result.get("quota_usage") or 0)
+    quota_remaining = int(result.get("quota_remaining") or max(0, quota_total - quota_usage))
+    return {
+        "quota_total": quota_total,
+        "quota_usage": quota_usage,
+        "quota_remaining": quota_remaining,
+        "required_posts": max(1, int(required_posts)),
+    }
+
+
+def _instagram_capacity_error(required_posts: int = 1) -> str:
+    capacity = _instagram_publish_capacity(required_posts)
+    return (
+        "Limite da API do Instagram atingido ou insuficiente para esta execucao. "
+        f"Restante: {capacity['quota_remaining']} de {capacity['quota_total']} no periodo de 24h. "
+        f"Necessario agora: {capacity['required_posts']}."
+    )
 
 
 def _normalize_provider_key(value: str) -> str:
@@ -596,13 +880,20 @@ def execute_import_run(providers: list[str] | None = None) -> dict:
 
 
 def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_ids: list[int] | None = None) -> dict:
-    platform = (platform or "").strip().lower()
-    mode = (mode or "feed").strip().lower()
+    if (platform or "").strip().lower() in AUTO_SOCIAL_SUPPORTED_MODES:
+        platform, mode = _normalize_auto_social_action(platform, mode)
+    else:
+        platform = (platform or "").strip().lower()
+        mode = (mode or "feed").strip().lower()
     limit = max(1, min(limit, 20))
+    db = SessionLocal()
     selected_offer_ids = [int(item) for item in (offer_ids or []) if str(item).strip()]
+    if selected_offer_ids and platform in {"facebook", "instagram", "both", "facebook_instagram"}:
+        selected_offer_ids = _exclude_recent_social_offer_ids(db, selected_offer_ids)
+    if not selected_offer_ids and platform in {"facebook", "instagram", "both", "facebook_instagram"}:
+        selected_offer_ids = _pick_auto_social_offer_ids(db, platform, mode, limit)
     if selected_offer_ids:
         limit = min(limit, len(selected_offer_ids))
-    db = SessionLocal()
 
     run_id = record_execution_start(
         db,
@@ -616,6 +907,8 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
     try:
         if platform == "facebook" and mode == "feed":
             result = publish_facebook_offer_batch(db, limit=limit, offer_ids=selected_offer_ids or None)
+            if int(result.get("count") or 0) > 0:
+                result["asset_cleanup"] = _cleanup_generated_publish_assets()
             record_execution_success(db, run_id, processed_count=int(result["count"]), result=result)
             return {"run_id": run_id} | result
 
@@ -639,8 +932,57 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
         if not previews:
             raise ValueError("Nao ha ofertas elegiveis para publicar.")
 
+        def prepare_reel_asset(item: dict[str, Any]) -> tuple[dict[str, Any], str, str | None, str | None]:
+            offer = {
+                "id": item["offer_id"],
+                "slug": item["slug"],
+                "titulo": item["title"],
+                "preco": item["price"],
+                "preco_antigo": item.get("old_price"),
+                "loja": item["store"],
+                "categoria": item["category"],
+                "imagem_url": item["image_url"],
+                "url_afiliado": item.get("cta_url"),
+                "cupom": item.get("coupon"),
+            }
+            reel_source = "generated_art"
+            reel_asset_error = None
+            source_video_url = str(item.get("reel_payload", {}).get("source_video_url") or "").strip() or None
+
+            if item.get("store") == "Shopee" and source_video_url:
+                try:
+                    reel_asset = download_source_video_asset(offer, source_video_url)
+                    reel_source = "shopee_source_video"
+                    return reel_asset, reel_source, source_video_url, reel_asset_error
+                except Exception as source_exc:  # noqa: BLE001
+                    reel_asset_error = str(source_exc)
+
+            reel_asset = generate_reel_asset(offer)
+            return reel_asset, reel_source, source_video_url, reel_asset_error
+
         items = []
         errors = []
+        warnings = []
+        instagram_posts_required = 0
+        if platform == "instagram":
+            instagram_posts_required = len(previews) * (2 if mode == "feed_story" else 1)
+        elif platform in {"both", "facebook_instagram"}:
+            if mode == "feed_story":
+                instagram_posts_required = len(previews) * 2
+            elif mode in {"feed", "reel"}:
+                instagram_posts_required = len(previews)
+
+        instagram_capacity_error = ""
+        if instagram_posts_required > 0:
+            try:
+                capacity = _instagram_publish_capacity(instagram_posts_required)
+                if capacity["quota_remaining"] < instagram_posts_required:
+                    instagram_capacity_error = _instagram_capacity_error(instagram_posts_required)
+            except Exception as exc:  # noqa: BLE001
+                instagram_capacity_error = _http_error_detail(exc)
+        instagram_skip_for_combined = bool(instagram_capacity_error and platform in {"both", "facebook_instagram"})
+        if instagram_skip_for_combined:
+            warnings.append({"platform": "instagram", "warning": instagram_capacity_error})
         if platform in {"both", "facebook_instagram"} and mode == "feed":
             for item in previews:
                 combined_item = {
@@ -648,7 +990,8 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     "slug": item["slug"],
                     "title": item["title"],
                 }
-                success_for_item = False
+                facebook_ok = False
+                instagram_ok = False
 
                 try:
                     image_filename = (item.get("facebook_payload", {}).get("image_filename") or "").strip()
@@ -659,7 +1002,7 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                         caption=item["facebook_payload"]["message"],
                     )
                     combined_item["facebook_result"] = facebook_result["result"]
-                    success_for_item = True
+                    facebook_ok = True
                 except Exception as exc:  # noqa: BLE001
                     errors.append(
                         {
@@ -671,6 +1014,11 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     )
 
                 try:
+                    if instagram_skip_for_combined:
+                        combined_item["instagram_skipped_reason"] = instagram_capacity_error
+                        raise StopIteration
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
                     feed_filename = (item.get("instagram_payload", {}).get("image_filename") or "").strip()
                     if feed_filename:
                         deploy_stories_via_sftp(only_files=[feed_filename])
@@ -681,18 +1029,20 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     published = publish_instagram_container(created["result"]["id"])
                     combined_item["instagram_creation_id"] = created["result"]["id"]
                     combined_item["instagram_result"] = published["result"]
-                    success_for_item = True
+                    instagram_ok = True
+                except StopIteration:
+                    pass
                 except Exception as exc:  # noqa: BLE001
                     errors.append(
                         {
                             "offer_id": item["offer_id"],
                             "title": item["title"],
                             "platform": "instagram",
-                            "error": str(exc),
+                            "error": _http_error_detail(exc),
                         }
                     )
 
-                if success_for_item:
+                if facebook_ok or instagram_ok:
                     items.append(combined_item)
         elif platform in {"both", "facebook_instagram"} and mode == "feed_story":
             for item in previews:
@@ -701,7 +1051,10 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     "slug": item["slug"],
                     "title": item["title"],
                 }
-                success_for_item = False
+                facebook_ok = False
+                facebook_story_ok = False
+                instagram_feed_ok = False
+                instagram_story_ok = False
 
                 try:
                     image_filename = (item.get("facebook_payload", {}).get("image_filename") or "").strip()
@@ -712,7 +1065,7 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                         caption=item["facebook_payload"]["message"],
                     )
                     combined_item["facebook_result"] = facebook_result["result"]
-                    success_for_item = True
+                    facebook_ok = True
                 except Exception as exc:  # noqa: BLE001
                     errors.append(
                         {
@@ -724,6 +1077,11 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     )
 
                 try:
+                    if instagram_skip_for_combined:
+                        combined_item["instagram_feed_skipped_reason"] = instagram_capacity_error
+                        raise StopIteration
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
                     feed_filename = (item.get("instagram_payload", {}).get("image_filename") or "").strip()
                     if feed_filename:
                         deploy_stories_via_sftp(only_files=[feed_filename])
@@ -734,14 +1092,16 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     published_feed = publish_instagram_container(created_feed["result"]["id"])
                     combined_item["feed_creation_id"] = created_feed["result"]["id"]
                     combined_item["feed_result"] = published_feed["result"]
-                    success_for_item = True
+                    instagram_feed_ok = True
+                except StopIteration:
+                    pass
                 except Exception as exc:  # noqa: BLE001
                     errors.append(
                         {
                             "offer_id": item["offer_id"],
                             "title": item["title"],
                             "platform": "instagram_feed",
-                            "error": str(exc),
+                            "error": _http_error_detail(exc),
                         }
                     )
 
@@ -749,41 +1109,37 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     story_filename = item["story_payload"]["image_url"].rstrip("/").split("/")[-1]
                     deploy_result = deploy_stories_via_sftp(only_files=[story_filename])
                     facebook_story = publish_facebook_story_photo(item["story_payload"]["image_url"])
-                    created_story = create_instagram_story_container(item["story_payload"]["image_url"])
-                    published_story = publish_instagram_container(created_story["result"]["id"])
                     combined_item["story_deploy"] = deploy_result
                     combined_item["facebook_story_result"] = facebook_story["result"]
+                    facebook_story_ok = True
+                    if instagram_skip_for_combined:
+                        combined_item["instagram_story_skipped_reason"] = instagram_capacity_error
+                        raise StopIteration
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
+                    created_story = create_instagram_story_container(item["story_payload"]["image_url"])
+                    published_story = publish_instagram_container(created_story["result"]["id"])
                     combined_item["story_creation_id"] = created_story["result"]["id"]
                     combined_item["story_result"] = published_story["result"]
-                    success_for_item = True
+                    instagram_story_ok = True
+                except StopIteration:
+                    pass
                 except Exception as exc:  # noqa: BLE001
                     errors.append(
                         {
                             "offer_id": item["offer_id"],
                             "title": item["title"],
                             "platform": "facebook_instagram_story",
-                            "error": str(exc),
+                            "error": _http_error_detail(exc),
                         }
                     )
 
-                if success_for_item:
+                if facebook_ok or facebook_story_ok or instagram_feed_ok or instagram_story_ok:
                     items.append(combined_item)
         elif platform == "facebook" and mode == "reel":
             for item in previews:
                 try:
-                    offer = {
-                        "id": item["offer_id"],
-                        "slug": item["slug"],
-                        "titulo": item["title"],
-                        "preco": item["price"],
-                        "preco_antigo": item.get("old_price"),
-                        "loja": item["store"],
-                        "categoria": item["category"],
-                        "imagem_url": item["image_url"],
-                        "url_afiliado": item.get("cta_url"),
-                        "cupom": item.get("coupon"),
-                    }
-                    reel_asset = generate_reel_asset(offer)
+                    reel_asset, reel_source, source_video_url, reel_asset_error = prepare_reel_asset(item)
                     published = publish_facebook_reel(
                         video_path=reel_asset["file_path"],
                         description=item["reel_payload"]["caption"],
@@ -794,15 +1150,94 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                             "slug": item["slug"],
                             "title": item["title"],
                             "reel_file": reel_asset["filename"],
+                            "reel_source": reel_source,
+                            "source_video_url": source_video_url or None,
+                            "source_video_error": reel_asset_error,
                             "video_id": published["video_id"],
                             "publish_result": published["result"],
                         }
                     )
                 except Exception as exc:  # noqa: BLE001
                     errors.append({"offer_id": item["offer_id"], "title": item["title"], "error": str(exc)})
+        elif platform in {"both", "facebook_instagram"} and mode == "reel":
+            for item in previews:
+                combined_item = {
+                    "offer_id": item["offer_id"],
+                    "slug": item["slug"],
+                    "title": item["title"],
+                }
+                facebook_ok = False
+                instagram_ok = False
+
+                try:
+                    reel_asset, reel_source, source_video_url, reel_asset_error = prepare_reel_asset(item)
+                    combined_item["reel_file"] = reel_asset["filename"]
+                    combined_item["reel_source"] = reel_source
+                    combined_item["source_video_url"] = source_video_url
+                    combined_item["source_video_error"] = reel_asset_error
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "reel_asset",
+                            "error": str(exc),
+                        }
+                    )
+                    continue
+
+                try:
+                    published = publish_facebook_reel(
+                        video_path=reel_asset["file_path"],
+                        description=item["reel_payload"]["caption"],
+                    )
+                    combined_item["video_id"] = published["video_id"]
+                    combined_item["facebook_result"] = published["result"]
+                    facebook_ok = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "facebook_reel",
+                            "error": str(exc),
+                        }
+                    )
+
+                try:
+                    if instagram_skip_for_combined:
+                        combined_item["instagram_skipped_reason"] = instagram_capacity_error
+                        raise StopIteration
+                    deploy_stories_via_sftp(only_files=[reel_asset["filename"]])
+                    created = create_instagram_reel_container(
+                        video_url=reel_asset["public_url"],
+                        caption=item["reel_payload"]["caption"],
+                    )
+                    status_payload = wait_for_instagram_container_ready(created["result"]["id"])
+                    published = publish_instagram_container(created["result"]["id"])
+                    combined_item["instagram_creation_id"] = created["result"]["id"]
+                    combined_item["instagram_status"] = status_payload["result"]
+                    combined_item["instagram_result"] = published["result"]
+                    instagram_ok = True
+                except StopIteration:
+                    pass
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_reel",
+                            "error": _http_error_detail(exc),
+                        }
+                    )
+
+                if facebook_ok or instagram_ok:
+                    items.append(combined_item)
         elif platform == "instagram" and mode == "feed":
             for item in previews:
                 try:
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
                     feed_filename = (item.get("instagram_payload", {}).get("image_filename") or "").strip()
                     if feed_filename:
                         deploy_stories_via_sftp(only_files=[feed_filename])
@@ -821,10 +1256,48 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                         }
                     )
                 except Exception as exc:  # noqa: BLE001
-                    errors.append({"offer_id": item["offer_id"], "title": item["title"], "error": str(exc)})
+                    errors.append({"offer_id": item["offer_id"], "title": item["title"], "error": _http_error_detail(exc)})
+        elif platform == "instagram" and mode == "reel":
+            for item in previews:
+                try:
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
+                    reel_asset, reel_source, source_video_url, reel_asset_error = prepare_reel_asset(item)
+                    deploy_stories_via_sftp(only_files=[reel_asset["filename"]])
+                    created = create_instagram_reel_container(
+                        video_url=reel_asset["public_url"],
+                        caption=item["reel_payload"]["caption"],
+                    )
+                    status_payload = wait_for_instagram_container_ready(created["result"]["id"])
+                    published = publish_instagram_container(created["result"]["id"])
+                    items.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "slug": item["slug"],
+                            "title": item["title"],
+                            "reel_file": reel_asset["filename"],
+                            "reel_source": reel_source,
+                            "source_video_url": source_video_url,
+                            "source_video_error": reel_asset_error,
+                            "creation_id": created["result"]["id"],
+                            "status_result": status_payload["result"],
+                            "publish_result": published["result"],
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_reel",
+                            "error": _http_error_detail(exc),
+                        }
+                    )
         elif platform == "instagram" and mode == "story":
             for item in previews:
                 try:
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
                     story_filename = item["story_payload"]["image_url"].rstrip("/").split("/")[-1]
                     deploy_result = deploy_stories_via_sftp(only_files=[story_filename])
                     created = create_instagram_story_container(item["story_payload"]["image_url"])
@@ -840,7 +1313,7 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                         }
                     )
                 except Exception as exc:  # noqa: BLE001
-                    errors.append({"offer_id": item["offer_id"], "title": item["title"], "error": str(exc)})
+                    errors.append({"offer_id": item["offer_id"], "title": item["title"], "error": _http_error_detail(exc)})
         elif platform == "instagram" and mode == "feed_story":
             for item in previews:
                 combined_item = {
@@ -851,6 +1324,8 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                 success_for_item = False
 
                 try:
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
                     feed_filename = (item.get("instagram_payload", {}).get("image_filename") or "").strip()
                     if feed_filename:
                         deploy_stories_via_sftp(only_files=[feed_filename])
@@ -868,11 +1343,13 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                             "offer_id": item["offer_id"],
                             "title": item["title"],
                             "platform": "instagram_feed",
-                            "error": str(exc),
+                            "error": _http_error_detail(exc),
                         }
                     )
 
                 try:
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
                     story_filename = item["story_payload"]["image_url"].rstrip("/").split("/")[-1]
                     deploy_result = deploy_stories_via_sftp(only_files=[story_filename])
                     created_story = create_instagram_story_container(item["story_payload"]["image_url"])
@@ -887,7 +1364,7 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                             "offer_id": item["offer_id"],
                             "title": item["title"],
                             "platform": "instagram_story",
-                            "error": str(exc),
+                            "error": _http_error_detail(exc),
                         }
                     )
 
@@ -917,8 +1394,12 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
             "facebook_reel_count": len([item for item in items if item.get("video_id")]),
             "items": items,
             "errors": errors,
+            "warnings": warnings,
             "error_summary": (errors[0].get("error") if errors else ""),
+            "warning_summary": (warnings[0].get("warning") if warnings else ""),
         }
+        if items:
+            result["asset_cleanup"] = _cleanup_generated_publish_assets()
         if items:
             record_execution_success(db, run_id, processed_count=len(items), result=result)
         else:
@@ -1384,6 +1865,32 @@ def dashboard_api_offer_update(offer_id: int, payload: DashboardOfferUpdatePaylo
         db.close()
 
 
+@app.delete("/dashboard/api/offers/{offer_id}")
+def dashboard_api_offer_delete(offer_id: int, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            text("SELECT id, slug, titulo FROM ofertas WHERE id = :id LIMIT 1"),
+            {"id": offer_id},
+        ).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Oferta nao encontrada.")
+
+        db.execute(text("DELETE FROM cliques WHERE oferta_id = :id"), {"id": offer_id})
+        db.execute(text("DELETE FROM ofertas WHERE id = :id"), {"id": offer_id})
+        db.commit()
+        return {
+            "ok": True,
+            "deleted": {
+                "id": int(row["id"]),
+                "slug": str(row["slug"] or ""),
+                "titulo": str(row["titulo"] or ""),
+            },
+        }
+    finally:
+        db.close()
+
+
 @app.post("/dashboard/api/import/manual-page/preview")
 def dashboard_api_manual_page_preview(payload: DashboardManualPagePayload, _: str = Depends(require_manager_auth)):
     try:
@@ -1547,7 +2054,7 @@ def dashboard_api_manual_links_run(payload: DashboardManualLinksPayload, _: str 
                 "description": item.description or "",
                 "price": float(item.price or 0),
                 "old_price": float(item.old_price) if item.old_price not in (None, "") else None,
-                "url": item.canonical_url or item.url,
+                "url": item.url or item.canonical_url,
                 "image": item.image or "",
                 "category": item.category or "ofertas",
                 "coupon": item.coupon or None,
@@ -1614,8 +2121,10 @@ def dashboard_api_automation_import_run_now(payload: DashboardJobRunPayload, _: 
 @app.post("/dashboard/api/automation/social/run-now")
 def dashboard_api_automation_social_run_now(payload: DashboardJobRunPayload, _: str = Depends(require_manager_auth)):
     settings = _env_settings_snapshot()
-    platform = payload.platform or settings.get("auto_social_platform") or "facebook"
-    mode = "feed"
+    platform, mode = _normalize_auto_social_action(
+        payload.platform or settings.get("auto_social_platform") or "facebook",
+        payload.mode or settings.get("auto_social_mode") or "feed",
+    )
     limit = int(payload.limit or settings.get("auto_social_limit") or 1)
     result = execute_social_run(platform, mode, limit)
     if scheduler is not None:
@@ -1660,12 +2169,18 @@ def dashboard_api_settings_save(payload: DashboardSettingsPayload, _: str = Depe
         updates["AUTO_SOCIAL_ENABLED"] = "true" if payload.auto_social_enabled else "false"
     if payload.auto_social_times is not None:
         updates["AUTO_SOCIAL_TIMES"] = payload.auto_social_times.strip()
-    if payload.auto_social_platform is not None:
-        updates["AUTO_SOCIAL_PLATFORM"] = payload.auto_social_platform.strip().lower() or "facebook"
-    if payload.auto_social_mode is not None:
-        updates["AUTO_SOCIAL_MODE"] = payload.auto_social_mode.strip().lower() or "feed"
+    if payload.auto_social_platform is not None or payload.auto_social_mode is not None:
+        current_settings = _env_settings_snapshot()
+        social_platform, social_mode = _normalize_auto_social_action(
+            payload.auto_social_platform if payload.auto_social_platform is not None else current_settings.get("auto_social_platform"),
+            payload.auto_social_mode if payload.auto_social_mode is not None else current_settings.get("auto_social_mode"),
+        )
+        updates["AUTO_SOCIAL_PLATFORM"] = social_platform
+        updates["AUTO_SOCIAL_MODE"] = social_mode
     if payload.auto_social_limit is not None:
         updates["AUTO_SOCIAL_LIMIT"] = str(max(1, min(int(payload.auto_social_limit), 20)))
+    if payload.auto_social_repeat_block_minutes is not None:
+        updates["AUTO_SOCIAL_REPEAT_BLOCK_MINUTES"] = str(max(60, int(payload.auto_social_repeat_block_minutes)))
     if payload.whatsapp_api_base_url is not None:
         updates["WHATSAPP_API_BASE_URL"] = payload.whatsapp_api_base_url.strip()
     if payload.whatsapp_api_token is not None and payload.whatsapp_api_token.strip() != "":
@@ -1749,11 +2264,19 @@ def dashboard_api_whatsapp_groups(limit: int = 100, _: str = Depends(require_man
 
 
 @app.get("/social/meta/post-previews")
-def social_meta_post_previews(limit: int = 12, q: str = ""):
+def social_meta_post_previews(limit: int = 12, q: str = "", store: str = ""):
     db = SessionLocal()
     try:
         try:
-            items = build_meta_post_previews(db, limit=limit, include_story_assets=False, search_query=q)
+            items = build_meta_post_previews(
+                db,
+                limit=limit,
+                include_story_assets=False,
+                search_query=q,
+                store_filter=store,
+            )
+            blocked_recent_ids = _recent_social_offer_ids_within_minutes(db, _auto_social_repeat_block_minutes())
+            items = [item for item in items if int(item.get("offer_id") or 0) not in blocked_recent_ids]
             return {"count": len(items), "items": items}
         except OperationalError as exc:
             return {
@@ -1781,7 +2304,10 @@ def social_meta_facebook_publish(payload: MetaFacebookPostPayload):
 def social_meta_facebook_publish_batch(payload: MetaFacebookBatchPayload):
     db = SessionLocal()
     try:
-        return publish_facebook_offer_batch(db, limit=payload.limit, offer_ids=payload.offer_ids)
+        result = publish_facebook_offer_batch(db, limit=payload.limit, offer_ids=payload.offer_ids)
+        if int(result.get("count") or 0) > 0:
+            result["asset_cleanup"] = _cleanup_generated_publish_assets()
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except httpx.HTTPStatusError as e:

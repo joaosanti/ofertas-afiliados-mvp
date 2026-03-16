@@ -146,6 +146,10 @@ def preview_shopee_csv_file(content: bytes, filename: str = "") -> list[dict[str
                 ],
             )
         )
+        for candidate in str(enriched.get("tags") or "").split(","):
+            cleaned_candidate = candidate.strip()
+            if cleaned_candidate.startswith("shopee_video_url:") and cleaned_candidate not in tags:
+                tags = ",".join(filter(None, [tags, cleaned_candidate]))
 
         items.append(
             {
@@ -162,6 +166,7 @@ def preview_shopee_csv_file(content: bytes, filename: str = "") -> list[dict[str
                 "tags": tags,
                 "featured": 0,
                 "coupon": coupon or None,
+                "video_url": _normalize_text(enriched.get("video_url")),
                 "affiliate_detected": bool(offer_link),
                 "affiliate_code": affiliate_code or None,
                 "selected": True,

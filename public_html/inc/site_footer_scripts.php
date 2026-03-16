@@ -157,4 +157,91 @@
       });
     });
   }());
+
+  (function () {
+    var triggers = document.querySelectorAll('[data-load-more]');
+    if (!triggers.length) return;
+
+    function getRowStep(root) {
+      if (!root) return 1;
+      var template = window.getComputedStyle(root).getPropertyValue('grid-template-columns');
+      if (!template) return 1;
+      var columns = template.split(' ').filter(function (value) {
+        return value && value !== '/';
+      }).length;
+      return Math.max(1, columns || 1);
+    }
+
+    function getStepValue(trigger, root, attributeName, fallbackAttribute) {
+      var rawValue = trigger.getAttribute(attributeName);
+      if (!rawValue && fallbackAttribute) {
+        rawValue = trigger.getAttribute(fallbackAttribute);
+      }
+      if (rawValue === 'row') {
+        return getRowStep(root);
+      }
+      if (rawValue === '2row') {
+        return getRowStep(root) * 2;
+      }
+      var numeric = Number(rawValue || 0);
+      if (numeric > 0) {
+        return numeric;
+      }
+      return getRowStep(root);
+    }
+
+    function syncVisibility(trigger) {
+      var selector = trigger.getAttribute('data-load-more');
+      var root = selector ? document.querySelector(selector) : null;
+      if (!root) return;
+
+      var items = Array.prototype.slice.call(root.querySelectorAll('[data-load-more-item]'));
+      if (!items.length) {
+        trigger.setAttribute('hidden', 'hidden');
+        return;
+      }
+
+      var initial = getStepValue(trigger, root, 'data-load-more-initial', 'data-load-more-step');
+      items.forEach(function (item, index) {
+        if (index < initial) {
+          item.removeAttribute('hidden');
+          item.classList.remove('is-hidden');
+          return;
+        }
+        item.setAttribute('hidden', 'hidden');
+        item.classList.add('is-hidden');
+      });
+
+      if (items.length <= initial) {
+        trigger.setAttribute('hidden', 'hidden');
+      } else {
+        trigger.removeAttribute('hidden');
+      }
+    }
+
+    triggers.forEach(function (trigger) {
+      syncVisibility(trigger);
+
+      trigger.addEventListener('click', function () {
+        var selector = trigger.getAttribute('data-load-more');
+        var root = selector ? document.querySelector(selector) : null;
+        if (!root) return;
+
+        var step = getStepValue(trigger, root, 'data-load-more-step');
+        var items = Array.prototype.slice.call(root.querySelectorAll('[data-load-more-item]'));
+        var hiddenItems = items.filter(function (item) {
+          return item.hasAttribute('hidden');
+        });
+
+        hiddenItems.slice(0, step).forEach(function (item) {
+          item.removeAttribute('hidden');
+          item.classList.remove('is-hidden');
+        });
+
+        if (!items.some(function (item) { return item.hasAttribute('hidden'); })) {
+          trigger.setAttribute('hidden', 'hidden');
+        }
+      });
+    });
+  }());
 </script>

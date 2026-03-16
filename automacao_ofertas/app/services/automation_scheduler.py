@@ -3,6 +3,14 @@ import threading
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
+AUTO_SOCIAL_SUPPORTED_MODES: dict[str, tuple[str, ...]] = {
+    "facebook": ("feed", "reel"),
+    "instagram": ("feed", "reel"),
+    "both": ("feed", "reel", "feed_story"),
+    "facebook_instagram": ("feed", "reel", "feed_story"),
+    "whatsapp": ("group",),
+}
+
 
 def _bool_env(name: str, default: bool = False) -> bool:
     value = (os.getenv(name) or "").strip().lower()
@@ -55,6 +63,21 @@ def _next_time_from_schedule(times: list[str], now: datetime) -> datetime | None
     return datetime(tomorrow.year, tomorrow.month, tomorrow.day, int(first_hour), int(first_minute))
 
 
+def _normalize_auto_social_action(platform: str | None, mode: str | None) -> tuple[str, str]:
+    normalized_platform = (platform or "facebook").strip().lower() or "facebook"
+    if normalized_platform not in AUTO_SOCIAL_SUPPORTED_MODES:
+        normalized_platform = "facebook"
+    allowed_modes = AUTO_SOCIAL_SUPPORTED_MODES[normalized_platform]
+    normalized_mode = (mode or allowed_modes[0]).strip().lower() or allowed_modes[0]
+    if normalized_platform in {"both", "facebook_instagram"} and normalized_mode == "feed":
+        normalized_mode = "feed_story"
+    if normalized_mode not in allowed_modes:
+        normalized_mode = allowed_modes[0]
+    if normalized_platform == "facebook_instagram":
+        normalized_platform = "both"
+    return normalized_platform, normalized_mode
+
+
 class AutomationScheduler:
     def __init__(
         self,
@@ -74,13 +97,24 @@ class AutomationScheduler:
         return [item.strip() for item in raw.split(",") if item.strip()]
 
     def social_platform(self) -> str:
-        return (os.getenv("AUTO_SOCIAL_PLATFORM") or "facebook").strip().lower()
+        platform, _ = _normalize_auto_social_action(
+            os.getenv("AUTO_SOCIAL_PLATFORM") or "facebook",
+            os.getenv("AUTO_SOCIAL_MODE") or "feed",
+        )
+        return platform
 
     def social_mode(self) -> str:
-        return (os.getenv("AUTO_SOCIAL_MODE") or "feed").strip().lower()
+        _, mode = _normalize_auto_social_action(
+            os.getenv("AUTO_SOCIAL_PLATFORM") or "facebook",
+            os.getenv("AUTO_SOCIAL_MODE") or "feed",
+        )
+        return mode
 
     def social_limit(self) -> int:
-        return _int_env("AUTO_SOCIAL_LIMIT", 3)
+        configured = _int_env("AUTO_SOCIAL_LIMIT", 1)
+        if self.social_platform() in {"both", "facebook_instagram"} and self.social_mode() == "feed_story":
+            return 1
+        return configured
 
     def story_platform(self) -> str:
         return (os.getenv("AUTO_STORY_PLATFORM") or "instagram").strip().lower()
@@ -118,7 +152,7 @@ class AutomationScheduler:
         if job_key == "social":
             enabled = _bool_env("AUTO_SOCIAL_ENABLED", False)
             times = self.social_times()
-            interval = _int_env("AUTO_SOCIAL_INTERVAL_MINUTES", 240)
+            interval = _int_env("AUTO_SOCIAL_INTERVAL_MINUTES", 120)
             return {
                 "enabled": enabled,
                 "interval_minutes": interval,
@@ -239,13 +273,13 @@ class AutomationScheduler:
                 if _bool_env("AUTO_SOCIAL_ENABLED", False):
                     if self.social_times():
                         if self._should_run_by_time("social", now):
-                            result = self._social_runner(self.social_platform(), "feed", self.social_limit())
+                            result = self._social_runner(self.social_platform(), self.social_mode(), self.social_limit())
                             self._record_result("social", status="success", result=result)
                     else:
                         last_run = self.snapshot()["jobs"]["social"]["last_run_at"]
-                        interval = _int_env("AUTO_SOCIAL_INTERVAL_MINUTES", 240)
+                        interval = _int_env("AUTO_SOCIAL_INTERVAL_MINUTES", 120)
                         if not last_run or datetime.fromisoformat(last_run.replace("Z", "")) <= now - timedelta(minutes=interval):
-                            result = self._social_runner(self.social_platform(), "feed", self.social_limit())
+                            result = self._social_runner(self.social_platform(), self.social_mode(), self.social_limit())
                             self._record_result("social", status="success", result=result)
 
                 if _bool_env("AUTO_STORY_ENABLED", False):

@@ -158,7 +158,7 @@ Exemplo (a cada 30 min), ajustando paths:
   - preço “era X, agora Y”
   - cupom (se houver)
   - CTA: “link no site / ofertas do dia”
-- Use sempre o mesmo destino: `/` ou `/categoria/ofertas-do-dia` (você pode criar essa categoria).
+- Use sempre o mesmo destino: `/ofertas-do-dia.php`.
 
 ---
 

@@ -14,6 +14,7 @@ if (!$offer) {
 }
 
 if (isset($_GET['go']) && $_GET['go'] === '1') {
+  $redirectUrl = site_offer_preferred_affiliate_url($offer);
   try {
     $pdo->prepare("INSERT INTO cliques (oferta_id, ip_hash, user_agent, referer) VALUES (?,?,?,?)")
         ->execute([
@@ -28,7 +29,7 @@ if (isset($_GET['go']) && $_GET['go'] === '1') {
     header('X-ZeroPreco-Click-Logged: 0');
   }
 
-  header("Location: " . $offer['url_afiliado']);
+  header("Location: " . $redirectUrl);
   exit;
 }
 
@@ -69,6 +70,9 @@ if (!$sellingPoints) {
 
 $siteBaseUrl = 'https://zeropreco.com.br';
 $offerUrl = $siteBaseUrl . site_offer_href($offer['slug']);
+$whatsappGroupLink = site_whatsapp_group_link();
+$whatsappGroupLabel = site_whatsapp_group_label();
+$whatsappGroupQrUrl = site_whatsapp_group_qr_url();
 $siteHeaderCurrent = '';
 $siteHeaderSearchPlaceholder = 'Buscar produto';
 $shareTitle = trim((string) $offer['titulo']);
@@ -137,10 +141,21 @@ if ($shareImage === '') {
             </div>
             <div class="detail-trust">
               <span class="detail-trust-chip"><?= h(site_store_label($offer['loja'])) ?></span>
-              <span class="detail-trust-chip"><?= h(site_category_label($offer['categoria'])) ?></span>
               <?php if ($discount !== null): ?>
                 <span class="detail-trust-chip is-highlight">Desconto de <?= $discount ?>%</span>
               <?php endif; ?>
+            </div>
+
+            <div class="detail-whatsapp-card">
+              <div class="detail-whatsapp-copy">
+                <span class="detail-whatsapp-kicker"><?= h($whatsappGroupLabel) ?></span>
+                <h3>Receba novas ofertas direto no WhatsApp</h3>
+                <p>Entre no grupo para receber as melhores promocoes primeiro e voltar ao site so quando o produto fizer sentido para voce.</p>
+                <a class="button button-primary" href="<?= h($whatsappGroupLink) ?>" target="_blank" rel="noopener noreferrer">Entrar no grupo</a>
+              </div>
+              <div class="detail-whatsapp-qr">
+                <img src="<?= h($whatsappGroupQrUrl) ?>" alt="<?= h($whatsappGroupLabel) ?>">
+              </div>
             </div>
           </div>
 
@@ -168,34 +183,8 @@ if ($shareImage === '') {
               </div>
             </div>
 
-            <div class="detail-stats">
-              <div class="detail-stat">
-                <strong><?= h(site_store_label($offer['loja'])) ?></strong>
-                <span>Marketplace</span>
-              </div>
-              <div class="detail-stat">
-                <strong><?= h(site_category_label($offer['categoria'])) ?></strong>
-                <span>Tipo de produto</span>
-              </div>
-              <?php if ($soldCount > 0): ?>
-                <div class="detail-stat">
-                  <strong><?= (int) $soldCount ?></strong>
-                  <span>vendidos</span>
-                </div>
-              <?php endif; ?>
-            </div>
-
-            <div class="detail-selling-box">
-              <h3>Por que esta oferta merece atenção</h3>
-              <ul>
-                <?php foreach ($sellingPoints as $point): ?>
-                  <li><?= h($point) ?></li>
-                <?php endforeach; ?>
-              </ul>
-            </div>
-
             <div class="cta-row" style="justify-content:flex-start;">
-              <a class="button button-primary" href="?slug=<?= urlencode($offer['slug']) ?>&go=1" target="_blank" rel="noopener sponsored nofollow">Comprar no site</a>
+              <a class="button button-primary" href="?slug=<?= urlencode($offer['slug']) ?>&go=1" target="_blank" rel="noopener sponsored nofollow">Ir para a oferta</a>
             </div>
           </div>
         </div>
@@ -229,8 +218,7 @@ if ($shareImage === '') {
                     <span class="price-now"><?= h(site_money($related['preco'])) ?></span>
                   </div>
                   <div class="card-footer compact-footer">
-                    <span class="meta-chip"><?= h(site_category_label($related['categoria'])) ?></span>
-                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($related['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Comprar no site</a>
+                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($related['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promoção</a>
                   </div>
                 </div>
               </article>
@@ -239,20 +227,6 @@ if ($shareImage === '') {
         </section>
       <?php endif; ?>
 
-      <section class="section-panel">
-        <div class="section-heading">
-          <div>
-            <h2>Informações importantes</h2>
-            <div class="section-copy">O Zero Preço organiza ofertas e redireciona para lojas parceiras. A condição final de compra deve ser conferida na página oficial do produto.</div>
-          </div>
-        </div>
-        <div class="filters">
-          <a class="menu-chip" href="/sobre">Sobre</a>
-          <a class="menu-chip" href="/contato">Contato</a>
-          <a class="menu-chip" href="/privacidade">Privacidade</a>
-          <a class="menu-chip" href="/termos">Termos</a>
-        </div>
-      </section>
     </div>
   </main>
 

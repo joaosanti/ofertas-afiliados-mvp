@@ -66,6 +66,11 @@ if (in_array($path, ['/instagram', '/instagram/'], true)) {
   return true;
 }
 
+if (in_array($path, ['/ofertas-do-dia', '/ofertas-do-dia/'], true)) {
+  require __DIR__ . '/public_html/ofertas-do-dia.php';
+  return true;
+}
+
 if (in_array($path, ['/sobre', '/sobre/'], true)) {
   require __DIR__ . '/public_html/sobre.php';
   return true;

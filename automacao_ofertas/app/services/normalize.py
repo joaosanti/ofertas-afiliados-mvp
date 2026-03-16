@@ -1,5 +1,6 @@
 import os
 import re
+from base64 import urlsafe_b64encode
 from urllib.parse import parse_qs, parse_qsl, quote_plus, unquote, urlencode, urlparse, urlunparse
 
 from app.schemas import NormalizedOffer
@@ -112,6 +113,7 @@ def _has_meli_affiliate_marker(url: str) -> bool:
     return bool(
         _is_meli_social_link(url)
         or ("matt_tool" in query)
+        or wid
         or (wid and sid == "affiliates")
         or (wid and polycard == "affiliates")
         or (wid and sid == "recos" and source == "affiliate-profile")
@@ -176,11 +178,29 @@ def ensure_affiliate_link(url: str, store: str, tag: str | None = None, item_id:
 
 def ensure_tags(tags: str | None, store: str, affiliate_tag: str | None) -> str | None:
     base_tags = [repair_text(tag) for tag in (tags or "").split(",") if repair_text(tag)]
+    normalized_store = store.strip().lower()
 
-    if store.strip().lower() == "mercado livre" and affiliate_tag:
+    if normalized_store == "mercado livre" and affiliate_tag:
         marker = f"meli_grant:{affiliate_tag}"
         if marker not in base_tags:
             base_tags.append(marker)
+
+    if normalized_store == "mercado livre":
+        for candidate in base_tags:
+            if candidate.startswith("meli_social_url:"):
+                return ",".join(base_tags) or None
+
+        social_url = next(
+            (
+                repair_text(candidate)
+                for candidate in (tags or "").split(",")
+                if _is_meli_social_link(repair_text(candidate))
+            ),
+            "",
+        )
+        if social_url:
+            encoded_social = urlsafe_b64encode(social_url.encode("utf-8")).decode("ascii").rstrip("=")
+            base_tags.append(f"meli_social_url:{encoded_social}")
 
     return ",".join(base_tags) or None
 
@@ -188,6 +208,9 @@ def ensure_tags(tags: str | None, store: str, affiliate_tag: str | None) -> str 
 def normalize_offer(raw: dict, store: str, affiliate_tag: str | None = None) -> NormalizedOffer:
     clean_store = repair_text(store)
     clean_url = repair_text(raw.get("url", "#"))
+    raw_tags = repair_text(raw.get("tags"))
+    if clean_store.strip().lower() == "mercado livre" and _is_meli_social_link(clean_url):
+        raw_tags = ",".join(part for part in [raw_tags, clean_url] if part)
 
     return NormalizedOffer(
         titulo=repair_text(raw.get("title", "Oferta sem titulo")),
@@ -205,7 +228,7 @@ def normalize_offer(raw: dict, store: str, affiliate_tag: str | None = None) -> 
         cupom=repair_text(raw.get("coupon")) or None,
         imagem_url=repair_text(raw.get("image")) or None,
         categoria=repair_text(raw.get("category", "ofertas")),
-        tags=ensure_tags(raw.get("tags"), clean_store, affiliate_tag),
+        tags=ensure_tags(raw_tags, clean_store, affiliate_tag),
         destaque=int(raw.get("featured", 0)),
         ativo=1,
     )

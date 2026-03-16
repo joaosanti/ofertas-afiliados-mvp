@@ -2,6 +2,7 @@ import os
 import posixpath
 import stat
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -107,6 +108,96 @@ def story_public_url(filename: str) -> str:
     config = sftp_settings_snapshot()
     base_url = (config["stories_public_base_url"] or f"{_default_site_base_url()}/stories").rstrip("/")
     return f"{base_url}/{filename}"
+
+
+def _generated_story_asset_retention_days() -> int:
+    raw = (os.getenv("GENERATED_STORY_ASSET_RETENTION_DAYS") or "7").strip() or "7"
+    try:
+        days = int(raw)
+    except ValueError:
+        return 7
+    return max(0, days)
+
+
+def _is_generated_story_asset(name: str) -> bool:
+    return Path(name).name.lower().startswith("offer-")
+
+
+def prune_local_generated_story_assets(*, retention_days: int | None = None) -> dict[str, Any]:
+    local_dir = ensure_stories_dir()
+    normalized_days = _generated_story_asset_retention_days() if retention_days is None else max(0, int(retention_days))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=normalized_days)
+    removed: list[dict[str, Any]] = []
+
+    for file_path in sorted(local_dir.iterdir()):
+        if not file_path.is_file() or not _is_generated_story_asset(file_path.name):
+            continue
+        modified_at = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
+        if modified_at > cutoff:
+            continue
+        size = file_path.stat().st_size
+        file_path.unlink(missing_ok=True)
+        removed.append(
+            {
+                "filename": file_path.name,
+                "local_path": str(file_path),
+                "size": size,
+                "modified_at": modified_at.isoformat(),
+            }
+        )
+
+    return {
+        "ok": True,
+        "target": "local_stories",
+        "retention_days": normalized_days,
+        "count": len(removed),
+        "items": removed,
+    }
+
+
+def prune_remote_generated_story_assets(
+    *,
+    retention_days: int | None = None,
+    sftp_factory: Callable[[SftpDeployConfig], tuple[Any, Any]] | None = None,
+) -> dict[str, Any]:
+    config = load_sftp_deploy_config()
+    normalized_days = _generated_story_asset_retention_days() if retention_days is None else max(0, int(retention_days))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=normalized_days)
+    factory = sftp_factory or _connect_sftp
+    transport, client = factory(config)
+    removed: list[dict[str, Any]] = []
+    try:
+        _ensure_remote_dir(client, config.stories_remote_dir)
+        for entry in client.listdir_attr(config.stories_remote_dir):
+            if stat.S_ISDIR(entry.st_mode) or not _is_generated_story_asset(entry.filename):
+                continue
+            modified_at = datetime.fromtimestamp(int(entry.st_mtime), tz=timezone.utc)
+            if modified_at > cutoff:
+                continue
+            remote_path = posixpath.join(config.stories_remote_dir, entry.filename)
+            client.remove(remote_path)
+            removed.append(
+                {
+                    "filename": entry.filename,
+                    "remote_path": remote_path,
+                    "size": int(entry.st_size),
+                    "modified_at": modified_at.isoformat(),
+                    "public_url": story_public_url(entry.filename),
+                }
+            )
+
+        return {
+            "ok": True,
+            "target": "remote_stories",
+            "host": config.host,
+            "remote_dir": config.stories_remote_dir,
+            "retention_days": normalized_days,
+            "count": len(removed),
+            "items": removed,
+        }
+    finally:
+        client.close()
+        transport.close()
 
 
 def _connect_sftp(config: SftpDeployConfig) -> tuple[paramiko.Transport, Any]:

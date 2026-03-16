@@ -959,6 +959,56 @@ textarea {
   gap: 12px;
 }
 
+.social-pinned-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.social-pinned-head {
+  gap: 12px;
+}
+
+.social-pinned-list {
+  display: grid;
+  gap: 10px;
+}
+
+.social-pinned-chip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: rgba(43, 102, 255, 0.06);
+  border: 1px solid rgba(43, 102, 255, 0.1);
+}
+
+.social-pinned-thumb {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.social-pinned-copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.social-pinned-copy strong {
+  font-size: 0.95rem;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.social-pinned-copy span {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .social-queue-item {
   display: grid;
   grid-template-columns: auto 76px minmax(0, 1.7fr) auto auto;
@@ -1174,6 +1224,11 @@ input[type="file"] {
   }
 
   .social-queue-item {
+    grid-template-columns: 1fr;
+    justify-items: start;
+  }
+
+  .social-pinned-chip {
     grid-template-columns: 1fr;
     justify-items: start;
   }

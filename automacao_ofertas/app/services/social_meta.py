@@ -2,10 +2,12 @@ import html
 import os
 import re
 import time
+from base64 import urlsafe_b64decode
+from hashlib import sha1
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 import imageio.v2 as imageio
@@ -37,6 +39,7 @@ SELECT_TOP_OFFERS_SQL = text(
       o.categoria,
       o.tags,
       o.destaque,
+      o.criado_em,
       o.atualizado_em,
       COUNT(c.id) AS clicks
     FROM ofertas o
@@ -48,15 +51,20 @@ SELECT_TOP_OFFERS_SQL = text(
       AND o.imagem_url IS NOT NULL
       AND o.imagem_url <> ''
       AND (
+        :store_filter = ''
+        OR LOWER(o.loja) = LOWER(:store_filter)
+      )
+      AND (
         :search_query = ''
         OR o.titulo LIKE :search_like
         OR o.slug LIKE :search_like
         OR o.loja LIKE :search_like
         OR o.categoria LIKE :search_like
       )
-    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.categoria, o.tags, o.destaque, o.atualizado_em
-    ORDER BY clicks DESC, o.destaque DESC, o.atualizado_em DESC, o.preco ASC
+    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.categoria, o.tags, o.destaque, o.criado_em, o.atualizado_em
+    ORDER BY o.criado_em DESC, o.id DESC
     LIMIT :limit
+    OFFSET :offset
     """
 )
 
@@ -76,6 +84,7 @@ SELECT_OFFERS_BY_IDS_SQL = text(
       o.categoria,
       o.tags,
       o.destaque,
+      o.criado_em,
       o.atualizado_em,
       COUNT(c.id) AS clicks
     FROM ofertas o
@@ -87,8 +96,8 @@ SELECT_OFFERS_BY_IDS_SQL = text(
       AND o.imagem_url IS NOT NULL
       AND o.imagem_url <> ''
       AND o.id IN :offer_ids
-    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.categoria, o.tags, o.destaque, o.atualizado_em
-    ORDER BY clicks DESC, o.destaque DESC, o.atualizado_em DESC, o.preco ASC
+    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.categoria, o.tags, o.destaque, o.criado_em, o.atualizado_em
+    ORDER BY o.criado_em DESC, o.id DESC
     """
 ).bindparams(bindparam("offer_ids", expanding=True))
 
@@ -117,6 +126,24 @@ CATEGORY_LABELS = {
 }
 
 
+def _decode_tag_url(tags: str | None, prefix: str) -> str | None:
+    for raw_tag in str(tags or "").split(","):
+        tag = raw_tag.strip()
+        if not tag.startswith(prefix):
+            continue
+        encoded = tag[len(prefix):].strip()
+        if not encoded:
+            continue
+        padded = encoded + "=" * (-len(encoded) % 4)
+        try:
+            value = urlsafe_b64decode(padded.encode("ascii")).decode("utf-8").strip()
+        except Exception:  # noqa: BLE001
+            continue
+        if value.startswith(("http://", "https://")):
+            return value
+    return None
+
+
 def _affiliate_audit(store: str, url: str) -> dict[str, str]:
     store_value = (store or "").strip().lower()
     value = (url or "").strip()
@@ -132,10 +159,8 @@ def _affiliate_audit(store: str, url: str) -> dict[str, str]:
         has_affiliate_profile = "affiliate-profile" in value
         has_matt = "matt_tool=" in value
         has_social = "/social/" in value
-        if has_social or has_matt or (has_wid and has_recos and has_affiliate_profile):
+        if has_social or has_matt or has_wid or (has_wid and has_recos and has_affiliate_profile):
             return {"severity": "ok", "reason": "Link oficial Mercado Livre."}
-        if has_wid and (has_sid or has_polycard or has_affiliate_profile):
-            return {"severity": "suspect", "reason": "Link ML com wid, mas sem garantia de origem oficial."}
         return {"severity": "broken", "reason": "Link ML sem marcador oficial."}
 
     if store_value == "shopee":
@@ -158,6 +183,34 @@ def _affiliate_audit(store: str, url: str) -> dict[str, str]:
 
 def _site_base_url() -> str:
     return os.getenv("SITE_BASE_URL", "https://zeropreco.com.br").rstrip("/")
+
+
+def _whatsapp_group_link() -> str:
+    return (
+        os.getenv("WHATSAPP_GROUP_LINK")
+        or "https://chat.whatsapp.com/IavSEP6OPh5ISM4WHluOax?mode=gi_t"
+    ).strip()
+
+
+def _whatsapp_group_label() -> str:
+    return (os.getenv("WHATSAPP_GROUP_LABEL") or "Grupo de WhatsApp").strip() or "Grupo de WhatsApp"
+
+
+def _whatsapp_group_qr_url() -> str:
+    configured = (os.getenv("WHATSAPP_GROUP_QR_URL") or "").strip()
+    if configured:
+        return configured
+    return f"https://quickchart.io/qr?size=420&text={quote(_whatsapp_group_link(), safe='')}"
+
+
+def _whatsapp_group_qr_file() -> Path:
+    configured = (os.getenv("WHATSAPP_GROUP_QR_FILE") or "").strip()
+    if configured:
+        candidate = Path(configured)
+        if not candidate.is_absolute():
+            candidate = Path(__file__).resolve().parents[2] / candidate
+        return candidate
+    return Path(__file__).resolve().parents[2] / "assets" / "whatsapp-group-qr.png"
 
 
 def _meta_api_base() -> str:
@@ -488,6 +541,9 @@ def _caption_for_offer(offer: dict[str, Any]) -> str:
         "Ver no site:" if has_direct_store_link else "Oferta no site:",
         site_offer_url,
         "",
+        f"{_whatsapp_group_label()}:",
+        _whatsapp_group_link(),
+        "",
         "#ofertas #promocao #zeropreco",
     ]
     return "\n".join(lines)
@@ -558,6 +614,13 @@ def _wrap_text(value: str, limit: int) -> list[str]:
     return lines
 
 
+def _split_text(value: str, limit: int) -> list[str]:
+    content = (value or "").strip()
+    if not content:
+        return []
+    return [content[index:index + limit] for index in range(0, len(content), limit)]
+
+
 def _fit_remote_product_image(url: str, size: tuple[int, int]) -> Image.Image | None:
     image_url = (url or "").strip()
     if not image_url:
@@ -573,13 +636,29 @@ def _fit_remote_product_image(url: str, size: tuple[int, int]) -> Image.Image | 
         return None
 
 
+def _fit_local_product_image(path: Path, size: tuple[int, int]) -> Image.Image | None:
+    if not path.is_file():
+        return None
+    try:
+        with Image.open(path) as source:
+            converted = source.convert("RGB")
+            return ImageOps.fit(converted, size, method=Image.Resampling.LANCZOS)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
     filename = f"offer-{offer['id']}-{_slugify(offer['slug'])}.jpg"
     destination = ensure_stories_dir() / filename
     destination_url = _destination_url(offer)
-    site_host = _display_url(_site_base_url())
+    destination_host = _display_url(destination_url)
     destination_label = "Acesse no site"
     destination_label_secondary = "zeropreco.com.br"
+    whatsapp_group_label = _whatsapp_group_label()
+    whatsapp_group_link = _whatsapp_group_link()
+    whatsapp_group_qr = _fit_local_product_image(_whatsapp_group_qr_file(), (220, 220))
+    if whatsapp_group_qr is None:
+        whatsapp_group_qr = _fit_remote_product_image(_whatsapp_group_qr_url(), (220, 220))
 
     image = Image.new("RGB", (1080, 1920), "#0a2a67")
     draw = ImageDraw.Draw(image)
@@ -631,20 +710,32 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
         draw.rounded_rectangle((120, 800, 960, 1270), radius=28, fill="#d9e5ff")
         draw.text((180, 1015), "Imagem do produto", font=cta_font, fill="#0b2d78")
 
-    draw.rounded_rectangle((80, 1348, 910, 1518), radius=32, fill="#ffffff")
-    draw.rounded_rectangle((104, 1372, 886, 1494), radius=26, fill="#e8f0ff")
+    draw.rounded_rectangle((80, 1348, 580, 1518), radius=32, fill="#ffffff")
+    draw.rounded_rectangle((104, 1372, 556, 1494), radius=26, fill="#e8f0ff")
     draw.text((136, 1382), destination_label, font=cta_small_font, fill="#0b2d78")
     draw.text((136, 1426), destination_label_secondary, font=cta_font, fill="#0b2d78")
 
-    draw.rounded_rectangle((80, 1540, 620, 1622), radius=22, fill="#1b4fc3")
-    draw.text((112, 1558), site_host, font=domain_font, fill="#ffffff")
+    draw.text((664, 1340), "Grupo WhatsApp", font=cta_small_font, fill="#ffffff")
+    qr_outer_box = (686, 1378, 880, 1572)
+    qr_inner_box = (694, 1386, 872, 1564)
+    draw.rounded_rectangle(qr_outer_box, radius=18, fill="#f7fbff", outline="#8fb9ff", width=3)
+    if whatsapp_group_qr is not None:
+        qr_image = ImageOps.fit(whatsapp_group_qr, (178, 178), method=Image.Resampling.LANCZOS)
+        image.paste(qr_image, (694, 1386))
+    else:
+        draw.rounded_rectangle(qr_inner_box, radius=18, fill="#d9e5ff")
+        draw.text((742, 1462), "QR", font=cta_font, fill="#0b2d78")
+
+    draw.text((80, 1608), destination_host, font=domain_font, fill="#ffffff")
     draw.text(
-        (80, 1660),
-        "Confira a oferta completa no site oficial.",
+        (80, 1716),
+        "Siga para a loja parceira.",
         font=text_font,
         fill="#dbe7ff",
     )
-    draw.text((80, 1704), "Use o link publicado junto da oferta.", font=micro_font, fill="#dbe7ff")
+    draw.text((80, 1760), "Use o link publicado junto da oferta.", font=micro_font, fill="#dbe7ff")
+    for index, link_line in enumerate(_split_text(whatsapp_group_link, 72)[:2]):
+        draw.text((80, 1800 + (index * 28)), link_line, font=micro_font, fill="#dbe7ff")
 
     coupon_text = (offer.get("cupom") or "").strip()
     if coupon_text:
@@ -705,6 +796,51 @@ def generate_reel_asset(offer: dict[str, Any], *, duration_seconds: int = 6, fps
     }
 
 
+def download_source_video_asset(offer: dict[str, Any], video_url: str) -> dict[str, Any]:
+    normalized_url = str(video_url or "").strip()
+    if not normalized_url.startswith(("http://", "https://")):
+        raise ValueError("URL do video de origem invalida para download.")
+
+    stories_dir = ensure_stories_dir()
+    slug = re.sub(r"[^a-z0-9-]+", "-", str(offer.get("slug") or "oferta").strip().lower()).strip("-") or "oferta"
+    parsed = urlparse(normalized_url)
+    extension = Path(parsed.path or "").suffix.lower()
+    if extension not in {".mp4", ".mov", ".m4v", ".webm"}:
+        extension = ".mp4"
+    url_hash = sha1(normalized_url.encode("utf-8")).hexdigest()[:10]
+    filename = f"offer-{slug}-source-{url_hash}{extension}"
+    destination = stories_dir / filename
+
+    with httpx.Client(timeout=90, follow_redirects=True) as client:
+        response = client.get(
+            normalized_url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/132.0.0.0 Safari/537.36"
+                ),
+                "Referer": str(offer.get("url_afiliado") or normalized_url),
+            },
+        )
+        response.raise_for_status()
+        content = response.content
+
+    if not content:
+        raise ValueError("Download do video da Shopee retornou arquivo vazio.")
+
+    destination.write_bytes(content)
+
+    return {
+        "ok": True,
+        "offer_id": offer["id"],
+        "filename": filename,
+        "file_path": str(destination),
+        "source_url": normalized_url,
+        "public_url": story_public_url(filename),
+    }
+
+
 def build_meta_post_previews(
     db,
     limit: int = 12,
@@ -712,10 +848,12 @@ def build_meta_post_previews(
     include_story_assets: bool = True,
     include_square_card_assets: bool = False,
     search_query: str | None = None,
+    store_filter: str | None = None,
 ) -> list[dict[str, Any]]:
     capped_limit = max(1, min(limit, 200))
     fetch_limit = max(capped_limit, len(offer_ids or []), 160)
     normalized_query = (search_query or "").strip()
+    normalized_store = (store_filter or "").strip()
     if offer_ids:
         rows = db.execute(
             SELECT_OFFERS_BY_IDS_SQL,
@@ -724,21 +862,33 @@ def build_meta_post_previews(
         selected_map = {int(row["id"]): row for row in rows}
         rows = [dict(selected_map[offer_id]) for offer_id in offer_ids if int(offer_id) in selected_map][:capped_limit]
     else:
-        params = {
-            "limit": fetch_limit,
-            "search_query": normalized_query,
-            "search_like": f"%{normalized_query}%",
-        }
-        rows = db.execute(SELECT_TOP_OFFERS_SQL, params).mappings().all()
-        eligible_rows = [
-            dict(row)
-            for row in rows
-            if _affiliate_audit(str(row.get("loja") or ""), str(row.get("url_afiliado") or "")).get("severity") == "ok"
-        ]
-        if normalized_query:
-            rows = eligible_rows[:capped_limit]
-        else:
-            rows = _diversify_offer_rows(eligible_rows, capped_limit)
+        eligible_rows: list[dict[str, Any]] = []
+        seen_offer_ids: set[int] = set()
+        max_scan_batches = 8
+        for batch_index in range(max_scan_batches):
+            params = {
+                "limit": fetch_limit,
+                "offset": batch_index * fetch_limit,
+                "store_filter": normalized_store,
+                "search_query": normalized_query,
+                "search_like": f"%{normalized_query}%",
+            }
+            batch_rows = db.execute(SELECT_TOP_OFFERS_SQL, params).mappings().all()
+            if not batch_rows:
+                break
+            for row in batch_rows:
+                offer_id = int(row["id"])
+                if offer_id in seen_offer_ids:
+                    continue
+                seen_offer_ids.add(offer_id)
+                if _affiliate_audit(str(row.get("loja") or ""), str(row.get("url_afiliado") or "")).get("severity") != "ok":
+                    continue
+                eligible_rows.append(dict(row))
+                if len(eligible_rows) >= capped_limit:
+                    break
+            if len(eligible_rows) >= capped_limit:
+                break
+        rows = eligible_rows[:capped_limit]
     previews: list[dict[str, Any]] = []
 
     for row in rows:
@@ -772,6 +922,7 @@ def build_meta_post_previews(
                 "old_price": float(offer["preco_antigo"]) if offer.get("preco_antigo") else None,
                 "coupon": offer.get("cupom"),
                 "image_url": offer["imagem_url"],
+                "video_url": _decode_tag_url(offer.get("tags"), "shopee_video_url:"),
                 "clicks": int(offer.get("clicks") or 0),
                 "offer_url": _offer_url(offer["slug"]),
                 "cta_url": _destination_url(offer),
@@ -792,6 +943,7 @@ def build_meta_post_previews(
                 "reel_payload": {
                     "caption": _story_caption_for_offer(offer),
                     "offer_url": _destination_url(offer),
+                    "source_video_url": _decode_tag_url(offer.get("tags"), "shopee_video_url:"),
                 },
             }
         )
@@ -983,7 +1135,7 @@ def create_instagram_media_container(image_url: str, caption: str) -> dict[str, 
     if not caption:
         raise ValueError("caption do Instagram nao pode ficar vazio.")
 
-    payload = {"image_url": image_url, "caption": caption, "access_token": _meta_user_token()}
+    payload = {"image_url": image_url, "caption": caption, "access_token": _meta_page_token()}
 
     with httpx.Client(timeout=20) as client:
         response = client.post(f"{_meta_api_base()}/{_meta_instagram_account_id()}/media", data=payload)
@@ -1006,7 +1158,7 @@ def create_instagram_story_container(image_url: str) -> dict[str, Any]:
     payload = {
         "image_url": image_url,
         "media_type": "STORIES",
-        "access_token": _meta_user_token(),
+        "access_token": _meta_page_token(),
     }
 
     with httpx.Client(timeout=20) as client:
@@ -1022,17 +1174,144 @@ def create_instagram_story_container(image_url: str) -> dict[str, Any]:
     }
 
 
+def create_instagram_reel_container(video_url: str, caption: str, *, share_to_feed: bool = True) -> dict[str, Any]:
+    video_url = (video_url or "").strip()
+    caption = (caption or "").strip()
+    if not video_url:
+        raise ValueError("video_url do reel do Instagram nao pode ficar vazio.")
+    if not caption:
+        raise ValueError("caption do reel do Instagram nao pode ficar vazio.")
+
+    payload = {
+        "video_url": video_url,
+        "media_type": "REELS",
+        "caption": caption,
+        "share_to_feed": "true" if share_to_feed else "false",
+        "access_token": _meta_page_token(),
+    }
+
+    with httpx.Client(timeout=30) as client:
+        response = client.post(f"{_meta_api_base()}/{_meta_instagram_account_id()}/media", data=payload)
+        response.raise_for_status()
+        data = response.json()
+
+    return {
+        "ok": True,
+        "platform": "instagram_reel",
+        "instagram_business_account_id": _meta_instagram_account_id(),
+        "result": data,
+    }
+
+
+def get_instagram_container_status(creation_id: str) -> dict[str, Any]:
+    creation_id = (creation_id or "").strip()
+    if not creation_id:
+        raise ValueError("creation_id do Instagram nao pode ficar vazio.")
+
+    params = {
+        "fields": "status_code,status,status_message",
+        "access_token": _meta_page_token(),
+    }
+
+    with httpx.Client(timeout=20) as client:
+        response = client.get(f"{_meta_api_base()}/{creation_id}", params=params)
+        response.raise_for_status()
+        data = response.json()
+
+    return {
+        "ok": True,
+        "platform": "instagram_container_status",
+        "instagram_business_account_id": _meta_instagram_account_id(),
+        "result": data,
+    }
+
+
+def get_instagram_content_publishing_limit() -> dict[str, Any]:
+    params = {
+        "fields": "quota_usage,config",
+        "access_token": _meta_page_token(),
+    }
+
+    with httpx.Client(timeout=20) as client:
+        response = client.get(f"{_meta_api_base()}/{_meta_instagram_account_id()}/content_publishing_limit", params=params)
+        response.raise_for_status()
+        data = response.json()
+
+    bucket = ((data.get("data") or [{}])[0]) if isinstance(data, dict) else {}
+    config = bucket.get("config") or {}
+    quota_total = int(config.get("quota_total") or 0)
+    quota_usage = int(bucket.get("quota_usage") or 0)
+    quota_duration = int(config.get("quota_duration") or 0)
+    remaining = max(0, quota_total - quota_usage) if quota_total > 0 else 0
+
+    return {
+        "ok": True,
+        "platform": "instagram_content_publishing_limit",
+        "instagram_business_account_id": _meta_instagram_account_id(),
+        "result": {
+            "quota_total": quota_total,
+            "quota_usage": quota_usage,
+            "quota_remaining": remaining,
+            "quota_duration_seconds": quota_duration,
+        },
+    }
+
+
+def wait_for_instagram_container_ready(creation_id: str, *, timeout_seconds: int = 120, poll_interval_seconds: int = 5) -> dict[str, Any]:
+    deadline = time.time() + max(10, timeout_seconds)
+    last_status: dict[str, Any] | None = None
+
+    while time.time() <= deadline:
+        try:
+            status_payload = get_instagram_container_status(creation_id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 400:
+                return {
+                    "ok": True,
+                    "platform": "instagram_container_status",
+                    "instagram_business_account_id": _meta_instagram_account_id(),
+                    "result": {"status_code": "UNAVAILABLE"},
+                }
+            raise
+        status_data = status_payload.get("result") or {}
+        last_status = status_data
+        status_code = str(status_data.get("status_code") or status_data.get("status") or "").strip().upper()
+
+        if status_code in {"FINISHED", "PUBLISHED"}:
+            return status_payload
+        if status_code in {"ERROR", "EXPIRED", "FAILED"}:
+            raise ValueError(f"Instagram retornou status invalido para o container: {status_data}")
+
+        time.sleep(max(1, poll_interval_seconds))
+
+    raise ValueError(f"Container do Instagram nao ficou pronto a tempo: {last_status or {}}")
+
+
 def publish_instagram_container(creation_id: str) -> dict[str, Any]:
     creation_id = (creation_id or "").strip()
     if not creation_id:
         raise ValueError("creation_id do Instagram nao pode ficar vazio.")
 
-    payload = {"creation_id": creation_id, "access_token": _meta_user_token()}
+    wait_for_instagram_container_ready(creation_id)
+    payload = {"creation_id": creation_id, "access_token": _meta_page_token()}
+    last_exc: httpx.HTTPStatusError | None = None
 
     with httpx.Client(timeout=20) as client:
-        response = client.post(f"{_meta_api_base()}/{_meta_instagram_account_id()}/media_publish", data=payload)
-        response.raise_for_status()
-        data = response.json()
+        for attempt in range(12):
+            try:
+                response = client.post(f"{_meta_api_base()}/{_meta_instagram_account_id()}/media_publish", data=payload)
+                response.raise_for_status()
+                data = response.json()
+                break
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                if exc.response is None or exc.response.status_code != 400 or attempt >= 11:
+                    raise
+                time.sleep(5)
+        else:
+            if last_exc is not None:
+                raise last_exc
+            raise ValueError("Falha ao publicar container do Instagram.")
 
     return {
         "ok": True,

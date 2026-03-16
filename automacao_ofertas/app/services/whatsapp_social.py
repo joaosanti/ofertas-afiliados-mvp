@@ -74,6 +74,11 @@ def prepare_whatsapp_group_batch(db, limit: int = 5, offer_ids: list[int] | None
             }
         )
 
+    if not items:
+        if offer_ids:
+            raise ValueError("Nenhuma oferta selecionada ficou elegivel para preparar o lote do WhatsApp.")
+        raise ValueError("Nao ha ofertas elegiveis para preparar o lote do WhatsApp.")
+
     return {
         "ok": True,
         "platform": "whatsapp",
