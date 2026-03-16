@@ -6,8 +6,9 @@ $pdo = db();
 $flash = admin_flash_get();
 $search = trim((string) ($_GET['q'] ?? ''));
 $store = trim((string) ($_GET['loja'] ?? ''));
-$limit = (int) ($_GET['limit'] ?? 24);
-$limit = max(6, min($limit, 48));
+$limitDefault = ($search !== '' || $store !== '') ? 30 : 24;
+$limit = (int) ($_GET['limit'] ?? $limitDefault);
+$limit = max(6, min($limit, 60));
 $resultPayload = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -70,6 +71,7 @@ $stores = $pdo->query("
 $recentRuns = admin_fetch_recent_runs($pdo, 'social', 12);
 $pythonEnabled = admin_python_job_enabled();
 $shellEnabled = admin_shell_exec_enabled();
+$adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
 ?>
 <!doctype html>
 <html lang="pt-br">
@@ -77,22 +79,34 @@ $shellEnabled = admin_shell_exec_enabled();
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Admin - Social</title>
+  <link rel="icon" type="image/png" href="/assets/img/logo-zp.png">
   <link rel="stylesheet" href="/assets/css/style.css">
-  <link rel="stylesheet" href="/assets/css/admin.css">
+  <link rel="stylesheet" href="/assets/css/admin.css?v=<?= urlencode($adminCssVersion) ?>">
 </head>
 <body class="admin-page">
 <header>
   <div class="container admin-header">
     <div class="admin-brand">
-      <div class="admin-brand-mark">
-        <img src="/assets/img/logo-zp.png" alt="Zero Preco">
-      </div>
+      <a class="admin-brand-link" href="/admin/ofertas.php">
+        <div class="admin-brand-mark">
+          <img src="/assets/img/logo-zp.png" alt="Zero Preco">
+        </div>
+      </a>
       <div class="admin-brand-copy">
-        <strong>Social e automacao</strong>
-        <span>Selecao manual no PHP e execucao do job pelo Python/cron.</span>
+        <strong>Zero Preço Admin</strong>
+        <span>Controle ofertas, links e publicações em um só lugar.</span>
       </div>
     </div>
-    <div class="admin-header-actions">
+    <button
+      class="btn admin-menu-toggle"
+      type="button"
+      aria-expanded="false"
+      aria-controls="admin-header-actions"
+      data-admin-menu-toggle
+    >
+      Menu
+    </button>
+    <div class="admin-header-actions" id="admin-header-actions" data-admin-menu>
       <a class="badge" href="/admin/ofertas.php">Ofertas</a>
       <a class="badge" href="/admin/oferta_editar.php">Nova oferta</a>
       <a class="badge" href="/admin/logout.php">Sair</a>
@@ -108,9 +122,8 @@ $shellEnabled = admin_shell_exec_enabled();
   <section class="admin-hero">
     <div class="admin-hero-head">
       <div class="admin-hero-copy">
-        <span class="admin-kicker">Selecao social</span>
-        <h1>Escolha as ofertas no /admin e deixe o Python cuidar da publicacao.</h1>
-        <p>O cron nao atualiza codigo sozinho: ele apenas executa o que estiver salvo no servidor. Quando voce subir uma nova versao do Python, o proximo cron ja usa essa versao automaticamente.</p>
+        <span class="admin-kicker">Seleção social</span>
+        <h1>Publicação social</h1>
       </div>
       <div class="admin-hero-actions">
         <span class="admin-status <?= $pythonEnabled ? 'ok' : 'warn' ?>"><?= $pythonEnabled ? 'Runner Python configurado' : 'Configure o runner Python' ?></span>
@@ -122,14 +135,14 @@ $shellEnabled = admin_shell_exec_enabled();
   <section class="admin-panel">
     <div class="admin-panel-head">
       <div>
-        <h2 class="admin-section-title">Rodar automatico agora</h2>
-        <p>Usa a mesma logica do cron. Se voce atualizar os arquivos Python no servidor, os proximos disparos manual e automatico ja usam a versao nova.</p>
+        <h2 class="admin-section-title">Rodar automático agora</h2>
+        <p>Usa a mesma lógica do cron. Se você atualizar os arquivos Python no servidor, os próximos disparos manual e automático já usam a versão nova.</p>
       </div>
     </div>
     <form method="post" class="admin-filter-form">
       <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
       <input type="hidden" name="acao" value="publish_auto">
-      <div class="admin-field-grid">
+      <div class="admin-field-grid admin-field-grid-compact">
         <div class="admin-field">
           <label for="platform_auto">Plataforma</label>
           <select id="platform_auto" name="platform">
@@ -151,9 +164,10 @@ $shellEnabled = admin_shell_exec_enabled();
           <label for="auto_limit">Quantidade</label>
           <input id="auto_limit" type="number" name="auto_limit" value="1" min="1" max="10">
         </div>
-      </div>
-      <div class="admin-form-actions">
-        <button class="btn" type="submit">Rodar job automatico</button>
+        <div class="admin-field admin-field-submit">
+          <label>&nbsp;</label>
+          <button class="btn" type="submit">Rodar job automático</button>
+        </div>
       </div>
     </form>
   </section>
@@ -162,15 +176,15 @@ $shellEnabled = admin_shell_exec_enabled();
     <div class="admin-panel-head">
       <div>
         <h2 class="admin-section-title">Selecionar produtos manualmente</h2>
-        <p>Esta tela substitui a selecao do painel Python. O processamento continua no Python, mas a curadoria fica no PHP.</p>
+        <p>Esta tela substitui a seleção do painel Python. O processamento continua no Python, mas a curadoria fica no PHP.</p>
       </div>
     </div>
 
     <form method="get" class="admin-filter-form">
-      <div class="admin-field-grid">
+      <div class="admin-field-grid admin-field-grid-compact">
         <div class="admin-field">
           <label for="q">Buscar</label>
-          <input id="q" name="q" value="<?= h($search) ?>" placeholder="Titulo, categoria, tag ou loja">
+          <input id="q" name="q" value="<?= h($search) ?>" placeholder="Título, categoria, tag ou loja">
         </div>
         <div class="admin-field">
           <label for="loja">Loja</label>
@@ -187,9 +201,10 @@ $shellEnabled = admin_shell_exec_enabled();
           <label for="limit">Limite</label>
           <input id="limit" type="number" name="limit" value="<?= (int) $limit ?>" min="6" max="48">
         </div>
-      </div>
-      <div class="admin-form-actions">
-        <button class="btn-link primary" type="submit">Filtrar</button>
+        <div class="admin-field admin-field-submit">
+          <label>&nbsp;</label>
+          <button class="btn-link primary" type="submit">Filtrar</button>
+        </div>
       </div>
     </form>
 
@@ -217,7 +232,7 @@ $shellEnabled = admin_shell_exec_enabled();
       </div>
 
       <?php if (!$offers): ?>
-        <div class="admin-empty" style="margin-top:18px;">Nenhuma oferta elegivel para publicacao com estes filtros.</div>
+        <div class="admin-empty" style="margin-top:18px;">Nenhuma oferta elegível para publicação com estes filtros.</div>
       <?php else: ?>
         <div class="admin-offers-grid" style="margin-top:18px;">
           <?php foreach ($offers as $offer): ?>
@@ -273,12 +288,12 @@ $shellEnabled = admin_shell_exec_enabled();
   <section class="admin-panel">
     <div class="admin-panel-head">
       <div>
-        <h2 class="admin-section-title">Historico de execucoes</h2>
+        <h2 class="admin-section-title">Histórico de execuções</h2>
         <p>O cron e o botao manual gravam no mesmo historico.</p>
       </div>
     </div>
     <?php if (!$recentRuns): ?>
-      <div class="admin-empty">Nenhuma execucao social registrada ainda.</div>
+      <div class="admin-empty">Nenhuma execução social registrada ainda.</div>
     <?php else: ?>
       <div class="admin-offers-grid">
         <?php foreach ($recentRuns as $run): ?>
@@ -305,5 +320,29 @@ $shellEnabled = admin_shell_exec_enabled();
     <?php endif; ?>
   </section>
 </main>
+<script>
+  (function () {
+    var toggle = document.querySelector('[data-admin-menu-toggle]');
+    var menu = document.querySelector('[data-admin-menu]');
+    if (!toggle || !menu) {
+      return;
+    }
+
+    function syncMenuState() {
+      if (window.innerWidth > 640) {
+        document.body.classList.remove('admin-menu-open');
+        toggle.setAttribute('aria-expanded', 'false');
+      }
+    }
+
+    toggle.addEventListener('click', function () {
+      var isOpen = document.body.classList.toggle('admin-menu-open');
+      toggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    });
+
+    window.addEventListener('resize', syncMenuState);
+    syncMenuState();
+  })();
+</script>
 </body>
 </html>

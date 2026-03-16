@@ -5,9 +5,9 @@ from app.schemas import NormalizedOffer
 
 UPSERT_SQL = text("""
 INSERT INTO ofertas
-(slug, titulo, descricao, preco, preco_antigo, loja, url_afiliado, cupom, imagem_url, categoria, tags, destaque, ativo)
+(slug, titulo, descricao, preco, preco_antigo, loja, url_afiliado, cupom, imagem_url, categoria, tags, destaque, ativo, criado_por_admin_id, criado_por_login)
 VALUES
-(:slug, :titulo, :descricao, :preco, :preco_antigo, :loja, :url_afiliado, :cupom, :imagem_url, :categoria, :tags, :destaque, :ativo)
+(:slug, :titulo, :descricao, :preco, :preco_antigo, :loja, :url_afiliado, :cupom, :imagem_url, :categoria, :tags, :destaque, :ativo, :criado_por_admin_id, :criado_por_login)
 ON DUPLICATE KEY UPDATE
   titulo = VALUES(titulo),
   descricao = VALUES(descricao),
@@ -26,10 +26,12 @@ ON DUPLICATE KEY UPDATE
 CHECK_SLUG_SQL = text("SELECT id FROM ofertas WHERE slug = :slug LIMIT 1")
 
 
-def publish_offer(db, offer: NormalizedOffer) -> str:
+def publish_offer(db, offer: NormalizedOffer, actor_user_id: int | None = None, actor_login: str | None = None) -> str:
     slug = build_slug(offer.titulo)
     existing = db.execute(CHECK_SLUG_SQL, {"slug": slug}).scalar()
     payload = offer.model_dump()
     payload["slug"] = slug
+    payload["criado_por_admin_id"] = actor_user_id
+    payload["criado_por_login"] = actor_login
     db.execute(UPSERT_SQL, payload)
     return "updated" if existing else "created"

@@ -18,14 +18,19 @@ def _emit(payload: dict, exit_code: int = 0) -> int:
     return exit_code
 
 
-def _import_items(items: list[dict]) -> dict:
+def _import_items(items: list[dict], actor_user_id: int | None = None, actor_login: str | None = None) -> dict:
     db = SessionLocal()
     summary = {"processed": 0, "created": 0, "updated": 0, "items": []}
     try:
         for item in items:
             store = (item.get("store") or "").strip() or "Oferta"
             normalized = normalize_offer(item, store, item.get("affiliate_code"))
-            action = publish_offer(db, normalized)
+            action = publish_offer(
+                db,
+                normalized,
+                actor_user_id=actor_user_id,
+                actor_login=actor_login,
+            )
             summary["processed"] += 1
             summary[action] += 1
             summary["items"].append(
@@ -61,9 +66,13 @@ def main() -> int:
     import_file_parser = subparsers.add_parser("import-file", help="Importa um arquivo manual.")
     import_file_parser.add_argument("--kind", required=True, choices=["shopee_csv", "amazon_txt", "mercadolivre_txt"])
     import_file_parser.add_argument("--input-file", required=True)
+    import_file_parser.add_argument("--actor-user-id", type=int, default=None)
+    import_file_parser.add_argument("--actor-login", default=None)
 
     import_links_parser = subparsers.add_parser("import-links", help="Importa links colados manualmente.")
     import_links_parser.add_argument("--input-file", required=True)
+    import_links_parser.add_argument("--actor-user-id", type=int, default=None)
+    import_links_parser.add_argument("--actor-login", default=None)
 
     subparsers.add_parser("deploy-site", help="Envia public_html via SFTP.")
 
@@ -95,7 +104,7 @@ def main() -> int:
             else:
                 items = preview_mercadolivre_txt_file(content, input_path.name)
             items = [item for item in items if bool(item.get("selected", True))]
-            result = _import_items(items)
+            result = _import_items(items, actor_user_id=args.actor_user_id, actor_login=args.actor_login)
             return _emit({"ok": True, "command": "import-file", "result": result})
 
         if args.command == "import-links":
@@ -106,7 +115,7 @@ def main() -> int:
             links = [line.strip() for line in raw_lines if line.strip()]
             items = preview_manual_affiliate_links(links)
             items = [item for item in items if bool(item.get("import_allowed", item.get("affiliate_detected", True)))]
-            result = _import_items(items)
+            result = _import_items(items, actor_user_id=args.actor_user_id, actor_login=args.actor_login)
             return _emit({"ok": True, "command": "import-links", "result": result})
 
         if args.command == "deploy-site":

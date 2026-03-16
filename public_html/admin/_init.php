@@ -16,6 +16,124 @@ function admin_user_id() {
   return isset($_SESSION['admin_user_id']) ? (int) $_SESSION['admin_user_id'] : 0;
 }
 
+function admin_bootstrap_schema() {
+  static $done = false;
+  if ($done) {
+    return;
+  }
+  $done = true;
+
+  try {
+    $pdo = db();
+
+    $adminUserColumns = [];
+    foreach ($pdo->query("SHOW COLUMNS FROM admin_users") as $column) {
+      $adminUserColumns[(string) $column['Field']] = true;
+    }
+    if (!isset($adminUserColumns['username'])) {
+      $pdo->exec("ALTER TABLE admin_users ADD COLUMN username VARCHAR(80) NULL AFTER email");
+      $pdo->exec("ALTER TABLE admin_users ADD UNIQUE KEY ux_admin_users_username (username)");
+    }
+    if (!isset($adminUserColumns['display_name'])) {
+      $pdo->exec("ALTER TABLE admin_users ADD COLUMN display_name VARCHAR(120) NULL AFTER username");
+    }
+
+    $adminUsers = $pdo->query("SELECT id, email, username, display_name FROM admin_users ORDER BY id ASC")->fetchAll();
+    foreach ($adminUsers as $user) {
+      $email = trim((string) ($user['email'] ?? ''));
+      $username = trim((string) ($user['username'] ?? ''));
+      $displayName = trim((string) ($user['display_name'] ?? ''));
+      $fallbackUsername = strtolower((string) preg_replace('/[^a-z0-9._-]+/i', '', strstr($email, '@', true) ?: $email));
+      if ($fallbackUsername === '') {
+        $fallbackUsername = 'admin' . (int) $user['id'];
+      }
+
+      $updates = [];
+      $params = [];
+      if ($username === '') {
+        $updates[] = 'username = ?';
+        $params[] = substr($fallbackUsername, 0, 80);
+      }
+      if ($displayName === '') {
+        $updates[] = 'display_name = ?';
+        $params[] = substr($username !== '' ? $username : $fallbackUsername, 0, 120);
+      }
+      if ($updates) {
+        $params[] = (int) $user['id'];
+        $stmt = $pdo->prepare('UPDATE admin_users SET ' . implode(', ', $updates) . ' WHERE id = ?');
+        $stmt->execute($params);
+      }
+    }
+
+    $offerColumns = [];
+    foreach ($pdo->query("SHOW COLUMNS FROM ofertas") as $column) {
+      $offerColumns[(string) $column['Field']] = true;
+    }
+    if (!isset($offerColumns['criado_por_admin_id'])) {
+      $pdo->exec("ALTER TABLE ofertas ADD COLUMN criado_por_admin_id INT NULL AFTER ativo");
+      $pdo->exec("ALTER TABLE ofertas ADD INDEX ix_ofertas_criado_por_admin_id (criado_por_admin_id)");
+    }
+    if (!isset($offerColumns['criado_por_login'])) {
+      $pdo->exec("ALTER TABLE ofertas ADD COLUMN criado_por_login VARCHAR(180) NULL AFTER criado_por_admin_id");
+    }
+
+    $owner = $pdo->query("SELECT id, COALESCE(NULLIF(username, ''), email) AS login_name FROM admin_users ORDER BY id ASC LIMIT 1")->fetch();
+    if ($owner) {
+      $stmt = $pdo->prepare("
+        UPDATE ofertas
+        SET criado_por_admin_id = ?,
+            criado_por_login = ?
+        WHERE criado_por_admin_id IS NULL
+           OR criado_por_login IS NULL
+           OR criado_por_login = ''
+      ");
+      $stmt->execute([(int) $owner['id'], (string) $owner['login_name']]);
+    }
+  } catch (Throwable $e) {
+    // Mantem o admin funcional mesmo se a migracao falhar temporariamente.
+  }
+}
+
+function admin_current_user() {
+  static $cached = false;
+  if ($cached !== false) {
+    return $cached;
+  }
+
+  admin_bootstrap_schema();
+
+  $id = admin_user_id();
+  if ($id <= 0) {
+    $cached = null;
+    return null;
+  }
+
+  try {
+    $stmt = db()->prepare("
+      SELECT id, email, username, display_name,
+             COALESCE(NULLIF(username, ''), email) AS login_name
+      FROM admin_users
+      WHERE id = ?
+      LIMIT 1
+    ");
+    $stmt->execute([$id]);
+    $row = $stmt->fetch();
+    $cached = $row ?: null;
+    return $cached;
+  } catch (Throwable $e) {
+    $cached = null;
+    return null;
+  }
+}
+
+function admin_current_login_name() {
+  $user = admin_current_user();
+  if (!$user) {
+    return '';
+  }
+  return (string) ($user['login_name'] ?? $user['email'] ?? '');
+}
+
 function admin_is_logged_in() {
   return admin_user_id() > 0;
 }
@@ -272,6 +390,43 @@ function admin_python_job_enabled() {
     && AUTOMACAO_PYTHON_SCRIPT !== '';
 }
 
+function admin_decode_python_runner_output($output) {
+  $trimmed = trim((string) $output);
+  if ($trimmed === '') {
+    return null;
+  }
+
+  $decoded = json_decode($trimmed, true);
+  if (is_array($decoded)) {
+    return $decoded;
+  }
+
+  $start = strpos($trimmed, '{');
+  $end = strrpos($trimmed, '}');
+  if ($start !== false && $end !== false && $end > $start) {
+    $jsonSlice = substr($trimmed, $start, $end - $start + 1);
+    $decoded = json_decode($jsonSlice, true);
+    if (is_array($decoded)) {
+      return $decoded;
+    }
+  }
+
+  return null;
+}
+
+function admin_strip_actor_args(array $args) {
+  $clean = [];
+  for ($i = 0; $i < count($args); $i++) {
+    $arg = (string) $args[$i];
+    if ($arg === '--actor-user-id' || $arg === '--actor-login') {
+      $i++;
+      continue;
+    }
+    $clean[] = $arg;
+  }
+  return $clean;
+}
+
 function admin_run_python_job(array $args) {
   if (!admin_python_job_enabled()) {
     return [
@@ -295,12 +450,16 @@ function admin_run_python_job(array $args) {
     ];
   }
 
-  $parts = [escapeshellarg((string) AUTOMACAO_PYTHON_BIN), escapeshellarg($scriptPath)];
-  foreach ($args as $arg) {
-    $parts[] = escapeshellarg((string) $arg);
-  }
-  $command = implode(' ', $parts) . ' 2>&1';
-  $output = shell_exec($command);
+  $runCommand = static function (array $commandArgs) use ($scriptPath) {
+    $parts = [escapeshellarg((string) AUTOMACAO_PYTHON_BIN), escapeshellarg($scriptPath)];
+    foreach ($commandArgs as $arg) {
+      $parts[] = escapeshellarg((string) $arg);
+    }
+    $command = implode(' ', $parts) . ' 2>&1';
+    return shell_exec($command);
+  };
+
+  $output = $runCommand($args);
 
   if ($output === null) {
     return [
@@ -309,15 +468,31 @@ function admin_run_python_job(array $args) {
     ];
   }
 
-  $decoded = json_decode(trim($output), true);
+  $decoded = admin_decode_python_runner_output($output);
   if (is_array($decoded)) {
     return $decoded;
   }
 
+  $rawOutput = trim((string) $output);
+  if ((str_contains($rawOutput, '--actor-user-id') || str_contains($rawOutput, '--actor-login'))
+    && (str_contains(strtolower($rawOutput), 'unrecognized arguments') || str_contains(strtolower($rawOutput), 'error:'))) {
+    $fallbackArgs = admin_strip_actor_args($args);
+    if ($fallbackArgs !== $args) {
+      $fallbackOutput = $runCommand($fallbackArgs);
+      if ($fallbackOutput !== null) {
+        $fallbackDecoded = admin_decode_python_runner_output($fallbackOutput);
+        if (is_array($fallbackDecoded)) {
+          return $fallbackDecoded;
+        }
+        $rawOutput = trim((string) $fallbackOutput);
+      }
+    }
+  }
+
   return [
     'ok' => false,
-    'error' => 'O runner Python retornou uma resposta invalida.',
-    'raw_output' => trim($output),
+    'error' => $rawOutput !== '' ? $rawOutput : 'O runner Python retornou uma resposta invalida.',
+    'raw_output' => $rawOutput,
   ];
 }
 
@@ -337,6 +512,8 @@ function admin_fetch_recent_runs(PDO $pdo, $type = 'social', $limit = 12) {
     return [];
   }
 }
+
+admin_bootstrap_schema();
 
 function admin_fetch_social_candidates(PDO $pdo, $search = '', $store = '', $limit = 24) {
   $limit = max(6, min((int) $limit, 60));
@@ -369,7 +546,7 @@ function admin_fetch_social_candidates(PDO $pdo, $search = '', $store = '', $lim
       AND c.criado_em >= NOW() - INTERVAL 30 DAY
     WHERE " . implode(' AND ', $where) . "
     GROUP BY o.id
-    ORDER BY o.destaque DESC, clicks DESC, o.atualizado_em DESC, o.id DESC
+    ORDER BY o.atualizado_em DESC, o.criado_em DESC, o.id DESC
     LIMIT {$limit}
   ";
 

@@ -6,6 +6,8 @@ $pdo = db();
 $flash = admin_flash_get();
 $recentRuns = admin_fetch_recent_runs($pdo, 'import', 12);
 $resultPayload = null;
+$adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
+$currentAdminLogin = admin_current_login_name();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   admin_csrf_check_or_die();
@@ -22,13 +24,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $tmpDir = sys_get_temp_dir();
     $target = $tmpDir . DIRECTORY_SEPARATOR . 'zp-import-' . bin2hex(random_bytes(8)) . '-' . basename((string) $_FILES['arquivo']['name']);
     if (!move_uploaded_file($_FILES['arquivo']['tmp_name'], $target)) {
-      admin_flash_set('error', 'Nao foi possivel mover o arquivo enviado.');
+      admin_flash_set('error', 'Não foi possível mover o arquivo enviado.');
       header('Location: /admin/importar.php');
       exit;
     }
 
     try {
-      $resultPayload = admin_run_python_job(['import-file', '--kind', $kind, '--input-file', $target]);
+      $args = ['import-file', '--kind', $kind, '--input-file', $target];
+      if ($currentAdminLogin !== '') {
+        $args[] = '--actor-user-id';
+        $args[] = (string) admin_user_id();
+        $args[] = '--actor-login';
+        $args[] = $currentAdminLogin;
+      }
+      $resultPayload = admin_run_python_job($args);
     } finally {
       @unlink($target);
     }
@@ -44,7 +53,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $target = $tmpDir . DIRECTORY_SEPARATOR . 'zp-links-' . bin2hex(random_bytes(8)) . '.txt';
     file_put_contents($target, $content);
     try {
-      $resultPayload = admin_run_python_job(['import-links', '--input-file', $target]);
+      $args = ['import-links', '--input-file', $target];
+      if ($currentAdminLogin !== '') {
+        $args[] = '--actor-user-id';
+        $args[] = (string) admin_user_id();
+        $args[] = '--actor-login';
+        $args[] = $currentAdminLogin;
+      }
+      $resultPayload = admin_run_python_job($args);
     } finally {
       @unlink($target);
     }
@@ -52,9 +68,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
   if ($resultPayload !== null) {
     if (!empty($resultPayload['ok'])) {
-      admin_flash_set('success', 'Importacao executada pelo Python com sucesso.');
+      admin_flash_set('success', 'Importação executada pelo Python com sucesso.');
     } else {
-      admin_flash_set('error', (string) ($resultPayload['error'] ?? 'Falha ao executar importacao.'));
+      admin_flash_set('error', (string) ($resultPayload['error'] ?? 'Falha ao executar importação.'));
     }
     header('Location: /admin/importar.php');
     exit;
@@ -67,22 +83,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Admin - Importar</title>
+  <link rel="icon" type="image/png" href="/assets/img/logo-zp.png">
   <link rel="stylesheet" href="/assets/css/style.css">
-  <link rel="stylesheet" href="/assets/css/admin.css">
+  <link rel="stylesheet" href="/assets/css/admin.css?v=<?= urlencode($adminCssVersion) ?>">
 </head>
 <body class="admin-page">
 <header>
   <div class="container admin-header">
     <div class="admin-brand">
-      <div class="admin-brand-mark">
-        <img src="/assets/img/logo-zp.png" alt="Zero Preco">
-      </div>
+      <a class="admin-brand-link" href="/admin/ofertas.php">
+        <div class="admin-brand-mark">
+          <img src="/assets/img/logo-zp.png" alt="Zero Preco">
+        </div>
+      </a>
       <div class="admin-brand-copy">
-        <strong>Importacao manual</strong>
-        <span>Arquivo e texto no PHP, processamento no Python.</span>
+        <strong>Zero Preço Admin</strong>
+        <span>Controle ofertas, links e publicações em um só lugar.</span>
       </div>
     </div>
-    <div class="admin-header-actions">
+    <button
+      class="btn admin-menu-toggle"
+      type="button"
+      aria-expanded="false"
+      aria-controls="admin-header-actions"
+      data-admin-menu-toggle
+    >
+      Menu
+    </button>
+    <div class="admin-header-actions" id="admin-header-actions" data-admin-menu>
       <a class="badge" href="/admin/ofertas.php">Ofertas</a>
       <a class="badge" href="/admin/social.php">Social</a>
       <a class="badge" href="/admin/logout.php">Sair</a>
@@ -99,8 +127,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <div class="admin-hero-head">
       <div class="admin-hero-copy">
         <span class="admin-kicker">Importar ofertas</span>
-        <h1>Suba arquivo ou cole links no /admin sem depender do painel Python online.</h1>
-        <p>Esse fluxo usa o mesmo motor de normalizacao e gravacao no banco. O PHP so organiza a interface e chama o runner Python no servidor.</p>
+        <h1>Importar ofertas</h1>
       </div>
     </div>
   </section>
@@ -109,7 +136,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <div class="admin-panel-head">
       <div>
         <h2 class="admin-section-title">Importar por arquivo</h2>
-        <p>Use CSV da Shopee ou TXT com links da Amazon/Mercado Livre.</p>
+        <p>Use CSV da Shopee ou TXT com links da Amazon/Mercado Livre. Os itens novos desta importação ficam marcados com o login <?= h($currentAdminLogin ?: 'atual') ?>.</p>
       </div>
     </div>
     <form method="post" enctype="multipart/form-data">
@@ -139,7 +166,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <div class="admin-panel-head">
       <div>
         <h2 class="admin-section-title">Importar por texto e links</h2>
-        <p>Cole um link por linha. O Python identifica a loja, tenta ler os dados e grava as ofertas validas.</p>
+        <p>Cole um link por linha. O Python identifica a loja, tenta ler os dados e grava as ofertas válidas com autoria do login atual.</p>
       </div>
     </div>
     <form method="post">
@@ -160,12 +187,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <section class="admin-panel">
     <div class="admin-panel-head">
       <div>
-        <h2 class="admin-section-title">Historico de importacoes</h2>
-        <p>Mostra os jobs de importacao registrados no banco.</p>
+        <h2 class="admin-section-title">Histórico de importações</h2>
+        <p>Mostra os jobs de importação registrados no banco.</p>
       </div>
     </div>
     <?php if (!$recentRuns): ?>
-      <div class="admin-empty">Nenhuma importacao registrada ainda.</div>
+      <div class="admin-empty">Nenhuma importação registrada ainda.</div>
     <?php else: ?>
       <div class="admin-offers-grid">
         <?php foreach ($recentRuns as $run): ?>
@@ -186,5 +213,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <?php endif; ?>
   </section>
 </main>
+<script>
+  (function () {
+    var toggle = document.querySelector('[data-admin-menu-toggle]');
+    var menu = document.querySelector('[data-admin-menu]');
+    if (!toggle || !menu) {
+      return;
+    }
+
+    function syncMenuState() {
+      if (window.innerWidth > 640) {
+        document.body.classList.remove('admin-menu-open');
+        toggle.setAttribute('aria-expanded', 'false');
+      }
+    }
+
+    toggle.addEventListener('click', function () {
+      var isOpen = document.body.classList.toggle('admin-menu-open');
+      toggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    });
+
+    window.addEventListener('resize', syncMenuState);
+    syncMenuState();
+  })();
+</script>
 </body>
 </html>

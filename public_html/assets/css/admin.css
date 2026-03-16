@@ -77,6 +77,12 @@ body.admin-page button {
   font: inherit;
 }
 
+body.admin-page *,
+body.admin-page *::before,
+body.admin-page *::after {
+  box-sizing: border-box;
+}
+
 body.admin-page .admin-alert {
   margin: 0 0 14px;
   padding: 12px 14px;
@@ -104,6 +110,7 @@ body.admin-page .admin-header {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
+  flex-wrap: nowrap;
   padding: 18px 0;
 }
 
@@ -111,6 +118,14 @@ body.admin-page .admin-brand {
   display: flex;
   align-items: center;
   gap: 14px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+body.admin-page .admin-brand-link {
+  display: block;
+  color: inherit;
+  text-decoration: none;
 }
 
 body.admin-page .admin-brand-mark {
@@ -150,6 +165,14 @@ body.admin-page .admin-brand-copy span {
   color: rgba(238, 244, 255, 0.74);
   font-size: 0.92rem;
   margin-top: 4px;
+  white-space: nowrap;
+  line-height: 1.35;
+  font-size: 0;
+}
+
+body.admin-page .admin-brand-copy span::after {
+  content: "Controle ofertas, links e publicações em um só lugar.";
+  font-size: 0.92rem;
 }
 
 body.admin-page .admin-header-actions {
@@ -157,6 +180,12 @@ body.admin-page .admin-header-actions {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+body.admin-page .admin-menu-toggle {
+  display: none;
 }
 
 body.admin-page .admin-shell {
@@ -307,6 +336,18 @@ body.admin-page .admin-filter-row {
   margin-top: 16px;
 }
 
+body.admin-page .admin-filter-form {
+  display: grid;
+  gap: 14px;
+}
+
+body.admin-page .admin-search-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1.9fr) minmax(160px, 220px) auto;
+  gap: 14px;
+  align-items: end;
+}
+
 body.admin-page .admin-offers-grid {
   display: grid;
   gap: 16px;
@@ -396,6 +437,13 @@ body.admin-page .admin-status {
 body.admin-page .admin-meta-chip {
   background: rgba(43, 102, 255, 0.08);
   color: #1747b3;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+body.admin-page .admin-meta-chip-soft {
+  background: rgba(16, 33, 58, 0.05);
+  color: #38506f;
 }
 
 body.admin-page .admin-status {
@@ -473,13 +521,37 @@ body.admin-page .admin-field-grid {
   margin-top: 18px;
 }
 
+body.admin-page .admin-field-grid-compact {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.2fr) minmax(120px, 180px) minmax(180px, 220px);
+  align-items: end;
+}
+
 body.admin-page .admin-field {
   display: grid;
   gap: 8px;
+  min-width: 0;
 }
 
 body.admin-page .admin-field.is-full {
   grid-column: 1 / -1;
+}
+
+body.admin-page .admin-field-submit {
+  align-content: end;
+}
+
+body.admin-page .admin-field-submit .btn-link,
+body.admin-page .admin-field-submit .btn,
+body.admin-page .admin-field-submit .badge {
+  width: 100%;
+}
+
+body.admin-page .admin-field-search input {
+  min-width: 0;
+}
+
+body.admin-page .admin-field-compact {
+  min-width: 0;
 }
 
 body.admin-page .admin-field label {
@@ -527,6 +599,12 @@ body.admin-page .admin-form-actions {
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 20px;
+}
+
+body.admin-page .admin-form-actions-inline {
+  margin-top: 0;
+  align-items: center;
+  justify-content: flex-start;
 }
 
 body.admin-page .admin-preview {
@@ -589,6 +667,19 @@ body.admin-page .admin-empty {
     grid-template-columns: 1fr;
   }
 
+  body.admin-page .admin-field-grid-compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  body.admin-page .admin-search-toolbar {
+    grid-template-columns: minmax(0, 1fr) minmax(160px, 220px);
+  }
+
+  body.admin-page .admin-form-actions-inline {
+    grid-column: 1 / -1;
+    margin-top: 2px;
+  }
+
   body.admin-page .admin-offer-thumb,
   body.admin-page .admin-thumb-fallback {
     width: 96px;
@@ -598,5 +689,339 @@ body.admin-page .admin-empty {
   body.admin-page .admin-preview-thumb,
   body.admin-page .admin-preview-thumb.is-empty {
     height: 240px;
+  }
+}
+
+@media (max-width: 640px) {
+  body.admin-page main {
+    padding: 14px 0 34px;
+  }
+
+  body.admin-page .admin-header {
+    position: relative;
+    gap: 14px;
+    padding: 14px 0;
+  }
+
+  body.admin-page .admin-menu-toggle {
+    display: inline-flex;
+    width: 100%;
+    min-height: 42px;
+  }
+
+  body.admin-page .admin-brand {
+    align-items: flex-start;
+  }
+
+  body.admin-page .admin-brand-mark {
+    width: 48px;
+    height: 48px;
+    border-radius: 16px;
+  }
+
+  body.admin-page .admin-brand-copy strong {
+    font-size: 1.08rem;
+  }
+
+  body.admin-page .admin-brand-copy span {
+    font-size: 0;
+  }
+
+  body.admin-page .admin-brand-copy span::after {
+    font-size: 0.85rem;
+  }
+
+  body.admin-page .admin-header-actions {
+    display: none;
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    right: 0;
+    z-index: 30;
+    padding: 10px;
+    border-radius: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: linear-gradient(180deg, rgba(7, 31, 69, 0.98), rgba(14, 55, 124, 0.96));
+    box-shadow: 0 18px 40px rgba(4, 16, 39, 0.35);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  body.admin-page.admin-menu-open .admin-header-actions {
+    display: grid;
+    width: 100%;
+  }
+
+  body.admin-page .admin-header-actions .badge,
+  body.admin-page .admin-header-actions .btn-link,
+  body.admin-page .admin-header-actions .btn {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.92);
+  }
+
+  body.admin-page .admin-hero,
+  body.admin-page .admin-panel,
+  body.admin-page .admin-offer-card,
+  body.admin-page .admin-form,
+  body.admin-page .admin-preview,
+  body.admin-page .admin-stat-card {
+    border-radius: 22px;
+  }
+
+  body.admin-page .admin-hero {
+    padding: 22px 20px;
+  }
+
+  body.admin-page .admin-hero-copy h1 {
+    font-size: clamp(1.75rem, 10vw, 2.55rem);
+    line-height: 0.98;
+  }
+
+  body.admin-page .admin-hero-copy p,
+  body.admin-page .admin-panel-head p,
+  body.admin-page .admin-help,
+  body.admin-page .admin-card-subtitle {
+    font-size: 0.92rem;
+    line-height: 1.5;
+  }
+
+  body.admin-page .admin-panel,
+  body.admin-page .admin-offer-card,
+  body.admin-page .admin-form,
+  body.admin-page .admin-preview {
+    padding: 18px;
+  }
+
+  body.admin-page .admin-filter-form,
+  body.admin-page .admin-field-grid,
+  body.admin-page .admin-form-actions,
+  body.admin-page .admin-filter-row,
+  body.admin-page .admin-hero-actions,
+  body.admin-page .admin-meta-row,
+  body.admin-page .admin-card-actions,
+  body.admin-page .admin-preview-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
+
+  body.admin-page .admin-search-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  body.admin-page .admin-field-grid-compact {
+    grid-template-columns: 1fr;
+  }
+
+  body.admin-page .admin-card-topline {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  body.admin-page .admin-mini-grid {
+    gap: 10px;
+  }
+
+  body.admin-page .admin-card-title {
+    font-size: 1.06rem;
+  }
+
+  body.admin-page .admin-price {
+    font-size: 1.35rem;
+  }
+
+  body.admin-page .admin-meta-row,
+  body.admin-page .admin-card-actions,
+  body.admin-page .admin-filter-row,
+  body.admin-page .admin-form-actions {
+    gap: 8px;
+  }
+
+  body.admin-page .admin-meta-chip,
+  body.admin-page .admin-status {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  body.admin-page .admin-card-actions .btn-link,
+  body.admin-page .admin-card-actions .badge,
+  body.admin-page .admin-card-actions form,
+  body.admin-page .admin-form-actions .btn-link,
+  body.admin-page .admin-form-actions .badge,
+  body.admin-page .admin-form-actions .btn {
+    width: 100%;
+  }
+
+  body.admin-page .admin-card-actions form .badge {
+    width: 100%;
+  }
+
+  body.admin-page .admin-form-actions-inline {
+    margin-top: 0;
+  }
+
+  body.admin-page .admin-field input,
+  body.admin-page .admin-field textarea,
+  body.admin-page .admin-field select {
+    width: 100%;
+    max-width: 100%;
+    padding: 13px 14px;
+    border-radius: 16px;
+  }
+
+  body.admin-page .admin-form-actions .badge,
+  body.admin-page .admin-filter-row .badge,
+  body.admin-page .admin-filter-row .btn,
+  body.admin-page .admin-filter-row .btn-link,
+  body.admin-page .admin-hero-actions .badge,
+  body.admin-page .admin-hero-actions .btn-link,
+  body.admin-page .admin-menu-toggle {
+    width: 100%;
+  }
+
+  body.admin-page .admin-side-card {
+    padding: 12px 14px;
+    border-radius: 16px;
+  }
+
+  body.admin-page .admin-url-box {
+    font-size: 0.88rem;
+  }
+}
+
+@media (max-width: 480px) {
+  body.admin-page .container {
+    width: calc(100% - 16px);
+  }
+
+  body.admin-page .badge,
+  body.admin-page .btn,
+  body.admin-page .btn-link {
+    min-height: 40px;
+    padding: 10px 12px;
+    font-size: 12px;
+  }
+
+  body.admin-page .admin-header-actions {
+    grid-template-columns: 1fr;
+  }
+
+  body.admin-page .admin-header {
+    gap: 10px;
+  }
+
+  body.admin-page .admin-brand {
+    gap: 10px;
+  }
+
+  body.admin-page .admin-brand-copy strong {
+    font-size: 1rem;
+  }
+
+  body.admin-page .admin-brand-copy span {
+    font-size: 0;
+    line-height: 1.35;
+  }
+
+  body.admin-page .admin-brand-copy span::after {
+    font-size: 0.78rem;
+  }
+
+  body.admin-page .admin-hero {
+    padding: 18px 16px;
+  }
+
+  body.admin-page .admin-kicker {
+    margin-bottom: 10px;
+    padding: 7px 11px;
+    font-size: 0.72rem;
+  }
+
+  body.admin-page .admin-stat-card {
+    padding: 16px;
+  }
+
+  body.admin-page .admin-stat-value {
+    font-size: 1.65rem;
+  }
+
+  body.admin-page .admin-panel,
+  body.admin-page .admin-offer-card,
+  body.admin-page .admin-form,
+  body.admin-page .admin-preview {
+    padding: 14px;
+    border-radius: 18px;
+  }
+
+  body.admin-page .admin-section-title {
+    font-size: 1rem;
+  }
+
+  body.admin-page .admin-panel-head p,
+  body.admin-page .admin-stat-foot {
+    font-size: 0.82rem;
+  }
+
+  body.admin-page .admin-field {
+    gap: 6px;
+  }
+
+  body.admin-page .admin-field label {
+    font-size: 0.78rem;
+  }
+
+  body.admin-page .admin-field input,
+  body.admin-page .admin-field textarea,
+  body.admin-page .admin-field select {
+    padding: 11px 12px;
+    border-radius: 14px;
+    font-size: 16px;
+  }
+
+  body.admin-page .admin-filter-form,
+  body.admin-page .admin-filter-row,
+  body.admin-page .admin-form-actions,
+  body.admin-page .admin-card-actions {
+    gap: 6px;
+  }
+
+  body.admin-page .admin-meta-row,
+  body.admin-page .admin-hero-actions {
+    gap: 6px;
+  }
+
+  body.admin-page .admin-filter-row .badge,
+  body.admin-page .admin-form-actions .badge,
+  body.admin-page .admin-form-actions .btn-link,
+  body.admin-page .admin-form-actions .btn {
+    min-height: 38px;
+  }
+
+  body.admin-page .admin-offer-thumb,
+  body.admin-page .admin-thumb-fallback {
+    width: 84px;
+    height: 84px;
+    border-radius: 18px;
+  }
+
+  body.admin-page .admin-card-title {
+    font-size: 0.98rem;
+    line-height: 1.2;
+  }
+
+  body.admin-page .admin-card-subtitle,
+  body.admin-page .admin-help,
+  body.admin-page .admin-url-box {
+    font-size: 0.82rem;
+  }
+
+  body.admin-page .admin-price {
+    font-size: 1.22rem;
+  }
+
+  body.admin-page .admin-preview-thumb,
+  body.admin-page .admin-preview-thumb.is-empty {
+    height: 200px;
   }
 }

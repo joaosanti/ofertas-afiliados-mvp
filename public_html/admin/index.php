@@ -9,17 +9,17 @@ if (admin_is_logged_in()) {
 }
 
 $erro = '';
-$email = trim((string) ($_POST['email'] ?? ''));
+$login = trim((string) ($_POST['login'] ?? ''));
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   admin_csrf_check_or_die();
   $senha = (string) ($_POST['senha'] ?? '');
 
-  if ($email === '' || $senha === '') {
-    $erro = 'Preencha email e senha.';
+  if ($login === '' || $senha === '') {
+    $erro = 'Preencha login e senha.';
   } else {
-    $stmt = db()->prepare('SELECT id, senha_hash FROM admin_users WHERE email = ? LIMIT 1');
-    $stmt->execute([$email]);
+    $stmt = db()->prepare('SELECT id, senha_hash FROM admin_users WHERE email = ? OR username = ? LIMIT 1');
+    $stmt->execute([$login, $login]);
     $user = $stmt->fetch();
 
     if ($user && password_verify($senha, $user['senha_hash'])) {
@@ -66,8 +66,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <form method="post">
       <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
       <div class="field">
-        <label for="email">Email</label>
-        <input id="email" type="email" name="email" value="<?= h($email) ?>" required>
+        <label for="login">Login ou email</label>
+        <input id="login" type="text" name="login" value="<?= h($login) ?>" required>
       </div>
       <div class="field">
         <label for="senha">Senha</label>
