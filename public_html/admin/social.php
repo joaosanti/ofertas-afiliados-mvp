@@ -4,6 +4,8 @@ admin_require_login();
 
 $pdo = db();
 $flash = admin_flash_get();
+$socialPreviewPayload = $_SESSION['admin_social_preview'] ?? null;
+unset($_SESSION['admin_social_preview']);
 $search = trim((string) ($_GET['q'] ?? ''));
 $store = trim((string) ($_GET['loja'] ?? ''));
 $limitDefault = ($search !== '' || $store !== '') ? 30 : 24;
@@ -40,7 +42,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   }
 
   if ($resultPayload !== null) {
+    $_SESSION['admin_social_preview'] = null;
     if (!empty($resultPayload['ok'])) {
+      $resultData = is_array($resultPayload['result'] ?? null) ? $resultPayload['result'] : null;
+      if ($resultData && ($resultData['platform'] ?? '') === 'whatsapp') {
+        $_SESSION['admin_social_preview'] = $resultData;
+      }
       admin_flash_set('success', 'Job enviado para o Python. Confira o resultado no historico abaixo.');
     } else {
       admin_flash_set('error', (string) ($resultPayload['error'] ?? 'Falha ao executar o job Python.'));
@@ -149,6 +156,7 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
             <option value="facebook">Facebook</option>
             <option value="instagram">Instagram</option>
             <option value="both" selected>Facebook + Instagram</option>
+            <option value="whatsapp">WhatsApp</option>
           </select>
         </div>
         <div class="admin-field">
@@ -158,6 +166,7 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
             <option value="reel">Reel</option>
             <option value="feed_story" selected>Feed + Story</option>
             <option value="story">Story</option>
+            <option value="web">WhatsApp Web Local</option>
           </select>
         </div>
         <div class="admin-field">
@@ -218,6 +227,7 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
             <option value="facebook">Facebook</option>
             <option value="instagram">Instagram</option>
             <option value="both" selected>Facebook + Instagram</option>
+            <option value="whatsapp">WhatsApp</option>
           </select>
         </div>
         <div class="admin-field">
@@ -227,9 +237,61 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
             <option value="reel">Reel</option>
             <option value="feed_story" selected>Feed + Story</option>
             <option value="story">Story</option>
+            <option value="web">WhatsApp Web Local</option>
           </select>
         </div>
       </div>
+
+      <?php if (is_array($socialPreviewPayload) && ($socialPreviewPayload['platform'] ?? '') === 'whatsapp' && !empty($socialPreviewPayload['items'])): ?>
+        <div class="admin-side-card" style="margin-top:18px;">
+          <strong>Preview WhatsApp Web Local</strong>
+          <div class="admin-help" style="margin-top:8px;">Imagem e legenda prontas para abrir no WhatsApp Web e enviar manualmente.</div>
+          <?php if (!empty($socialPreviewPayload['stories_deploy_error'])): ?>
+            <div class="admin-alert error" style="margin-top:12px;"><?= h((string) $socialPreviewPayload['stories_deploy_error']) ?></div>
+          <?php endif; ?>
+          <div class="admin-offers-grid" style="margin-top:14px;">
+            <?php foreach ((array) $socialPreviewPayload['items'] as $index => $item): ?>
+              <?php $previewImage = (string) ($item['image_url'] ?? $item['product_image_url'] ?? ''); ?>
+              <?php $fallbackImage = (string) ($item['product_image_url'] ?? ''); ?>
+              <?php $previewMessage = (string) ($item['message'] ?? ''); ?>
+              <article class="admin-offer-card" style="padding:16px;">
+                <div class="admin-offer-layout" style="grid-template-columns: 112px minmax(0, 1fr);">
+                  <div>
+                    <?php if ($previewImage !== ''): ?>
+                      <img
+                        class="admin-offer-thumb"
+                        src="<?= h($previewImage) ?>"
+                        alt="<?= h((string) ($item['title'] ?? 'Preview WhatsApp')) ?>"
+                        <?= $fallbackImage !== '' ? 'onerror="if(this.dataset.fallback){this.onerror=null;this.src=this.dataset.fallback;}" data-fallback="' . h($fallbackImage) . '"' : '' ?>
+                      >
+                    <?php else: ?>
+                      <div class="admin-thumb-fallback">WA</div>
+                    <?php endif; ?>
+                  </div>
+                  <div>
+                    <h3 class="admin-card-title"><?= h((string) ($item['title'] ?? ('Item ' . ($index + 1)))) ?></h3>
+                    <div class="admin-help" style="margin-top:10px; white-space:pre-wrap;"><?= h($previewMessage) ?></div>
+                    <div class="admin-card-actions" style="margin-top:12px;">
+                      <?php if (!empty($item['web_share_url'])): ?>
+                        <a class="btn-link primary" href="<?= h((string) $item['web_share_url']) ?>" target="_blank" rel="noopener">Abrir no WhatsApp Web</a>
+                      <?php endif; ?>
+                      <?php if ($previewImage !== ''): ?>
+                        <button class="btn-link" type="button" data-copy-image="<?= h($previewImage) ?>">Copiar imagem</button>
+                      <?php endif; ?>
+                      <?php if ($previewMessage !== ''): ?>
+                        <button class="btn-link" type="button" data-copy-text="<?= h($previewMessage) ?>">Copiar legenda</button>
+                      <?php endif; ?>
+                      <?php if (!empty($item['cta_url'])): ?>
+                        <a class="btn-link" href="<?= h((string) $item['cta_url']) ?>" target="_blank" rel="noopener sponsored nofollow">Link afiliado</a>
+                      <?php endif; ?>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            <?php endforeach; ?>
+          </div>
+        </div>
+      <?php endif; ?>
 
       <?php if (!$offers): ?>
         <div class="admin-empty" style="margin-top:18px;">Nenhuma oferta elegível para publicação com estes filtros.</div>
@@ -279,7 +341,7 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
           <?php endforeach; ?>
         </div>
         <div class="admin-form-actions" style="margin-top:18px;">
-          <button class="btn" type="submit">Publicar selecionadas</button>
+          <button class="btn" type="submit" id="social-manual-submit">Publicar selecionadas</button>
         </div>
       <?php endif; ?>
     </form>
@@ -342,6 +404,130 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
 
     window.addEventListener('resize', syncMenuState);
     syncMenuState();
+  })();
+
+  (function () {
+    var imageButtons = document.querySelectorAll('[data-copy-image]');
+    imageButtons.forEach(function (button) {
+      button.addEventListener('click', async function () {
+        var imageUrl = button.getAttribute('data-copy-image') || '';
+        if (!imageUrl) {
+          return;
+        }
+
+        var original = button.textContent;
+        try {
+          if (!navigator.clipboard || !window.ClipboardItem) {
+            throw new Error('clipboard-image-unavailable');
+          }
+
+          var response = await fetch(imageUrl, { credentials: 'same-origin' });
+          if (!response.ok) {
+            throw new Error('image-fetch-failed');
+          }
+
+          var blob = await response.blob();
+          var clipboardBlob = blob;
+          if (blob.type !== 'image/png') {
+            clipboardBlob = await new Promise(function (resolve, reject) {
+              var image = new Image();
+              image.crossOrigin = 'anonymous';
+              image.onload = function () {
+                var canvas = document.createElement('canvas');
+                canvas.width = image.naturalWidth || image.width;
+                canvas.height = image.naturalHeight || image.height;
+                var context = canvas.getContext('2d');
+                if (!context) {
+                  reject(new Error('canvas-context-unavailable'));
+                  return;
+                }
+                context.drawImage(image, 0, 0);
+                canvas.toBlob(function (pngBlob) {
+                  if (!pngBlob) {
+                    reject(new Error('png-conversion-failed'));
+                    return;
+                  }
+                  resolve(pngBlob);
+                }, 'image/png');
+              };
+              image.onerror = function () {
+                reject(new Error('image-load-failed'));
+              };
+              image.src = imageUrl;
+            });
+          }
+
+          await navigator.clipboard.write([
+            new ClipboardItem({
+              'image/png': clipboardBlob
+            })
+          ]);
+
+          button.textContent = 'Imagem copiada';
+        } catch (error) {
+          button.textContent = 'Nao copiou';
+        }
+
+        window.setTimeout(function () {
+          button.textContent = original;
+        }, 1600);
+      });
+    });
+  })();
+
+  (function () {
+    var copyButtons = document.querySelectorAll('[data-copy-text]');
+    if (!copyButtons.length || !navigator.clipboard || !navigator.clipboard.writeText) {
+      return;
+    }
+
+    copyButtons.forEach(function (button) {
+      button.addEventListener('click', function () {
+        var text = button.getAttribute('data-copy-text') || '';
+        if (!text) {
+          return;
+        }
+
+        navigator.clipboard.writeText(text).then(function () {
+          var original = button.textContent;
+          button.textContent = 'Copiado';
+          window.setTimeout(function () {
+            button.textContent = original;
+          }, 1400);
+        });
+      });
+    });
+  })();
+
+  (function () {
+    var platform = document.getElementById('platform_manual');
+    var mode = document.getElementById('mode_manual');
+    var submit = document.getElementById('social-manual-submit');
+    if (!platform || !mode || !submit) {
+      return;
+    }
+
+    function syncManualSubmitLabel() {
+      var isWhatsappWeb = platform.value === 'whatsapp' && mode.value === 'web';
+      submit.textContent = isWhatsappWeb ? 'Preparar' : 'Publicar selecionadas';
+    }
+
+    function syncManualMode() {
+      if (platform.value === 'whatsapp') {
+        mode.value = 'web';
+      } else if (mode.value === 'web') {
+        mode.value = 'feed_story';
+      }
+    }
+
+    platform.addEventListener('change', function () {
+      syncManualMode();
+      syncManualSubmitLabel();
+    });
+    platform.addEventListener('change', syncManualSubmitLabel);
+    mode.addEventListener('change', syncManualSubmitLabel);
+    syncManualMode();
+    syncManualSubmitLabel();
   })();
 </script>
 </body>

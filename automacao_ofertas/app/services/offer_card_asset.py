@@ -11,6 +11,21 @@ from app.services.sftp_deploy import ensure_stories_dir, story_public_url
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ZERO_PRECO_LOGO = PROJECT_ROOT / "public_html" / "assets" / "img" / "logo-zp.png"
+ZERO_PRECO_LOGO_URL = "https://zeropreco.com.br/assets/img/logo-zp.png"
+
+
+def _browser_headers() -> dict[str, str]:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/132.0.0.0 Safari/537.36"
+        ),
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
 
 
 def _slugify(value: str) -> str:
@@ -57,9 +72,11 @@ def _contain_remote_product_image(url: str, size: tuple[int, int]) -> Image.Imag
     if not image_url:
         return None
     try:
-        with httpx.Client(timeout=25, follow_redirects=True) as client:
+        with httpx.Client(timeout=25, follow_redirects=True, headers=_browser_headers()) as client:
             response = client.get(image_url)
             response.raise_for_status()
+        if not response.content:
+            return None
         with Image.open(BytesIO(response.content)) as source:
             converted = source.convert("RGB")
             contained = ImageOps.contain(converted, size, method=Image.Resampling.LANCZOS)
@@ -68,6 +85,28 @@ def _contain_remote_product_image(url: str, size: tuple[int, int]) -> Image.Imag
             offset_y = (size[1] - contained.height) // 2
             canvas.paste(contained, (offset_x, offset_y))
             return canvas
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _load_zero_preco_logo(size: tuple[int, int]) -> Image.Image | None:
+    try:
+        if ZERO_PRECO_LOGO.exists():
+            with Image.open(ZERO_PRECO_LOGO) as source:
+                logo = source.convert("RGBA")
+                logo.thumbnail(size, Image.Resampling.LANCZOS)
+                return logo
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        with httpx.Client(timeout=20, follow_redirects=True) as client:
+            response = client.get(ZERO_PRECO_LOGO_URL)
+            response.raise_for_status()
+        with Image.open(BytesIO(response.content)) as source:
+            logo = source.convert("RGBA")
+            logo.thumbnail(size, Image.Resampling.LANCZOS)
+            return logo
     except Exception:  # noqa: BLE001
         return None
 
@@ -83,7 +122,8 @@ def generate_offer_square_card_asset(offer: dict[str, Any], *, suffix: str = "ca
     draw.rounded_rectangle((42, 36, 1038, 1040), radius=40, fill="#ffffff")
     draw.rounded_rectangle((42, 36, 1038, 162), radius=40, fill="#4d1d95")
     draw.rectangle((42, 118, 1038, 162), fill="#4d1d95")
-    draw.rounded_rectangle((662, 52, 980, 146), radius=46, fill="#ffcb19")
+    site_badge_box = (662, 52, 980, 146)
+    draw.rounded_rectangle(site_badge_box, radius=46, fill="#ffcb19")
 
     brand_font = _load_font(42, bold=True)
     title_font = _load_font(36, bold=True)
@@ -92,19 +132,21 @@ def generate_offer_square_card_asset(offer: dict[str, Any], *, suffix: str = "ca
     site_font = _load_font(28, bold=True)
 
     logo_drawn = False
-    if ZERO_PRECO_LOGO.exists():
-        try:
-            logo = Image.open(ZERO_PRECO_LOGO).convert("RGBA")
-            logo.thumbnail((248, 90))
-            image.paste(logo, (78, 54), logo)
-            logo_drawn = True
-        except Exception:
-            logo_drawn = False
+    logo = _load_zero_preco_logo((210, 88))
+    if logo is not None:
+        image.paste(logo, (76, 48), logo)
+        logo_drawn = True
 
     if not logo_drawn:
         draw.text((92, 68), "ZERO PRECO", font=brand_font, fill="#ffffff")
 
-    draw.text((706, 84), "zeropreco.com.br", font=site_font, fill="#4d1d95")
+    site_label = "zeropreco.com.br"
+    site_bbox = draw.textbbox((0, 0), site_label, font=site_font)
+    site_text_width = site_bbox[2] - site_bbox[0]
+    site_text_height = site_bbox[3] - site_bbox[1]
+    site_text_x = site_badge_box[0] + ((site_badge_box[2] - site_badge_box[0] - site_text_width) / 2)
+    site_text_y = site_badge_box[1] + ((site_badge_box[3] - site_badge_box[1] - site_text_height) / 2) - 4
+    draw.text((site_text_x, site_text_y), site_label, font=site_font, fill="#4d1d95")
 
     product_image = _contain_remote_product_image(offer.get("imagem_url"), (860, 650))
     if product_image is not None:

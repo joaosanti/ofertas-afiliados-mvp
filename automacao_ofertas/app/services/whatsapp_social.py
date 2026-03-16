@@ -6,6 +6,7 @@ import httpx
 
 from app.services.offer_card_asset import generate_offer_square_card_asset
 from app.services.social_meta import build_meta_post_previews, _store_label
+from app.services.sftp_deploy import deploy_stories_via_sftp
 
 
 def whatsapp_settings_snapshot() -> dict[str, Any]:
@@ -39,6 +40,7 @@ def prepare_whatsapp_group_batch(db, limit: int = 5, offer_ids: list[int] | None
     previews = build_meta_post_previews(db, limit=limit, offer_ids=offer_ids, include_story_assets=False)
     settings = whatsapp_settings_snapshot()
     items = []
+    generated_filenames: list[str] = []
 
     for item in previews:
         offer_payload = {
@@ -54,6 +56,9 @@ def prepare_whatsapp_group_batch(db, limit: int = 5, offer_ids: list[int] | None
             "cupom": item.get("coupon"),
         }
         card_asset = generate_whatsapp_card_asset(offer_payload)
+        generated_filename = card_asset.get("filename")
+        if generated_filename:
+            generated_filenames.append(generated_filename)
         items.append(
             {
                 "offer_id": item["offer_id"],
@@ -64,7 +69,7 @@ def prepare_whatsapp_group_batch(db, limit: int = 5, offer_ids: list[int] | None
                 "price": item.get("price"),
                 "old_price": item.get("old_price"),
                 "coupon": item.get("coupon"),
-                "generated_filename": card_asset.get("filename"),
+                "generated_filename": generated_filename,
                 "image_url": card_asset["public_url"] if card_asset.get("public_url") else item["image_url"],
                 "product_image_url": item["image_url"],
                 "cta_url": item["cta_url"],
@@ -79,6 +84,14 @@ def prepare_whatsapp_group_batch(db, limit: int = 5, offer_ids: list[int] | None
             raise ValueError("Nenhuma oferta selecionada ficou elegivel para preparar o lote do WhatsApp.")
         raise ValueError("Nao ha ofertas elegiveis para preparar o lote do WhatsApp.")
 
+    deploy_result: dict[str, Any] | None = None
+    deploy_error = ""
+    if generated_filenames:
+        try:
+            deploy_result = deploy_stories_via_sftp(only_files=generated_filenames)
+        except Exception as exc:  # noqa: BLE001
+            deploy_error = str(exc)
+
     return {
         "ok": True,
         "platform": "whatsapp",
@@ -90,6 +103,8 @@ def prepare_whatsapp_group_batch(db, limit: int = 5, offer_ids: list[int] | None
         "connector_ready": bool(settings["api_base_url"] and settings["api_token_configured"] and settings["group_target"]),
         "errors": [],
         "error_summary": "",
+        "stories_deploy": deploy_result,
+        "stories_deploy_error": deploy_error,
     }
 
 

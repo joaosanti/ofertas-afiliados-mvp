@@ -532,8 +532,24 @@ function App() {
     ) {
       return socialRunPreview.items.slice(0, 3);
     }
+    if (socialSplit.platform === "whatsapp" && socialPinnedQueue.length) {
+      return socialPinnedQueue.slice(0, 3).map((item) => ({
+        offer_id: item.offer_id,
+        slug: item.slug,
+        title: item.title,
+        store: item.store,
+        category: item.category,
+        price: item.price,
+        old_price: item.old_price,
+        coupon: item.coupon,
+        image_url: item.image_url,
+        product_image_url: item.image_url,
+        cta_url: item.cta_url || item.url_afiliado || item.offer_url,
+        offer_url: item.offer_url,
+      }));
+    }
     return [];
-  }, [socialQueue, socialCheckedIds, socialRunPreview, socialSplit.mode]);
+  }, [socialPinnedQueue, socialRunPreview, socialSplit.mode, socialSplit.platform]);
   const whatsappBatchText = useMemo(
     () => whatsappPreviewItems.map((item, index) => `Mensagem ${index + 1}\n${whatsappCaptionForItem(item)}`).join("\n\n--------------------\n\n"),
     [whatsappPreviewItems]
