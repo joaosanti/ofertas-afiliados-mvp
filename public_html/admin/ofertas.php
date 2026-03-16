@@ -131,6 +131,8 @@ $invalidMeliCount = (int) $pdo->query("
     </div>
     <div class="admin-header-actions">
       <a class="badge" href="/admin/oferta_editar.php">+ Nova oferta</a>
+      <a class="badge" href="/admin/importar.php">Importar</a>
+      <a class="badge" href="/admin/social.php">Social</a>
       <a class="badge" href="/admin/auditoria_links.php">Auditoria de links</a>
       <a class="badge" href="/admin/ml_corrigir_lote.php">Corrigir ML em lote</a>
       <a class="badge" href="/">Ver site</a>

@@ -40,6 +40,7 @@ from app.services.store_maintenance import (
     repair_shopee_affiliate_links,
 )
 from app.services.sftp_deploy import (
+    deploy_automation_backend_via_sftp,
     deploy_public_site_via_sftp,
     deploy_stories_via_sftp,
     ensure_stories_dir,
@@ -887,10 +888,19 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
         mode = (mode or "feed").strip().lower()
     limit = max(1, min(limit, 20))
     db = SessionLocal()
-    selected_offer_ids = [int(item) for item in (offer_ids or []) if str(item).strip()]
+    requested_offer_ids = [int(item) for item in (offer_ids or []) if str(item).strip()]
+    selected_offer_ids = list(requested_offer_ids)
     if selected_offer_ids and platform in {"facebook", "instagram", "both", "facebook_instagram"}:
         selected_offer_ids = _exclude_recent_social_offer_ids(db, selected_offer_ids)
-    if not selected_offer_ids and platform in {"facebook", "instagram", "both", "facebook_instagram"}:
+        if not selected_offer_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "As ofertas selecionadas manualmente foram bloqueadas por publicacao recente. "
+                    "Escolha outro item ou aguarde o intervalo de repeticao."
+                ),
+            )
+    if not requested_offer_ids and platform in {"facebook", "instagram", "both", "facebook_instagram"}:
         selected_offer_ids = _pick_auto_social_offer_ids(db, platform, mode, limit)
     if selected_offer_ids:
         limit = min(limit, len(selected_offer_ids))
@@ -1865,6 +1875,27 @@ def dashboard_api_offer_update(offer_id: int, payload: DashboardOfferUpdatePaylo
         db.close()
 
 
+def execute_deploy_automation() -> dict:
+    db = SessionLocal()
+    run_id = record_execution_start(
+        db,
+        tipo="deploy",
+        canal="sftp",
+        modo="automacao_ofertas",
+        requested_count=0,
+        payload={"target": "automacao_ofertas"},
+    )
+    try:
+        result = deploy_automation_backend_via_sftp()
+        record_execution_success(db, run_id, processed_count=int(result.get("count") or 0), result=result)
+        return {"run_id": run_id} | result
+    except Exception as exc:  # noqa: BLE001
+        record_execution_error(db, run_id, error_message=str(exc))
+        raise
+    finally:
+        db.close()
+
+
 @app.delete("/dashboard/api/offers/{offer_id}")
 def dashboard_api_offer_delete(offer_id: int, _: str = Depends(require_manager_auth)):
     db = SessionLocal()
@@ -2242,6 +2273,18 @@ def dashboard_api_deploy_stories(payload: DashboardDeployPayload, _: str = Depen
 def dashboard_api_deploy_site(_: str = Depends(require_manager_auth)):
     try:
         return execute_deploy_site()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except paramiko.SSHException as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except OSError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/dashboard/api/deploy/automation")
+def dashboard_api_deploy_automation(_: str = Depends(require_manager_auth)):
+    try:
+        return execute_deploy_automation()
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except paramiko.SSHException as e:

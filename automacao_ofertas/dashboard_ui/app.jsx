@@ -384,7 +384,7 @@ function App() {
   const [manualLinkLoading, setManualLinkLoading] = useState(false);
   const [mlRelinkLoading, setMlRelinkLoading] = useState(false);
   const [socialLoading, setSocialLoading] = useState(false);
-  const [runLoading, setRunLoading] = useState({ import: false, manualLinks: false, social: false, batch: false, deployStories: false, deploySite: false });
+  const [runLoading, setRunLoading] = useState({ import: false, manualLinks: false, social: false, batch: false, deployStories: false, deploySite: false, deployAutomation: false });
   const [jobRunLoading, setJobRunLoading] = useState({ import: false, social: false, story: false });
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [nowTs, setNowTs] = useState(Date.now());
@@ -1407,6 +1407,21 @@ function App() {
     }
   }
 
+  async function handleDeployAutomation() {
+    setRunLoading((state) => ({ ...state, deployAutomation: true }));
+    try {
+      const data = await fetchJson("/dashboard/api/deploy/automation", {
+        method: "POST",
+      });
+      setToast({ type: "success", message: `Atualizar automacao concluido: ${data.count || 0} arquivo(s) enviados ao DreamHost.` });
+      await loadSnapshot();
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao atualizar automacao: ${error.message}` });
+    } finally {
+      setRunLoading((state) => ({ ...state, deployAutomation: false }));
+    }
+  }
+
   const overview = snapshot?.overview || {};
   const charts = snapshot?.charts || {};
   const importStatus = snapshot?.status?.imports || [];
@@ -1789,6 +1804,9 @@ function App() {
                 <p className="panel-subtitle">Troque usuário, senha, Meta e automações sem editar o .env na mão.</p>
               </div>
               <div className="provider-actions">
+                <button className="button is-secondary" onClick={handleDeployAutomation} disabled={runLoading.deployAutomation}>
+                  {runLoading.deployAutomation ? "Publicando automacao..." : "Publicar automacao Python"}
+                </button>
                 <button className="button is-secondary" onClick={handleDeploySite} disabled={runLoading.deploySite}>
                   {runLoading.deploySite ? "Publicando site..." : "Publicar arquivos do site"}
                 </button>

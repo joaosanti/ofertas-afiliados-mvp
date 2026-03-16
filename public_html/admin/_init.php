@@ -256,3 +256,129 @@ function admin_enforce_featured_limit(PDO $pdo, $store, $keepOfferId = 0) {
   $disableStmt->execute($idsToDisable);
 }
 
+function admin_shell_exec_enabled() {
+  if (!function_exists('shell_exec')) {
+    return false;
+  }
+
+  $disabled = array_filter(array_map('trim', explode(',', (string) ini_get('disable_functions'))));
+  return !in_array('shell_exec', $disabled, true);
+}
+
+function admin_python_job_enabled() {
+  return defined('AUTOMACAO_PYTHON_BIN')
+    && defined('AUTOMACAO_PYTHON_SCRIPT')
+    && AUTOMACAO_PYTHON_BIN !== ''
+    && AUTOMACAO_PYTHON_SCRIPT !== '';
+}
+
+function admin_run_python_job(array $args) {
+  if (!admin_python_job_enabled()) {
+    return [
+      'ok' => false,
+      'error' => 'AUTOMACAO_PYTHON_BIN ou AUTOMACAO_PYTHON_SCRIPT nao configurados.',
+    ];
+  }
+
+  if (!admin_shell_exec_enabled()) {
+    return [
+      'ok' => false,
+      'error' => 'shell_exec desabilitado no PHP. Use cron/SSH no servidor.',
+    ];
+  }
+
+  $scriptPath = (string) AUTOMACAO_PYTHON_SCRIPT;
+  if (!is_file($scriptPath)) {
+    return [
+      'ok' => false,
+      'error' => 'Script Python do runner nao encontrado no servidor.',
+    ];
+  }
+
+  $parts = [escapeshellarg((string) AUTOMACAO_PYTHON_BIN), escapeshellarg($scriptPath)];
+  foreach ($args as $arg) {
+    $parts[] = escapeshellarg((string) $arg);
+  }
+  $command = implode(' ', $parts) . ' 2>&1';
+  $output = shell_exec($command);
+
+  if ($output === null) {
+    return [
+      'ok' => false,
+      'error' => 'Falha ao executar o comando Python no servidor.',
+    ];
+  }
+
+  $decoded = json_decode(trim($output), true);
+  if (is_array($decoded)) {
+    return $decoded;
+  }
+
+  return [
+    'ok' => false,
+    'error' => 'O runner Python retornou uma resposta invalida.',
+    'raw_output' => trim($output),
+  ];
+}
+
+function admin_fetch_recent_runs(PDO $pdo, $type = 'social', $limit = 12) {
+  $limit = max(1, min((int) $limit, 50));
+  try {
+    $stmt = $pdo->prepare("
+      SELECT id, tipo, provider, canal, modo, status, requested_count, processed_count, error_message, criado_em, finalizado_em
+      FROM automacao_execucoes
+      WHERE tipo = ?
+      ORDER BY criado_em DESC, id DESC
+      LIMIT {$limit}
+    ");
+    $stmt->execute([(string) $type]);
+    return $stmt->fetchAll();
+  } catch (Throwable $e) {
+    return [];
+  }
+}
+
+function admin_fetch_social_candidates(PDO $pdo, $search = '', $store = '', $limit = 24) {
+  $limit = max(6, min((int) $limit, 60));
+  $where = [
+    'ativo = 1',
+    '(expira_em IS NULL OR expira_em > NOW())',
+    "imagem_url IS NOT NULL",
+    "imagem_url <> ''",
+  ];
+  $params = [];
+
+  if ($store !== '') {
+    $where[] = 'loja = ?';
+    $params[] = $store;
+  }
+
+  if ($search !== '') {
+    $like = '%' . $search . '%';
+    $where[] = '(titulo LIKE ? OR categoria LIKE ? OR tags LIKE ? OR loja LIKE ?)';
+    array_push($params, $like, $like, $like, $like);
+  }
+
+  $sql = "
+    SELECT
+      o.*,
+      COUNT(c.id) AS clicks
+    FROM ofertas o
+    LEFT JOIN cliques c
+      ON c.oferta_id = o.id
+      AND c.criado_em >= NOW() - INTERVAL 30 DAY
+    WHERE " . implode(' AND ', $where) . "
+    GROUP BY o.id
+    ORDER BY o.destaque DESC, clicks DESC, o.atualizado_em DESC, o.id DESC
+    LIMIT {$limit}
+  ";
+
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($params);
+  $rows = $stmt->fetchAll();
+
+  return array_values(array_filter($rows, static function ($row) {
+    return admin_affiliate_audit($row['loja'] ?? '', $row['url_afiliado'] ?? '')['severity'] === 'ok';
+  }));
+}
+

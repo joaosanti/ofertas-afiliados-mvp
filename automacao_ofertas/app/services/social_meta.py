@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from sqlalchemy import bindparam, text
 
 from app.services.offer_card_asset import generate_offer_square_card_asset
-from app.services.sftp_deploy import ensure_stories_dir, story_public_url
+from app.services.sftp_deploy import deploy_stories_via_sftp, ensure_stories_dir, story_public_url
 
 
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
@@ -582,6 +582,9 @@ def _load_font(size: int, bold: bool = False):
                 r"C:\Windows\Fonts\arialbd.ttf",
                 r"C:\Windows\Fonts\segoeuib.ttf",
                 r"C:\Windows\Fonts\calibrib.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
             ]
         )
     candidates.extend(
@@ -589,6 +592,9 @@ def _load_font(size: int, bold: bool = False):
             r"C:\Windows\Fonts\arial.ttf",
             r"C:\Windows\Fonts\segoeui.ttf",
             r"C:\Windows\Fonts\calibri.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         ]
     )
     for candidate in candidates:

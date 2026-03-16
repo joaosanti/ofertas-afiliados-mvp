@@ -11,6 +11,7 @@ import paramiko
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PUBLIC_HTML_DIR = PROJECT_ROOT / "public_html"
+AUTOMATION_DIR = PROJECT_ROOT / "automacao_ofertas"
 STORIES_DIR = PUBLIC_HTML_DIR / "stories"
 
 
@@ -30,6 +31,10 @@ class SftpDeployConfig:
     @property
     def stories_public_url(self) -> str:
         return self.stories_public_base_url.rstrip("/")
+
+    @property
+    def automation_remote_dir(self) -> str:
+        return posixpath.join(self.remote_root, "automacao_ofertas").rstrip("/")
 
 
 def _default_site_base_url() -> str:
@@ -323,6 +328,38 @@ def deploy_public_site_via_sftp(
             "remote_dir": config.remote_root,
             "count": len(uploaded),
             "ignored": ["stories"],
+            "items": uploaded,
+        }
+    finally:
+        client.close()
+        transport.close()
+
+
+def deploy_automation_backend_via_sftp(
+    *,
+    sftp_factory: Callable[[SftpDeployConfig], tuple[Any, Any]] | None = None,
+) -> dict[str, Any]:
+    config = load_sftp_deploy_config()
+    if not AUTOMATION_DIR.exists():
+        raise ValueError("Diretorio automacao_ofertas nao encontrado no projeto.")
+
+    factory = sftp_factory or _connect_sftp
+    transport, client = factory(config)
+    try:
+        _ensure_remote_dir(client, config.automation_remote_dir)
+        uploaded = _upload_directory(
+            client,
+            AUTOMATION_DIR,
+            config.automation_remote_dir,
+            ignore_prefixes=(".venv", "__pycache__", "dashboard_ui/node_modules"),
+        )
+        return {
+            "ok": True,
+            "target": "automacao_ofertas",
+            "host": config.host,
+            "remote_dir": config.automation_remote_dir,
+            "count": len(uploaded),
+            "ignored": [".venv", "__pycache__", "dashboard_ui/node_modules"],
             "items": uploaded,
         }
     finally:
