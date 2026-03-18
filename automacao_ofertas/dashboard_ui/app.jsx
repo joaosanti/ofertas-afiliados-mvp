@@ -53,6 +53,7 @@ const NAV_ITEMS = [
   { id: "configuracoes", label: "Configurações", note: "Automação, credenciais, horários e parâmetros do manager." },
   { id: "importadores", label: "Importadores", note: "Prévia, importação por página, arquivo e links manuais." },
   { id: "social", label: "Execução social", note: "Fila de Facebook e Instagram com seleção manual." },
+  { id: "youtube_cortes", label: "Cortes YouTube", note: "Intake inicial para podcasts, briefing e pauta de cortes." },
   { id: "analytics", label: "Analytics", note: "Cliques, categorias, lojas e produtos mais fortes." },
   { id: "execucoes", label: "Execuções", note: "Histórico operacional consolidado do backend Python." },
 ];
@@ -168,23 +169,65 @@ function humanizeSocialError(message) {
   return text;
 }
 
-function whatsappMessageForItem(item) {
-  const lines = [String(item?.title || "").trim()];
-  if (item?.coupon) lines.push(`Cupom: ${item.coupon}`);
-  lines.push(`Preco: ${fmtWhatsappMoney(item?.price)}`);
-  lines.push(`Loja: ${item?.store || "Loja"}`);
-  lines.push(`Link: ${item?.cta_url || item?.offer_url || "#"}`);
-  return lines.join("\n");
+function commerceMetaLines(item) {
+  const lines = [];
+  const discount = Number(item?.discount_percent || item?.desconto_percentual || 0);
+  const pixPrice = Number(item?.pix_price ?? item?.preco_pix ?? 0);
+  const otherPrice = Number(item?.other_price ?? item?.preco_outros_meios ?? 0);
+  const installments = String(item?.installments || item?.parcelas_texto || "").trim();
+  const shipping = String(item?.shipping || item?.frete_texto || "").trim();
+  const promotion = String(item?.promotion_text || item?.promocao_texto || "").trim();
+  const rating = Number(item?.rating ?? item?.avaliacao_nota ?? 0);
+  const ratingCount = Number(item?.rating_count ?? item?.avaliacao_total ?? 0);
+
+  if (discount > 0) lines.push(`${discount}% OFF`);
+  if (pixPrice > 0) lines.push(`No Pix: ${fmtWhatsappMoney(pixPrice)}`);
+  if (otherPrice > 0) lines.push(`Outros meios: ${fmtWhatsappMoney(otherPrice)}`);
+  if (installments) lines.push(`Parcelamento: ${installments}`);
+  if (shipping) lines.push(`Frete: ${shipping}`);
+  if (rating > 0 && ratingCount > 0) lines.push(`Avaliacao: ${rating.toFixed(1).replace('.', ',')}/5 (${fmtInt(ratingCount)})`);
+  else if (rating > 0) lines.push(`Avaliacao: ${rating.toFixed(1).replace('.', ',')}/5`);
+  if (promotion) lines.push(`Promocao: ${promotion}`);
+  return lines;
+}
+
+function commerceMetaChips(item) {
+  return commerceMetaLines(item).map((line) => (line.length > 56 ? `${line.slice(0, 55)}...` : line));
 }
 
 function whatsappCaptionForItem(item) {
-  const lines = [String(item?.title || "").trim()];
-  if (item?.store) lines.push(item.store);
-  lines.push(`👉 ${item?.cta_url || item?.offer_url || "#"}`);
-  if (item?.coupon) lines.push(`🏷 Cupom: ${item.coupon}`);
-  if (Number(item?.price || 0) > 0) lines.push(`💰 ${fmtWhatsappMoney(item?.price)}`);
-  if (Number(item?.old_price || 0) > 0) lines.push(`De: ${fmtWhatsappMoney(item?.old_price)}`);
-  return lines.join("\n");
+    const lines = [];
+
+    const title = String(item?.title || "").trim();
+    const store = String(item?.store || "").trim();
+    const coupon = String(item?.coupon || "").trim();
+    const link = String(item?.cta_url || item?.offer_url || "").trim();
+
+    if (title) lines.push(title);
+    if (store) lines.push(store);
+
+    if (Number(item?.price || 0) > 0) {
+        lines.push(`Preco: ${fmtWhatsappMoney(item.price)}`);
+    }
+
+    if (Number(item?.old_price || 0) > 0) {
+        lines.push(`De: ${fmtWhatsappMoney(item.old_price)}`);
+    }
+
+    if (coupon) {
+        lines.push(`Cupom: ${coupon}`);
+    }
+
+    const metaLines = commerceMetaLines(item);
+    if (Array.isArray(metaLines) && metaLines.length) {
+        lines.push(...metaLines.filter(l => String(l || "").trim()));
+    }
+
+    if (link) {
+        lines.push(`Link: ${link}`);
+    }
+
+    return lines.join("\n");
 }
 
 function whatsappPreviewImageUrl(item) {
@@ -408,6 +451,9 @@ function App() {
   const [productQuery, setProductQuery] = useState("");
   const [productResults, setProductResults] = useState([]);
   const [productsLoading, setProductsLoading] = useState(false);
+  const [productPage, setProductPage] = useState(1);
+  const [productTotalPages, setProductTotalPages] = useState(1);
+  const [productTotalCount, setProductTotalCount] = useState(0);
   const [productSaving, setProductSaving] = useState(false);
   const [productDeleting, setProductDeleting] = useState(false);
   const [selectedProductId, setSelectedProductId] = useState(null);
@@ -449,6 +495,16 @@ function App() {
   const [socialForm, setSocialForm] = useState({ selected: "both:feed_story", limit: 120, query: "" });
   const [socialFilters, setSocialFilters] = useState({ store: "all", category: "all" });
   const [activeSection, setActiveSection] = useState("painel");
+  const [youtubeCutUrl, setYoutubeCutUrl] = useState("");
+  const [youtubeCutMode, setYoutubeCutMode] = useState("short");
+  const [youtubeShortSelectionStrategy, setYoutubeShortSelectionStrategy] = useState("openai_heuristica");
+  const [youtubeCutAnalysis, setYoutubeCutAnalysis] = useState(null);
+  const [youtubeCutLoading, setYoutubeCutLoading] = useState(false);
+  const [youtubeCutsPhase2, setYoutubeCutsPhase2] = useState(null);
+  const [youtubeCutsPhase2Loading, setYoutubeCutsPhase2Loading] = useState(false);
+  const [youtubeOauthStatus, setYoutubeOauthStatus] = useState(null);
+  const [youtubeOauthLoading, setYoutubeOauthLoading] = useState(false);
+  const [youtubePublishingCutId, setYoutubePublishingCutId] = useState(null);
   const [whatsappGroups, setWhatsappGroups] = useState([]);
   const [whatsappGroupsLoading, setWhatsappGroupsLoading] = useState(false);
   const [settingsForm, setSettingsForm] = useState({
@@ -477,6 +533,11 @@ function App() {
     sftp_password: "",
     sftp_remote_path: "",
     stories_public_base_url: "",
+    youtube_client_id: "",
+    youtube_client_secret: "",
+    youtube_redirect_uri: "",
+    ytdlp_cookies_from_browser: "",
+    ytdlp_cookies_file: "",
   });
 
   const socialSplit = useMemo(() => {
@@ -523,6 +584,10 @@ function App() {
     () => socialSelectedItems.filter((item) => item && socialCheckedIds.includes(item.offer_id)),
     [socialSelectedItems, socialCheckedIds]
   );
+  const socialVisibleQueue = useMemo(() => {
+    const selectedIds = new Set(socialPinnedQueue.map((item) => item.offer_id));
+    return [...socialPinnedQueue, ...socialQueue.filter((item) => !selectedIds.has(item.offer_id))];
+  }, [socialPinnedQueue, socialQueue]);
   const whatsappPreviewItems = useMemo(() => {
     if (
       socialRunPreview?.platform === "whatsapp" &&
@@ -642,8 +707,19 @@ function App() {
       sftp_password: "",
       sftp_remote_path: settings.sftp?.remote_path || "",
       stories_public_base_url: settings.sftp?.stories_public_base_url || "",
+      youtube_client_id: settings.youtube?.client_id || "",
+      youtube_client_secret: "",
+      youtube_redirect_uri: settings.youtube?.redirect_uri || "",
+      ytdlp_cookies_from_browser: settings.youtube?.cookies_from_browser || "",
+      ytdlp_cookies_file: settings.youtube?.cookies_file || "",
     }));
   }, [snapshot?.settings]);
+
+  useEffect(() => {
+    if (activeSection === "youtube_cortes") {
+      loadYoutubeOauthStatus();
+    }
+  }, [activeSection]);
 
   async function loadSocialPreview(limit = socialForm.limit, query = socialForm.query) {
     setSocialLoading(true);
@@ -665,7 +741,7 @@ function App() {
   useEffect(() => {
     loadSnapshot();
     loadSocialPreview();
-    handleProductSearch("");
+    handleProductSearch("", 1);
   }, []);
 
   useEffect(() => {
@@ -951,16 +1027,22 @@ function App() {
     }
   }
 
-  async function handleProductSearch(query = productQuery) {
+  async function handleProductSearch(query = productQuery, page = 1) {
     setProductsLoading(true);
     try {
+      const normalizedQuery = String(query || "").trim();
+      const normalizedPage = Math.max(1, Number(page || 1));
       const params = new URLSearchParams({
-        q: String(query || "").trim(),
-        limit: "18",
+        q: normalizedQuery,
+        limit: "10",
+        page: String(normalizedPage),
       });
       const data = await fetchJson(`/dashboard/api/offers?${params.toString()}`);
       setProductResults(data.items || []);
-      if ((data.items || []).length && !selectedProductId) {
+      setProductPage(Number(data.page || normalizedPage));
+      setProductTotalPages(Math.max(1, Number(data.pages || 1)));
+      setProductTotalCount(Number(data.total || 0));
+      if ((data.items || []).length && !(data.items || []).some((item) => item.id === selectedProductId)) {
         selectProduct(data.items[0]);
       }
     } catch (error) {
@@ -997,6 +1079,145 @@ function App() {
     }
   }
 
+  async function handleYoutubeCutsAnalyze() {
+    const normalizedUrl = String(youtubeCutUrl || "").trim();
+    if (!normalizedUrl) {
+      setToast({ type: "error", message: "Cole um link do YouTube para analisar." });
+      return;
+    }
+
+    setYoutubeCutLoading(true);
+    try {
+      const data = await fetchJson("/dashboard/api/youtube/cuts/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: normalizedUrl }),
+      });
+      setYoutubeCutAnalysis(data);
+      const suggestionCount = youtubeCutMode === "long" ? Number(data?.long_suggestions?.length || 0) : Number(data?.suggestions?.length || 0);
+      setToast({ type: "success", message: `${suggestionCount} sugestao(oes) iniciais de ${youtubeCutMode === "long" ? "corte longo" : "short"} montadas.` });
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao analisar vídeo do YouTube: ${error.message}` });
+    } finally {
+      setYoutubeCutLoading(false);
+    }
+  }
+
+  async function handleYoutubeCutsProcess() {
+    const normalizedUrl = String(youtubeCutUrl || "").trim();
+    if (!normalizedUrl) {
+      setToast({ type: "error", message: "Cole um link do YouTube para processar." });
+      return;
+    }
+
+    setYoutubeCutsPhase2Loading(true);
+    try {
+      const data = await fetchJson("/dashboard/api/youtube/cuts/process", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: normalizedUrl,
+          limit: youtubeCutMode === "long" ? 3 : 5,
+          mode: youtubeCutMode,
+          selection_strategy: youtubeShortSelectionStrategy,
+        }),
+      });
+      setYoutubeCutsPhase2(data);
+      setYoutubeOauthStatus(data.youtube_auth || null);
+      setToast({ type: "success", message: `${Number(data?.cuts?.length || 0)} ${youtubeCutMode === "long" ? "corte(s) longos" : "short(s)"} gerado(s).` });
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao gerar cortes: ${error.message}` });
+    } finally {
+      setYoutubeCutsPhase2Loading(false);
+    }
+  }
+
+  async function loadYoutubeOauthStatus() {
+    setYoutubeOauthLoading(true);
+    try {
+      const data = await fetchJson("/dashboard/api/youtube/oauth/status");
+      setYoutubeOauthStatus(data.youtube_auth || null);
+    } catch (error) {
+      setYoutubeOauthStatus(null);
+      setToast({ type: "error", message: `Falha ao ler status do YouTube: ${error.message}` });
+    } finally {
+      setYoutubeOauthLoading(false);
+    }
+  }
+
+  async function handleYoutubeConnect() {
+    try {
+      const data = await fetchJson("/dashboard/api/youtube/oauth/url");
+      window.open(data.auth_url, "_blank", "noopener,noreferrer");
+      setToast({ type: "info", message: "Abrimos a autorizacao do Google em uma nova aba." });
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao iniciar OAuth do YouTube: ${error.message}` });
+    }
+  }
+
+  function updateYoutubeCutDraft(cutId, field, value) {
+    setYoutubeCutsPhase2((current) => {
+      if (!current?.cuts?.length) return current;
+      const cuts = current.cuts.map((item) => {
+        if (Number(item.cut_id) !== Number(cutId)) return item;
+        return {
+          ...item,
+          publish_draft: {
+            ...(item.publish_draft || {}),
+            [field]: value,
+          },
+        };
+      });
+      return { ...current, cuts };
+    });
+  }
+
+  async function handleYoutubeCutPublish(item) {
+    const draft = item?.publish_draft || {};
+    if (!item?.job_id || !item?.cut_id) {
+      setToast({ type: "error", message: "Corte invalido para publicar no YouTube." });
+      return;
+    }
+    setYoutubePublishingCutId(Number(item.cut_id));
+    try {
+      const data = await fetchJson("/dashboard/api/youtube/cuts/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          job_id: item.job_id,
+          cut_id: Number(item.cut_id),
+          title: draft.title || item.title,
+          description: draft.description || item.caption_draft || "",
+          privacy_status: draft.privacy_status || "private",
+          mode: item.mode || draft.mode || youtubeCutMode,
+        }),
+      });
+      const uploadedThumbnail = Boolean(data.thumbnail_result && !data.thumbnail_error);
+      const isLong = (item.mode || draft.mode) === "long";
+      setToast({
+        type: "success",
+        message: `${isLong ? "Video" : "Short"} publicado no YouTube${data.youtube_video_id ? ` (${data.youtube_video_id})` : ""}${isLong && uploadedThumbnail ? " com thumbnail aplicada." : "."}`,
+      });
+      setYoutubeCutsPhase2((current) => {
+        if (!current?.cuts?.length) return current;
+        const cuts = current.cuts.map((entry) => {
+          if (Number(entry.cut_id) !== Number(item.cut_id)) return entry;
+          return {
+            ...entry,
+            publish_result: data,
+            status: "published",
+          };
+        });
+        return { ...current, cuts };
+      });
+      await loadYoutubeOauthStatus();
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao publicar no YouTube: ${error.message}` });
+    } finally {
+      setYoutubePublishingCutId(null);
+    }
+  }
+
   async function handleProductDelete() {
     if (!selectedProductId) {
       setToast({ type: "error", message: "Selecione um produto para excluir." });
@@ -1015,9 +1236,7 @@ function App() {
       setProductResults((current) => current.filter((item) => item.id !== selectedProductId));
       setSelectedProductId(null);
       resetProductForm();
-      if (String(productQuery || "").trim()) {
-        await handleProductSearch(productQuery);
-      }
+      await handleProductSearch(productQuery, productPage);
       await loadSnapshot();
     } catch (error) {
       setToast({ type: "error", message: `Falha ao excluir produto: ${error.message}` });
@@ -1346,6 +1565,11 @@ function App() {
         sftp_password: settingsForm.sftp_password || null,
         sftp_remote_path: settingsForm.sftp_remote_path,
         stories_public_base_url: settingsForm.stories_public_base_url,
+        youtube_client_id: settingsForm.youtube_client_id,
+        youtube_client_secret: settingsForm.youtube_client_secret || null,
+        youtube_redirect_uri: settingsForm.youtube_redirect_uri,
+        ytdlp_cookies_from_browser: settingsForm.ytdlp_cookies_from_browser,
+        ytdlp_cookies_file: settingsForm.ytdlp_cookies_file,
       };
       const data = await fetchJson("/dashboard/api/settings", {
         method: "POST",
@@ -1623,11 +1847,11 @@ function App() {
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
                         e.preventDefault();
-                        handleProductSearch();
+                        handleProductSearch(productQuery, 1);
                       }
                     }}
                   />
-                  <button className="button is-secondary" onClick={() => handleProductSearch()} disabled={productsLoading}>
+                  <button className="button is-secondary" onClick={() => handleProductSearch(productQuery, 1)} disabled={productsLoading}>
                     {productsLoading ? "Buscando..." : "Pesquisar"}
                   </button>
                 </div>
@@ -1659,6 +1883,19 @@ function App() {
                       </button>
                     ))
                   )}
+                </div>
+                <div className="panel-head" style={{ marginTop: 14 }}>
+                  <p className="panel-subtitle">
+                    {productTotalCount > 0 ? `${productTotalCount} produto(s) encontrado(s) | pagina ${productPage} de ${productTotalPages}` : "Nenhum resultado para paginar."}
+                  </p>
+                  <div className="provider-actions">
+                    <button className="tiny-button is-soft" type="button" disabled={productsLoading || productPage <= 1} onClick={() => handleProductSearch(productQuery, productPage - 1)}>
+                      Anterior
+                    </button>
+                    <button className="tiny-button is-soft" type="button" disabled={productsLoading || productPage >= productTotalPages} onClick={() => handleProductSearch(productQuery, productPage + 1)}>
+                      Proxima
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -1850,6 +2087,42 @@ function App() {
                   <input type="password" placeholder={metaTokenConfigured ? "Token ja configurado" : "Cole um token novo"} value={settingsForm.meta_access_token} onChange={(e) => setSettingsForm((state) => ({ ...state, meta_access_token: e.target.value }))} />
                 </div>
               </div>
+              <div className="field-grid" style={{ marginTop: 12 }}>
+                <div className="field">
+                  <label>YouTube Client ID</label>
+                  <input type="text" value={settingsForm.youtube_client_id} onChange={(e) => setSettingsForm((state) => ({ ...state, youtube_client_id: e.target.value }))} />
+                </div>
+                <div className="field">
+                  <label>YouTube Client Secret</label>
+                  <input type="password" placeholder={snapshot?.settings?.youtube?.client_secret_configured ? "Ja configurado" : "Cole um secret novo"} value={settingsForm.youtube_client_secret} onChange={(e) => setSettingsForm((state) => ({ ...state, youtube_client_secret: e.target.value }))} />
+                </div>
+                <div className="field">
+                  <label>YouTube Redirect URI</label>
+                  <input type="text" value={settingsForm.youtube_redirect_uri} onChange={(e) => setSettingsForm((state) => ({ ...state, youtube_redirect_uri: e.target.value }))} />
+                  <small>Use a mesma URL cadastrada no Google OAuth.</small>
+                </div>
+              </div>
+              <div className="field-grid" style={{ marginTop: 12 }}>
+                <div className="field">
+                  <label>yt-dlp cookies do navegador</label>
+                  <input
+                    type="text"
+                    value={settingsForm.ytdlp_cookies_from_browser}
+                    onChange={(e) => setSettingsForm((state) => ({ ...state, ytdlp_cookies_from_browser: e.target.value }))}
+                  />
+                  <small>Ex.: chrome:Default,chrome:Profile 1,edge:Default</small>
+                </div>
+                <div className="field">
+                  <label>yt-dlp cookies.txt</label>
+                  <input
+                    type="text"
+                    value={settingsForm.ytdlp_cookies_file}
+                    onChange={(e) => setSettingsForm((state) => ({ ...state, ytdlp_cookies_file: e.target.value }))}
+                  />
+                  <small>Use um cookies.txt exportado do navegador se o YouTube pedir confirmacao anti-bot.</small>
+                </div>
+              </div>
+
 
               <div className="field-grid" style={{ marginTop: 12 }}>
                 <div className="field">
@@ -2171,6 +2444,7 @@ function App() {
                         <div className="offer-meta" style={{ marginTop: 12 }}>
                           <span className="meta-chip">{fmtMoney(item.price || item.preco || 0)}</span>
                           {"sold_quantity" in item ? <span className="meta-chip">{fmtInt(item.sold_quantity || 0)} vendas</span> : null}
+                          {commerceMetaChips(item).map((chip) => <span className="meta-chip" key={`${item.title}-${chip}`}>{chip}</span>)}
                         </div>
                       </div>
                     ))}
@@ -2306,6 +2580,7 @@ function App() {
                           {item.canonical_url ? <a className="tiny-button is-soft" href={item.canonical_url} target="_blank" rel="noreferrer">Abrir produto</a> : null}
                           {item.image ? <a className="tiny-button is-soft" href={item.image} target="_blank" rel="noreferrer">Abrir imagem</a> : null}
                           {item.item_id ? <span className="meta-chip">wid ok</span> : null}
+                          {commerceMetaChips(item).map((chip) => <span className="meta-chip" key={`${item.title}-${chip}`}>{chip}</span>)}
                         </div>
                       </div>
                     ))}
@@ -2482,6 +2757,7 @@ function App() {
                           {item.provider === "mercadolivre" && Number(item.price || 0) <= 0 ? (
                             <span className="meta-chip">dados incompletos: revise preco</span>
                           ) : null}
+                          {commerceMetaChips(item).map((chip) => <span className="meta-chip" key={`${item.title}-${chip}`}>{chip}</span>)}
                           {item.affiliate_warning ? <span className="meta-chip">{item.affiliate_warning}</span> : null}
                           {item.file_warning ? <span className="meta-chip">{item.file_warning}</span> : null}
                         </div>
@@ -2774,7 +3050,7 @@ function App() {
 
               <div className="inline-stat" style={{ marginTop: 16 }}>
                 <span className="meta-chip">{fmtInt(socialCheckedIds.length)} selecionada(s)</span>
-                <span className="meta-chip">{fmtInt(socialQueue.length)} visivel(is)</span>
+                <span className="meta-chip">{fmtInt(socialVisibleQueue.length)} visivel(is)</span>
                 <span className="meta-chip">{fmtInt(socialCandidates.length)} carregada(s)</span>
                 {socialPreview?.database?.ok === false ? <span className="meta-chip">Banco indisponivel</span> : null}
               </div>
@@ -2901,11 +3177,11 @@ function App() {
               ) : null}
 
               <div style={{ marginTop: 18 }}>
-                {!socialQueue.length ? (
+                {!socialVisibleQueue.length ? (
                   <div className="empty-state">Sem produto para essa busca/filtro.</div>
                 ) : (
                   <div className="social-queue-list">
-                    {socialQueue.map((item) => (
+                    {socialVisibleQueue.map((item) => (
                       <div className="surface social-queue-item" key={item.offer_id}>
                         <label className="check-chip social-check-cell">
                           <input
@@ -2928,8 +3204,10 @@ function App() {
                             <span className="meta-chip">{fmtInt(item.clicks || 0)} cliques</span>
                             {item.old_price ? <span className="meta-chip">de {fmtMoney(item.old_price)}</span> : null}
                             {item.coupon ? <span className="meta-chip">cupom: {item.coupon}</span> : null}
+                            {commerceMetaChips(item).map((chip) => <span className="meta-chip" key={`${item.offer_id}-${chip}`}>{chip}</span>)}
                           </div>
                           {item.coupon ? <div className="social-item-subtitle">Cupom disponivel: <strong>{item.coupon}</strong></div> : null}
+                          {commerceMetaLines(item).length ? <div className="social-item-subtitle">{commerceMetaLines(item).join(" ? ")}</div> : null}
                         </div>
                         <div className="social-links-cell">
                           {item.offer_url ? <a className="tiny-button is-soft" href={item.offer_url} target="_blank" rel="noreferrer">Oferta</a> : null}
@@ -2947,6 +3225,387 @@ function App() {
             </section>
           ) : null}
 
+          {activeSection === "youtube_cortes" ? (
+            <>
+              <section className="hero" style={{ marginTop: 18 }}>
+                <div className="hero-head">
+                  <div className="hero-copy">
+                    <span className="hero-kicker">Fase 1</span>
+                    <h2>Cortes YouTube</h2>
+                    <p className="panel-subtitle">Intake inicial para podcasts, briefing editorial e pauta de cortes antes da automação completa.</p>
+                  </div>
+                  <div className="hero-actions">
+                    <span className="status-pill is-info">Roadmap salvo</span>
+                    <span className="status-pill is-ok">docs/youtube-cuts-roadmap.md</span>
+                  </div>
+                </div>
+              </section>
+
+              <section className="panel" style={{ marginTop: 18, marginBottom: 18 }}>
+                <div className="panel-head">
+                  <div>
+                    <h3 className="panel-title">Analisar video</h3>
+                    <p className="panel-subtitle">Cole um link do YouTube para montar sugestoes iniciais de cortes e legenda.</p>
+                  </div>
+                </div>
+                <div className="field-grid">
+                  <div className="field">
+                    <label>Modo de corte</label>
+                    <select value={youtubeCutMode} onChange={(e) => setYoutubeCutMode(e.target.value)}>
+                      <option value="short">Short</option>
+                      <option value="long">Corte longo 10-15 min</option>
+                    </select>
+                  </div>
+                  {youtubeCutMode === "short" ? (
+                    <div className="field">
+                      <label>Selecao dos shorts</label>
+                      <select value={youtubeShortSelectionStrategy} onChange={(e) => setYoutubeShortSelectionStrategy(e.target.value)}>
+                        <option value="openai_heuristica">OpenAI + Heuristica</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="heuristica">Heuristica melhorada</option>
+                      </select>
+                    </div>
+                  ) : null}
+                  <div className="field" style={{ gridColumn: "1 / -1" }}>
+                    <label>Link do YouTube</label>
+                    <input
+                      type="text"
+                      value={youtubeCutUrl}
+                      onChange={(e) => setYoutubeCutUrl(e.target.value)}
+                      placeholder="https://www.youtube.com/watch?v=..."
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          handleYoutubeCutsAnalyze();
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="provider-actions" style={{ marginTop: 16 }}>
+                  <button className="button is-primary" onClick={handleYoutubeCutsAnalyze} disabled={youtubeCutLoading}>
+                    {youtubeCutLoading ? "Analisando..." : `Analisar ${youtubeCutMode === "long" ? "corte longo" : "short"}`}
+                  </button>
+                  <button className="button is-secondary" onClick={handleYoutubeCutsProcess} disabled={youtubeCutsPhase2Loading}>
+                    {youtubeCutsPhase2Loading ? "Gerando cortes..." : `Gerar ${youtubeCutMode === "long" ? "cortes longos" : "cortes reais"}`}
+                  </button>
+                </div>
+              </section>
+
+              <section className="panel" style={{ marginBottom: 18 }}>
+                <div className="panel-head">
+                  <div>
+                    <h3 className="panel-title">Fase 3: conexao com YouTube</h3>
+                    <p className="panel-subtitle">OAuth Google, status do canal e publicacao dos cortes gerados.</p>
+                  </div>
+                  <div className="provider-actions">
+                    <button className="button is-secondary" onClick={loadYoutubeOauthStatus} disabled={youtubeOauthLoading}>
+                      {youtubeOauthLoading ? "Atualizando..." : "Atualizar status"}
+                    </button>
+                    <button className="button is-primary" onClick={handleYoutubeConnect}>
+                      Conectar YouTube
+                    </button>
+                  </div>
+                </div>
+                <div className="status-grid">
+                  <article className={`status-card ${youtubeOauthStatus?.authenticated ? "is-success" : youtubeOauthStatus?.error ? "is-error" : ""}`}>
+                    <div className="status-card-head">
+                      <h4>Conta YouTube</h4>
+                      <span className={`badge ${youtubeOauthStatus?.authenticated ? "is-success" : "is-warning"}`}>{youtubeOauthStatus?.authenticated ? "Conectado" : "Pendente"}</span>
+                    </div>
+                    <p>Client ID: {snapshot?.settings?.youtube?.client_id ? "configurado" : "ausente"}</p>
+                    <p>Client secret: {snapshot?.settings?.youtube?.client_secret_configured ? "configurado" : "ausente"}</p>
+                    <p>Redirect URI: {snapshot?.settings?.youtube?.redirect_uri || "nao definido"}</p>
+                    <p>Cookies browser: {snapshot?.settings?.youtube?.cookies_from_browser || "nao definido"}</p>
+                    <p>Cookies file: {snapshot?.settings?.youtube?.cookies_file || "nao definido"}</p>
+                    <p>Refresh token: {youtubeOauthStatus?.refresh_token_configured ? "ok" : "pendente"}</p>
+                    <p>Canal: {youtubeOauthStatus?.channel?.title || "nenhum canal autenticado ainda"}</p>
+                    {youtubeOauthStatus?.channel?.custom_url ? <p>Handle: {youtubeOauthStatus.channel.custom_url}</p> : null}
+                    {youtubeOauthStatus?.error ? <div className="inline-note is-info" style={{ marginTop: 12 }}>{youtubeOauthStatus.error}</div> : null}
+                  </article>
+                </div>
+              </section>
+
+              {!youtubeCutAnalysis ? (
+                <section className="panel">
+                  <div className="empty-state">Nenhum vídeo analisado ainda. Esta fase guarda o briefing e as sugestões para seguirmos nas próximas etapas sem perder o plano.</div>
+                </section>
+              ) : (
+                <>
+                  <section className="panel" style={{ marginBottom: 18 }}>
+                    <div className="panel-head">
+                      <div>
+                        <h3 className="panel-title">Preview do vídeo</h3>
+                        <p className="panel-subtitle">{youtubeCutAnalysis.video?.title || "Vídeo analisado"}</p>
+                      </div>
+                    </div>
+                    <div className="product-manager-shell">
+                      <div className="surface">
+                        <div style={{ position: "relative", width: "100%", paddingTop: "56.25%", borderRadius: 24, overflow: "hidden", background: "#0f172a" }}>
+                          <iframe
+                            src={youtubeCutAnalysis.video?.embed_url}
+                            title={youtubeCutAnalysis.video?.title || "Preview YouTube"}
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                            allowFullScreen
+                            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: 0 }}
+                          />
+                        </div>
+                      </div>
+                      <div className="surface">
+                        <h4>Resumo da análise</h4>
+                        <p><strong>Título:</strong> {youtubeCutAnalysis.video?.title || "-"}</p>
+                        <p><strong>Canal:</strong> {youtubeCutAnalysis.video?.author_name || "-"}</p>
+                        <p><strong>Etapa atual:</strong> briefing editorial</p>
+                        <div className="offer-meta" style={{ marginTop: 12 }}>
+                          <a className="tiny-button is-soft" href={youtubeCutAnalysis.video?.url} target="_blank" rel="noreferrer">Abrir vídeo</a>
+                          {youtubeCutAnalysis.roadmap_path ? <span className="meta-chip">{youtubeCutAnalysis.roadmap_path}</span> : null}
+                          {youtubeCutAnalysis.oembed_error ? <span className="meta-chip">metadados com fallback</span> : <span className="meta-chip">metadados OK</span>}
+                        </div>
+                        <div style={{ marginTop: 14 }}>
+                          {(youtubeCutAnalysis.notes || []).map((note, index) => (
+                            <div className="inline-note is-info" key={`youtube-note-${index}`} style={{ marginTop: index ? 8 : 0 }}>
+                              {note}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="panel">
+                    <div className="panel-head">
+                      <div>
+                        <h3 className="panel-title">{youtubeCutMode === "long" ? "Sugestoes iniciais de cortes longos" : "Sugestoes iniciais de cortes"}</h3>
+                        <p className="panel-subtitle">{youtubeCutMode === "long" ? "Saem com tema, duracao alvo de 10 a 15 minutos e foco em retencao para video normal do canal." : "Saem com gancho, duracao alvo e legenda base para voce validar o tema antes da geracao real."}</p>
+                      </div>
+                    </div>
+                    <div className="preview-grid">
+                      {((youtubeCutMode === "long" ? youtubeCutAnalysis.long_suggestions : youtubeCutAnalysis.suggestions) || []).map((item, index) => (
+                        <article className="surface" key={`youtube-cut-${index}`}>
+                          <div className="panel-head" style={{ marginBottom: 12 }}>
+                            <div>
+                              <h4>{item.angle}</h4>
+                              <p>{item.title}</p>
+                            </div>
+                            <span className="badge is-success">score {item.score}</span>
+                          </div>
+                          <div className="offer-meta" style={{ marginBottom: 12 }}>
+                            <span className="meta-chip">{item.duration_label}</span>
+                            <span className="meta-chip">{item.status}</span>
+                          </div>
+                          <div className="field">
+                            <label>Gancho</label>
+                            <textarea rows="2" value={item.hook || ""} readOnly />
+                          </div>
+                          <div className="field" style={{ marginTop: 12 }}>
+                            <label>Legenda sugerida</label>
+                            <textarea rows="5" value={item.caption_draft || ""} readOnly />
+                          </div>
+                          <div className="inline-note is-info" style={{ marginTop: 12 }}>
+                            {item.reason}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  </section>
+
+                  {youtubeCutsPhase2 ? (
+                    <>
+                      <section className="panel" style={{ marginTop: 18, marginBottom: 18 }}>
+                        <div className="panel-head">
+                          <div>
+                            <h3 className="panel-title">Transcrição base</h3>
+                            <p className="panel-subtitle">
+                              {youtubeCutsPhase2.transcript?.segments_count || 0} bloco(s) detectado(s) a partir de {youtubeCutsPhase2.transcript?.source === "openai_audio" ? "fallback por áudio" : "legendas automáticas do YouTube"}.
+                            </p>
+                          </div>
+                          <div className="offer-meta">
+                            <span className="meta-chip">job {youtubeCutsPhase2.job_id}</span>
+                            <span className="meta-chip">fase 2</span>
+                            {youtubeCutsPhase2?.mode === "short" ? <span className="meta-chip">selecao {youtubeCutsPhase2.selection_strategy || "openai"}</span> : null}
+                            <span className="meta-chip">{youtubeCutsPhase2.transcript?.source === "openai_audio" ? "OpenAI áudio" : "YouTube VTT"}</span>
+                          </div>
+                        </div>
+                        {youtubeCutsPhase2.transcript?.warning ? (
+                          <div className="inline-note is-info" style={{ marginBottom: 12 }}>
+                            Falha na legenda do YouTube: {youtubeCutsPhase2.transcript.warning}
+                          </div>
+                        ) : null}
+                        <div className="field">
+                          <label>Texto base</label>
+                          <textarea rows="10" value={youtubeCutsPhase2.transcript?.text || ""} readOnly />
+                        </div>
+                      </section>
+
+                      <section className="panel">
+                        <div className="panel-head">
+                          <div>
+                            <h3 className="panel-title">Cortes gerados</h3>
+                            <p className="panel-subtitle">{youtubeCutsPhase2?.mode === "long" ? "Os videos abaixo saem como cortes longos em horizontal para publicar como video normal." : "Os videos abaixo ja saem em vertical com legenda queimada."}</p>
+                          </div>
+                        </div>
+                        <div className="preview-grid">
+                          {(youtubeCutsPhase2.cuts || []).map((item) => (
+                            <article className="surface" key={`generated-cut-${item.cut_id}`}>
+                              <div className="panel-head" style={{ marginBottom: 12 }}>
+                                <div>
+                                  {item.mode === "long" && item.publish_draft?.editorial_role ? (
+                                    <div className="offer-meta" style={{ marginBottom: 8 }}>
+                                      <span className={`badge ${item.publish_draft.editorial_role === "principal" ? "is-success" : "is-neutral"}`}>
+                                        {item.publish_draft.editorial_role === "principal" ? "Corte principal" : "Corte secundario"}
+                                      </span>
+                                    </div>
+                                  ) : null}
+                                  <h4>{item.title}</h4>
+                                  <p>{item.hook}</p>
+                                </div>
+                                <span className="badge is-success">score {item.score}</span>
+                              </div>
+                              {item.mode === "long" && item.thumbnail_asset_url ? (
+                                <div style={{ marginBottom: 12 }}>
+                                  <img
+                                    src={item.thumbnail_asset_url}
+                                    alt={`Thumbnail ${item.title}`}
+                                    style={{ width: "100%", borderRadius: 18, background: "#0f172a" }}
+                                  />
+                                </div>
+                              ) : null}
+                              <video
+                                controls
+                                preload="metadata"
+                                style={{ width: "100%", borderRadius: 18, background: "#0f172a" }}
+                                src={item.video_asset_url}
+                              />
+                              <div className="offer-meta" style={{ marginTop: 12 }}>
+                                <span className="meta-chip">{item.start_label}</span>
+                                <span className="meta-chip">{item.end_label}</span>
+                                <span className="meta-chip">{item.duration_label}</span>
+                                <span className="meta-chip">{item.status}</span>
+                                <a className="tiny-button is-soft" href={item.video_asset_url} target="_blank" rel="noreferrer">Abrir vídeo</a>
+                                {item.subtitle_asset_url ? <a className="tiny-button is-soft" href={item.subtitle_asset_url} target="_blank" rel="noreferrer">Legenda</a> : null}
+                                <a className="tiny-button is-soft" href={item.download_url} download>Baixar vídeo</a>
+                                <button className="tiny-button is-soft" type="button" onClick={() => handleCopyText(item.copy_title || item.title, "Título copiado.")}>
+                                  Copiar título
+                                </button>
+                                <button className="tiny-button is-soft" type="button" onClick={() => handleCopyText(item.copy_description || item.caption_draft, "Descrição copiada.")}>
+                                  Copiar descrição
+                                </button>
+                              </div>
+                              <div className="field" style={{ marginTop: 12 }}>
+                                <label>Trecho detectado</label>
+                                <textarea rows="5" value={item.transcript_excerpt || ""} readOnly />
+                              </div>
+                              <div className="field" style={{ marginTop: 12 }}>
+                                <label>Legenda sugerida</label>
+                                <textarea rows="5" value={item.caption_draft || ""} readOnly />
+                              </div>
+                              {item.mode === "long" && (item.publish_draft?.chapters || []).length ? (
+                                <div className="field" style={{ marginTop: 12 }}>
+                                  <label>Capitulos automáticos</label>
+                                  <textarea rows="5" value={(item.publish_draft.chapters || []).join("\n")} readOnly />
+                                </div>
+                              ) : null}
+                              {item.mode === "long" && item.publish_draft?.scorecard ? (
+                                <div className="panel" style={{ marginTop: 14, padding: 16, borderRadius: 18 }}>
+                                  <div className="panel-head" style={{ marginBottom: 12 }}>
+                                    <div>
+                                      <h4>Score editorial</h4>
+                                      <p className="panel-subtitle">Leitura rapida de potencial para clique, retencao e tema.</p>
+                                    </div>
+                                    <span className="meta-chip">overall {item.publish_draft.scorecard.overall || 0}</span>
+                                  </div>
+                                  <div className="offer-meta">
+                                    <span className="meta-chip">CTR {item.publish_draft.scorecard.ctr || 0}</span>
+                                    <span className="meta-chip">Retencao {item.publish_draft.scorecard.retention || 0}</span>
+                                    <span className="meta-chip">Tema {item.publish_draft.scorecard.topic || 0}</span>
+                                  </div>
+                                  {(item.publish_draft.title_variants || []).length ? (
+                                    <div style={{ marginTop: 14, display: "grid", gap: 8 }}>
+                                      {(item.publish_draft.title_variants || []).map((variant, variantIndex) => (
+                                        <div key={`variant-${item.cut_id}-${variantIndex}`} className="surface" style={{ padding: 12, display: "grid", gap: 8 }}>
+                                          <strong>Variacao {variantIndex + 1}</strong>
+                                          <div>{variant}</div>
+                                          <div className="provider-actions">
+                                            <button className="tiny-button is-soft" type="button" onClick={() => updateYoutubeCutDraft(item.cut_id, "title", variant)}>
+                                              Usar este titulo
+                                            </button>
+                                            <button className="tiny-button is-soft" type="button" onClick={() => handleCopyText(variant, `Titulo ${variantIndex + 1} copiado.`)}>
+                                              Copiar titulo
+                                            </button>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : null}
+                              <div className="panel" style={{ marginTop: 14, padding: 16, borderRadius: 18 }}>
+                                <div className="panel-head" style={{ marginBottom: 12 }}>
+                                  <div>
+                                    <h4>{item.mode === "long" ? "Fase 4: publicacao do video" : "Fase 4: publicacao do Short"}</h4>
+                                    <p className="panel-subtitle">{item.mode === "long" ? "Descricao enriquecida para corte longo com foco em retencao e descoberta do canal." : "Descricao enriquecida com os 5 ultimos produtos postados nas redes."}</p>
+                                  </div>
+                                  <span className="meta-chip">{item.publish_draft?.privacy_status || "private"}</span>
+                                </div>
+                                <div className="field">
+                                  <label>Titulo do YouTube</label>
+                                  <input type="text" value={item.publish_draft?.title || ""} onChange={(e) => updateYoutubeCutDraft(item.cut_id, "title", e.target.value)} />
+                                </div>
+                                <div className="field" style={{ marginTop: 12 }}>
+                                  <label>Privacidade</label>
+                                  <select value={item.publish_draft?.privacy_status || "private"} onChange={(e) => updateYoutubeCutDraft(item.cut_id, "privacy_status", e.target.value)}>
+                                    <option value="private">Private</option>
+                                    <option value="unlisted">Unlisted</option>
+                                    <option value="public">Public</option>
+                                  </select>
+                                </div>
+                                <div className="field" style={{ marginTop: 12 }}>
+                                  <label>Descricao enriquecida</label>
+                                  <textarea rows="9" value={item.publish_draft?.description || ""} onChange={(e) => updateYoutubeCutDraft(item.cut_id, "description", e.target.value)} />
+                                </div>
+                                {(item.publish_draft?.recent_offers || []).length ? (
+                                  <div style={{ marginTop: 12 }}>
+                                    <label style={{ display: "block", fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Ofertas puxadas para a descricao</label>
+                                    <div className="offer-meta">
+                                      {(item.publish_draft?.recent_offers || []).map((offer) => (
+                                        <a key={`yt-offer-${item.cut_id}-${offer.id}`} className="meta-chip" href={offer.offer_url} target="_blank" rel="noreferrer">
+                                          {offer.titulo} | {offer.price_label}
+                                        </a>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : null}
+                                <div className="provider-actions" style={{ marginTop: 12 }}>
+                                  <button className="button is-primary" type="button" onClick={() => handleYoutubeCutPublish(item)} disabled={youtubePublishingCutId === Number(item.cut_id) || !youtubeOauthStatus?.authenticated}>
+                                    {youtubePublishingCutId === Number(item.cut_id) ? "Publicando no YouTube..." : (item.publish_draft?.publish_label || (item.mode === "long" ? "Publicar video" : "Publicar Short"))}
+                                  </button>
+                                  <button className="button is-secondary" type="button" onClick={() => handleCopyText(item.publish_draft?.description || "", "Descricao do YouTube copiada.")}>
+                                    Copiar descricao
+                                  </button>
+                                  {item.publish_result?.youtube_url ? <a className="tiny-button is-soft" href={item.publish_result.youtube_url} target="_blank" rel="noreferrer">Abrir no YouTube</a> : null}
+                                </div>
+                                {item.mode === "long" && item.publish_result?.thumbnail_result ? (
+                                  <div className="inline-note is-info" style={{ marginTop: 12 }}>
+                                    Thumbnail enviada junto com o video no YouTube.
+                                  </div>
+                                ) : null}
+                                {item.mode === "long" && item.publish_result?.thumbnail_error ? (
+                                  <div className="inline-note is-warning" style={{ marginTop: 12 }}>
+                                    O video foi publicado, mas a thumbnail falhou: {item.publish_result.thumbnail_error}
+                                  </div>
+                                ) : null}
+                              </div>
+                            </article>
+                          ))}
+                        </div>
+                      </section>
+                    </>
+                  ) : null}
+                </>
+              )}
+            </>
+          ) : null}
+
           {activeSection === "execucoes" ? (
             <section className="panel" id="execucoes" style={{ marginTop: 18 }}>
               <div className="panel-head">
@@ -2959,7 +3618,7 @@ function App() {
                 <div className="empty-state">Nenhuma execução recente registrada.</div>
               ) : (
                 <div className="offer-list">
-                  {snapshot.recent_runs.map((run) => (
+                  {snapshot.recent_runs.slice(0, 3).map((run) => (
                     <div className="offer-row" key={run.id}>
                       <div style={{ flex: 1 }}>
                         <strong>{run.tipo} · {run.provider || run.canal || "-"}</strong>

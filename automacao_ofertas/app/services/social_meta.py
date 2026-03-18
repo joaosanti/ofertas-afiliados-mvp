@@ -15,6 +15,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from sqlalchemy import bindparam, text
 
+from app.services.dashboard_data import ensure_dashboard_tables
 from app.services.offer_card_asset import generate_offer_square_card_asset
 from app.services.sftp_deploy import deploy_stories_via_sftp, ensure_stories_dir, story_public_url
 
@@ -32,6 +33,14 @@ SELECT_TOP_OFFERS_SQL = text(
       o.descricao,
       o.preco,
       o.preco_antigo,
+      o.desconto_percentual,
+      o.preco_pix,
+      o.preco_outros_meios,
+      o.parcelas_texto,
+      o.frete_texto,
+      o.avaliacao_nota,
+      o.avaliacao_total,
+      o.promocao_texto,
       o.loja,
       o.url_afiliado,
       o.cupom,
@@ -61,7 +70,7 @@ SELECT_TOP_OFFERS_SQL = text(
         OR o.loja LIKE :search_like
         OR o.categoria LIKE :search_like
       )
-    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.categoria, o.tags, o.destaque, o.criado_em, o.atualizado_em
+    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.desconto_percentual, o.preco_pix, o.preco_outros_meios, o.parcelas_texto, o.frete_texto, o.avaliacao_nota, o.avaliacao_total, o.promocao_texto, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.categoria, o.tags, o.destaque, o.criado_em, o.atualizado_em
     ORDER BY o.criado_em DESC, o.id DESC
     LIMIT :limit
     OFFSET :offset
@@ -77,6 +86,14 @@ SELECT_OFFERS_BY_IDS_SQL = text(
       o.descricao,
       o.preco,
       o.preco_antigo,
+      o.desconto_percentual,
+      o.preco_pix,
+      o.preco_outros_meios,
+      o.parcelas_texto,
+      o.frete_texto,
+      o.avaliacao_nota,
+      o.avaliacao_total,
+      o.promocao_texto,
       o.loja,
       o.url_afiliado,
       o.cupom,
@@ -96,7 +113,7 @@ SELECT_OFFERS_BY_IDS_SQL = text(
       AND o.imagem_url IS NOT NULL
       AND o.imagem_url <> ''
       AND o.id IN :offer_ids
-    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.categoria, o.tags, o.destaque, o.criado_em, o.atualizado_em
+    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.desconto_percentual, o.preco_pix, o.preco_outros_meios, o.parcelas_texto, o.frete_texto, o.avaliacao_nota, o.avaliacao_total, o.promocao_texto, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.categoria, o.tags, o.destaque, o.criado_em, o.atualizado_em
     ORDER BY o.criado_em DESC, o.id DESC
     """
 ).bindparams(bindparam("offer_ids", expanding=True))
@@ -481,6 +498,45 @@ def _discount_percent(price: Any, old_price: Any) -> int:
     return int(round(((previous - current) / previous) * 100))
 
 
+def _offer_discount_percent(offer: dict[str, Any]) -> int:
+    if offer.get("desconto_percentual") is not None:
+        return int(offer.get("desconto_percentual") or 0)
+    return _discount_percent(offer.get("preco"), offer.get("preco_antigo"))
+
+
+def _offer_highlights(offer: dict[str, Any]) -> list[str]:
+    details: list[str] = []
+    category = _category_label(offer.get("categoria") or "")
+    if category:
+        details.append(f"Categoria: {category}")
+    discount = _offer_discount_percent(offer)
+    if discount > 0:
+        details.append(f"Desconto: {discount}% OFF")
+    if offer.get("preco_pix") is not None:
+        details.append(f"No Pix: {_money(offer['preco_pix'])}")
+    if offer.get("preco_outros_meios") is not None:
+        details.append(f"Outros meios: {_money(offer['preco_outros_meios'])}")
+    installments = (offer.get("parcelas_texto") or "").strip()
+    if installments:
+        details.append(f"Parcelamento: {installments}")
+    shipping = (offer.get("frete_texto") or "").strip()
+    if shipping:
+        details.append(f"Frete: {shipping}")
+    rating = offer.get("avaliacao_nota")
+    rating_count = offer.get("avaliacao_total")
+    if rating is not None and rating_count:
+        details.append(f"Avaliacao: {float(rating):.1f}/5 ({int(rating_count)})")
+    elif rating is not None:
+        details.append(f"Avaliacao: {float(rating):.1f}/5")
+    promotion = (offer.get("promocao_texto") or "").strip()
+    if promotion:
+        details.append(f"Promocao: {promotion}")
+    coupon = (offer.get("cupom") or "").strip()
+    if coupon:
+        details.append(f"Cupom: {coupon}")
+    return details
+
+
 def _offer_url(slug: str) -> str:
     return f"{_site_base_url()}/oferta.php?slug={slug}"
 
@@ -519,23 +575,17 @@ def _headline_for_offer(offer: dict[str, Any]) -> str:
 def _caption_for_offer(offer: dict[str, Any]) -> str:
     price = _money(offer["preco"])
     store = _store_label(offer["loja"])
-    category = _category_label(offer["categoria"])
-    discount = _discount_percent(offer["preco"], offer.get("preco_antigo"))
-    coupon = (offer.get("cupom") or "").strip()
     destination_url = _destination_url(offer)
     site_offer_url = _site_offer_url(offer)
     has_direct_store_link = bool((offer.get("url_afiliado") or "").strip())
 
     lead = f"{offer['titulo']}\n{price} na {store}"
-    details = [f"Categoria: {category}"]
-    if discount > 0:
-        details.append(f"Desconto aproximado: {discount}%")
-    if coupon:
-        details.append(f"Cupom: {coupon}")
+    details = _offer_highlights(offer)
 
-    lines = [
-        lead,
-        " | ".join(details),
+    lines = [lead]
+    lines.extend(details[:7])
+    lines.extend([
+        "",
         "Abrir direto na loja:" if has_direct_store_link else "Veja o produto no site:",
         destination_url,
         "Ver no site:" if has_direct_store_link else "Oferta no site:",
@@ -545,22 +595,17 @@ def _caption_for_offer(offer: dict[str, Any]) -> str:
         _whatsapp_group_link(),
         "",
         "#ofertas #promocao #zeropreco",
-    ]
+    ])
     return "\n".join(lines)
 
 
 def _story_caption_for_offer(offer: dict[str, Any]) -> str:
     store = _store_label(offer["loja"])
-    discount = _discount_percent(offer["preco"], offer.get("preco_antigo"))
-    coupon = (offer.get("cupom") or "").strip()
     destination_url = _destination_url(offer)
     site_offer_url = _site_offer_url(offer)
     has_direct_store_link = bool((offer.get("url_afiliado") or "").strip())
     parts = [f"{offer['titulo']}", f"{_money(offer['preco'])} na {store}"]
-    if discount > 0:
-        parts.append(f"Aprox. {discount}% OFF")
-    if coupon:
-        parts.append(f"Cupom: {coupon}")
+    parts.extend(_offer_highlights(offer)[:4])
     parts.append("Abrir direto na loja:" if has_direct_store_link else "Ver produto no site:")
     parts.append(destination_url)
     parts.append("Ver no site:")
@@ -695,12 +740,44 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
         draw.rounded_rectangle((80, 190, 310, 260), radius=24, fill="#143b90")
         draw.text((116, 208), f"{discount}% OFF", font=label_font, fill="#f4f7fb")
 
-    draw.text((80, y + 52), _money(offer["preco"]), font=price_font, fill="#ffffff")
+    price_y = y + 52
+    draw.text((80, price_y), _money(offer["preco"]), font=price_font, fill="#ffffff")
+
+    info_y = y + 170
     if offer.get("preco_antigo"):
-        draw.text((80, y + 162), f"De {_money(offer['preco_antigo'])}", font=text_font, fill="#b9c8e6")
+        old_price_text = f"De {_money(offer['preco_antigo'])}"
+        draw.text((80, info_y), old_price_text, font=text_font, fill="#b9c8e6")
+        old_price_bbox = draw.textbbox((80, info_y), old_price_text, font=text_font)
+        strike_y = (old_price_bbox[1] + old_price_bbox[3]) / 2
+        draw.line((old_price_bbox[0], strike_y, old_price_bbox[2], strike_y), fill="#ffb7b7", width=3)
+        info_y += 52
+
+    commerce_lines: list[str] = []
+    if offer.get("preco_pix") is not None:
+        commerce_lines.append(f"No Pix: {_money(offer['preco_pix'])}")
+    if (offer.get("parcelas_texto") or "").strip():
+        commerce_lines.append(f"Parcelamento: {str(offer.get('parcelas_texto')).strip()}")
+    if (offer.get("frete_texto") or "").strip():
+        commerce_lines.append(f"Frete: {str(offer.get('frete_texto')).strip()}")
+    rating = offer.get("avaliacao_nota")
+    rating_count = offer.get("avaliacao_total")
+    if rating is not None and rating_count:
+        commerce_lines.append(f"Avaliacao: {float(rating):.1f}/5 ({int(rating_count)})")
+    elif rating is not None:
+        commerce_lines.append(f"Avaliacao: {float(rating):.1f}/5")
+
+    for line in commerce_lines[:2]:
+        chip_text = line[:42]
+        chip_font = _load_font(24, bold=True)
+        chip_bbox = draw.textbbox((0, 0), chip_text, font=chip_font)
+        chip_width = min(760, (chip_bbox[2] - chip_bbox[0]) + 48)
+        chip_box = (80, info_y, 80 + chip_width, info_y + 42)
+        draw.rounded_rectangle(chip_box, radius=18, fill="#163d95")
+        draw.text((chip_box[0] + 18, chip_box[1] + 7), chip_text, font=chip_font, fill="#eef4ff")
+        info_y += 52
 
     draw.text(
-        (80, y + 226),
+        (80, info_y + 12),
         f"{_store_label(offer['loja'])} | {_category_label(offer['categoria'])}",
         font=text_font,
         fill="#dbe7ff",
@@ -744,9 +821,15 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
         draw.text((80, 1800 + (index * 28)), link_line, font=micro_font, fill="#dbe7ff")
 
     coupon_text = (offer.get("cupom") or "").strip()
+    promo_text = (offer.get("promocao_texto") or "").strip()
+    banner_text = ""
     if coupon_text:
-        draw.rounded_rectangle((80, 650, 500, 730), radius=20, fill="#113885")
-        draw.text((110, 676), f"Cupom: {coupon_text[:18]}", font=label_font, fill="#f4f7fb")
+        banner_text = f"Cupom: {coupon_text[:20]}"
+    elif promo_text:
+        banner_text = promo_text[:34].rstrip(" -|,.;")
+    if banner_text:
+        draw.rounded_rectangle((80, 650, 620, 730), radius=20, fill="#113885")
+        draw.text((110, 676), banner_text, font=label_font, fill="#f4f7fb")
 
     image.save(destination, format="JPEG", quality=92, optimize=True)
     return {
@@ -856,6 +939,7 @@ def build_meta_post_previews(
     search_query: str | None = None,
     store_filter: str | None = None,
 ) -> list[dict[str, Any]]:
+    ensure_dashboard_tables(db)
     capped_limit = max(1, min(limit, 200))
     fetch_limit = max(capped_limit, len(offer_ids or []), 160)
     normalized_query = (search_query or "").strip()
@@ -926,6 +1010,14 @@ def build_meta_post_previews(
                 "category": _category_label(offer["categoria"]),
                 "price": float(offer["preco"] or 0),
                 "old_price": float(offer["preco_antigo"]) if offer.get("preco_antigo") else None,
+                "discount_percent": int(offer["desconto_percentual"]) if offer.get("desconto_percentual") is not None else _offer_discount_percent(offer),
+                "pix_price": float(offer["preco_pix"]) if offer.get("preco_pix") is not None else None,
+                "other_price": float(offer["preco_outros_meios"]) if offer.get("preco_outros_meios") is not None else None,
+                "installments": offer.get("parcelas_texto"),
+                "shipping": offer.get("frete_texto"),
+                "rating": float(offer["avaliacao_nota"]) if offer.get("avaliacao_nota") is not None else None,
+                "rating_count": int(offer["avaliacao_total"]) if offer.get("avaliacao_total") is not None else None,
+                "promotion_text": offer.get("promocao_texto"),
                 "coupon": offer.get("cupom"),
                 "image_url": offer["imagem_url"],
                 "video_url": _decode_tag_url(offer.get("tags"), "shopee_video_url:"),

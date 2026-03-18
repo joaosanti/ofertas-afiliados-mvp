@@ -29,6 +29,14 @@ def _normalize_price(value: Any) -> float:
     return round(_safe_float(value) or 0.0, 2)
 
 
+def _discount_percent(price: float, old_price: Any) -> int | None:
+    previous = _safe_float(old_price) or 0.0
+    current = float(price or 0.0)
+    if current <= 0 or previous <= current:
+        return None
+    return int(round(((previous - current) / previous) * 100))
+
+
 def _normalize_text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -151,6 +159,7 @@ def preview_shopee_csv_file(content: bytes, filename: str = "") -> list[dict[str
             if cleaned_candidate.startswith("shopee_video_url:") and cleaned_candidate not in tags:
                 tags = ",".join(filter(None, [tags, cleaned_candidate]))
 
+        enriched_old_price = float(enriched["old_price"]) if enriched.get("old_price") else None
         items.append(
             {
                 "provider": "shopee",
@@ -158,7 +167,15 @@ def preview_shopee_csv_file(content: bytes, filename: str = "") -> list[dict[str
                 "title": title,
                 "description": _build_shopee_description(row),
                 "price": price,
-                "old_price": float(enriched["old_price"]) if enriched.get("old_price") else None,
+                "old_price": enriched_old_price,
+                "discount_percent": enriched.get("discount_percent") or _discount_percent(price, enriched_old_price),
+                "pix_price": enriched.get("pix_price"),
+                "other_price": enriched.get("other_price"),
+                "installments": _normalize_text(enriched.get("installments")) or None,
+                "shipping": _normalize_text(enriched.get("shipping")) or None,
+                "rating": enriched.get("rating"),
+                "rating_count": enriched.get("rating_count"),
+                "promotion_text": _normalize_text(enriched.get("promotion_text")) or None,
                 "url": offer_link or product_link,
                 "canonical_url": product_link or final_url,
                 "image": _normalize_text(enriched.get("image")),

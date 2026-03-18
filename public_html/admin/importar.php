@@ -4,7 +4,7 @@ admin_require_login();
 
 $pdo = db();
 $flash = admin_flash_get();
-$recentRuns = admin_fetch_recent_runs($pdo, 'import', 12);
+$recentRuns = admin_fetch_recent_runs($pdo, 'import', 3);
 $resultPayload = null;
 $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
 $currentAdminLogin = admin_current_login_name();

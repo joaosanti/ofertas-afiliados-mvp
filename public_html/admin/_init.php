@@ -69,6 +69,30 @@ function admin_bootstrap_schema() {
     foreach ($pdo->query("SHOW COLUMNS FROM ofertas") as $column) {
       $offerColumns[(string) $column['Field']] = true;
     }
+    if (!isset($offerColumns['desconto_percentual'])) {
+      $pdo->exec("ALTER TABLE ofertas ADD COLUMN desconto_percentual INT NULL AFTER preco_antigo");
+    }
+    if (!isset($offerColumns['preco_pix'])) {
+      $pdo->exec("ALTER TABLE ofertas ADD COLUMN preco_pix DECIMAL(10,2) NULL AFTER desconto_percentual");
+    }
+    if (!isset($offerColumns['preco_outros_meios'])) {
+      $pdo->exec("ALTER TABLE ofertas ADD COLUMN preco_outros_meios DECIMAL(10,2) NULL AFTER preco_pix");
+    }
+    if (!isset($offerColumns['parcelas_texto'])) {
+      $pdo->exec("ALTER TABLE ofertas ADD COLUMN parcelas_texto VARCHAR(120) NULL AFTER preco_outros_meios");
+    }
+    if (!isset($offerColumns['frete_texto'])) {
+      $pdo->exec("ALTER TABLE ofertas ADD COLUMN frete_texto VARCHAR(160) NULL AFTER parcelas_texto");
+    }
+    if (!isset($offerColumns['avaliacao_nota'])) {
+      $pdo->exec("ALTER TABLE ofertas ADD COLUMN avaliacao_nota DECIMAL(4,2) NULL AFTER frete_texto");
+    }
+    if (!isset($offerColumns['avaliacao_total'])) {
+      $pdo->exec("ALTER TABLE ofertas ADD COLUMN avaliacao_total INT NULL AFTER avaliacao_nota");
+    }
+    if (!isset($offerColumns['promocao_texto'])) {
+      $pdo->exec("ALTER TABLE ofertas ADD COLUMN promocao_texto VARCHAR(255) NULL AFTER avaliacao_total");
+    }
     if (!isset($offerColumns['criado_por_admin_id'])) {
       $pdo->exec("ALTER TABLE ofertas ADD COLUMN criado_por_admin_id INT NULL AFTER ativo");
       $pdo->exec("ALTER TABLE ofertas ADD INDEX ix_ofertas_criado_por_admin_id (criado_por_admin_id)");
@@ -515,8 +539,9 @@ function admin_fetch_recent_runs(PDO $pdo, $type = 'social', $limit = 12) {
 
 admin_bootstrap_schema();
 
-function admin_fetch_social_candidates(PDO $pdo, $search = '', $store = '', $limit = 24) {
-  $limit = max(6, min((int) $limit, 60));
+function admin_fetch_social_candidates(PDO $pdo, $search = '', $store = '', $limit = 24, $page = 1) {
+  $limit = max(1, min((int) $limit, 60));
+  $page = max(1, (int) $page);
   $where = [
     'ativo = 1',
     '(expira_em IS NULL OR expira_em > NOW())',
@@ -547,15 +572,27 @@ function admin_fetch_social_candidates(PDO $pdo, $search = '', $store = '', $lim
     WHERE " . implode(' AND ', $where) . "
     GROUP BY o.id
     ORDER BY o.atualizado_em DESC, o.criado_em DESC, o.id DESC
-    LIMIT {$limit}
   ";
 
   $stmt = $pdo->prepare($sql);
   $stmt->execute($params);
-  $rows = $stmt->fetchAll();
+  $rows = $stmt->fetchAll() ?: [];
 
-  return array_values(array_filter($rows, static function ($row) {
+  $eligibleRows = array_values(array_filter($rows, static function ($row) {
     return admin_affiliate_audit($row['loja'] ?? '', $row['url_afiliado'] ?? '')['severity'] === 'ok';
   }));
+
+  $total = count($eligibleRows);
+  $pages = max(1, (int) ceil($total / max(1, $limit)));
+  $page = min($page, $pages);
+  $offset = ($page - 1) * $limit;
+
+  return [
+    'items' => array_slice($eligibleRows, $offset, $limit),
+    'total' => $total,
+    'page' => $page,
+    'limit' => $limit,
+    'pages' => $pages,
+  ];
 }
 

@@ -2649,3 +2649,24 @@ img { display: block; max-width: 100%; }
   }
 }
 
+
+
+.detail-commerce-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 18px 0 6px;
+}
+
+.detail-commerce-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(21, 112, 255, 0.10);
+  border: 1px solid rgba(21, 112, 255, 0.16);
+  color: var(--text-dark);
+  font-size: 14px;
+  font-weight: 700;
+}

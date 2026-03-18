@@ -81,6 +81,7 @@ public_html/generated/
 public_html/uploads/
 public_html/cache/
 public_html/stories/
+automacao_ofertas/runtime/
 
 # =========================
 # NODE / FRONT BUILD

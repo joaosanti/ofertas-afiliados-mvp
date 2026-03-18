@@ -5,14 +5,22 @@ from app.schemas import NormalizedOffer
 
 UPSERT_SQL = text("""
 INSERT INTO ofertas
-(slug, titulo, descricao, preco, preco_antigo, loja, url_afiliado, cupom, imagem_url, categoria, tags, destaque, ativo, criado_por_admin_id, criado_por_login)
+(slug, titulo, descricao, preco, preco_antigo, desconto_percentual, preco_pix, preco_outros_meios, parcelas_texto, frete_texto, avaliacao_nota, avaliacao_total, promocao_texto, loja, url_afiliado, cupom, imagem_url, categoria, tags, destaque, ativo, criado_por_admin_id, criado_por_login)
 VALUES
-(:slug, :titulo, :descricao, :preco, :preco_antigo, :loja, :url_afiliado, :cupom, :imagem_url, :categoria, :tags, :destaque, :ativo, :criado_por_admin_id, :criado_por_login)
+(:slug, :titulo, :descricao, :preco, :preco_antigo, :desconto_percentual, :preco_pix, :preco_outros_meios, :parcelas_texto, :frete_texto, :avaliacao_nota, :avaliacao_total, :promocao_texto, :loja, :url_afiliado, :cupom, :imagem_url, :categoria, :tags, :destaque, :ativo, :criado_por_admin_id, :criado_por_login)
 ON DUPLICATE KEY UPDATE
   titulo = VALUES(titulo),
   descricao = VALUES(descricao),
   preco = VALUES(preco),
   preco_antigo = VALUES(preco_antigo),
+  desconto_percentual = VALUES(desconto_percentual),
+  preco_pix = VALUES(preco_pix),
+  preco_outros_meios = VALUES(preco_outros_meios),
+  parcelas_texto = VALUES(parcelas_texto),
+  frete_texto = VALUES(frete_texto),
+  avaliacao_nota = VALUES(avaliacao_nota),
+  avaliacao_total = VALUES(avaliacao_total),
+  promocao_texto = VALUES(promocao_texto),
   loja = VALUES(loja),
   url_afiliado = VALUES(url_afiliado),
   cupom = VALUES(cupom),

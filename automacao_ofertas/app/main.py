@@ -1,5 +1,6 @@
 import os
 import secrets
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ import paramiko
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 from app.collectors.amazon import fetch_amazon_offers
@@ -18,8 +19,17 @@ from app.collectors.mercadolivre import fetch_mercadolivre_offers, preview_merca
 from app.collectors.shopee import fetch_shopee_offers, preview_shopee_affiliate_links, preview_shopee_offers
 from app.collectors.tiktok import fetch_tiktok_offers
 from app.database import SessionLocal
+from app.integrations.youtube_oauth import (
+    build_youtube_auth_url,
+    exchange_youtube_code,
+    fetch_youtube_channel,
+    refresh_youtube_token,
+    upload_youtube_thumbnail,
+    upload_youtube_short,
+)
 from app.integrations.mercadolivre_oauth import build_auth_url, exchange_code, refresh_token
 from app.services.dashboard_data import (
+    ensure_dashboard_tables,
     fetch_dashboard_snapshot,
     record_execution_error,
     record_execution_start,
@@ -72,6 +82,11 @@ from app.services.whatsapp_social import (
     send_whatsapp_group_batch,
     whatsapp_settings_snapshot,
 )
+from app.services.youtube_cuts import analyze_youtube_video_for_cuts
+from app.services.youtube_cuts import build_youtube_cut_publish_draft
+from app.services.youtube_cuts import youtube_cut_video_path
+from app.services.youtube_cuts import process_youtube_video_for_cuts
+from app.services.youtube_cuts import youtube_cuts_asset_path
 
 app = FastAPI(title="Automacao de Ofertas")
 UI_DIR = Path(__file__).resolve().parents[1] / "dashboard_ui"
@@ -215,6 +230,14 @@ class DashboardManualLinkItemPayload(BaseModel):
     description: str | None = None
     price: float | int | str = 0
     old_price: float | int | str | None = None
+    discount_percent: int | float | str | None = None
+    pix_price: float | int | str | None = None
+    other_price: float | int | str | None = None
+    installments: str | None = None
+    shipping: str | None = None
+    rating: float | int | str | None = None
+    rating_count: int | float | str | None = None
+    promotion_text: str | None = None
     url: str
     canonical_url: str | None = None
     image: str | None = None
@@ -264,6 +287,26 @@ class DashboardSocialRunPayload(BaseModel):
     offer_ids: list[int] | None = None
 
 
+class DashboardYoutubeCutsAnalyzePayload(BaseModel):
+    url: str
+
+
+class DashboardYoutubeCutsProcessPayload(BaseModel):
+    url: str
+    limit: int = 5
+    mode: str = "short"
+    selection_strategy: str = "openai_heuristica"
+
+
+class DashboardYoutubeCutPublishPayload(BaseModel):
+    job_id: str
+    cut_id: int
+    title: str | None = None
+    description: str | None = None
+    privacy_status: str = "private"
+    mode: str = "short"
+
+
 class DashboardSettingsPayload(BaseModel):
     manager_username: str | None = None
     manager_password: str | None = None
@@ -290,6 +333,11 @@ class DashboardSettingsPayload(BaseModel):
     sftp_password: str | None = None
     sftp_remote_path: str | None = None
     stories_public_base_url: str | None = None
+    youtube_client_id: str | None = None
+    youtube_client_secret: str | None = None
+    youtube_redirect_uri: str | None = None
+    ytdlp_cookies_from_browser: str | None = None
+    ytdlp_cookies_file: str | None = None
 
 
 class DashboardStoreRecategorizePayload(BaseModel):
@@ -318,6 +366,14 @@ class DashboardOfferUpdatePayload(BaseModel):
     descricao: str | None = None
     preco: float | int | str = 0
     preco_antigo: float | int | str | None = None
+    desconto_percentual: int | float | str | None = None
+    preco_pix: float | int | str | None = None
+    preco_outros_meios: float | int | str | None = None
+    parcelas_texto: str | None = None
+    frete_texto: str | None = None
+    avaliacao_nota: float | int | str | None = None
+    avaliacao_total: int | float | str | None = None
+    promocao_texto: str | None = None
     loja: str | None = None
     url_afiliado: str
     cupom: str | None = None
@@ -338,6 +394,85 @@ def _bool_env(name: str, default: bool = False) -> bool:
 
 def _site_base_url() -> str:
     return (os.getenv("SITE_BASE_URL") or "https://zeropreco.com.br").rstrip("/")
+
+
+def _youtube_token_expired(skew_seconds: int = 120) -> bool:
+    raw = (os.getenv("YOUTUBE_TOKEN_EXPIRES_AT") or "").strip()
+    if not raw:
+        return True
+    try:
+        expires_at = datetime.fromtimestamp(int(raw), tz=timezone.utc)
+    except ValueError:
+        return True
+    return expires_at <= datetime.now(timezone.utc) + timedelta(seconds=skew_seconds)
+
+
+def _youtube_token_updates(tokens: dict[str, Any], *, keep_existing_refresh: bool = True) -> dict[str, str]:
+    updates: dict[str, str] = {}
+    access_token = str(tokens.get("access_token") or "").strip()
+    refresh_token = str(tokens.get("refresh_token") or "").strip()
+    expires_in = int(tokens.get("expires_in") or 0)
+    if access_token:
+        updates["YOUTUBE_ACCESS_TOKEN"] = access_token
+    if refresh_token:
+        updates["YOUTUBE_REFRESH_TOKEN"] = refresh_token
+    elif not keep_existing_refresh:
+        updates["YOUTUBE_REFRESH_TOKEN"] = ""
+    if expires_in > 0:
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        updates["YOUTUBE_TOKEN_EXPIRES_AT"] = str(int(expires_at.timestamp()))
+    return updates
+
+
+def _youtube_auth_snapshot(refresh: bool = False) -> dict[str, Any]:
+    snapshot = {
+        "client_id_configured": bool((os.getenv("YOUTUBE_CLIENT_ID") or "").strip()),
+        "client_secret_configured": bool((os.getenv("YOUTUBE_CLIENT_SECRET") or "").strip()),
+        "redirect_uri": (os.getenv("YOUTUBE_REDIRECT_URI") or "").strip(),
+        "access_token_configured": bool((os.getenv("YOUTUBE_ACCESS_TOKEN") or "").strip()),
+        "refresh_token_configured": bool((os.getenv("YOUTUBE_REFRESH_TOKEN") or "").strip()),
+        "token_expired": _youtube_token_expired(),
+        "channel": None,
+        "authenticated": False,
+        "error": "",
+    }
+    access_token = (os.getenv("YOUTUBE_ACCESS_TOKEN") or "").strip()
+    refresh_token_value = (os.getenv("YOUTUBE_REFRESH_TOKEN") or "").strip()
+
+    if refresh and refresh_token_value and (not access_token or snapshot["token_expired"]):
+        tokens = refresh_youtube_token(refresh_token_value)
+        updates = _youtube_token_updates(tokens)
+        if updates:
+            _write_env_updates(updates)
+        access_token = (os.getenv("YOUTUBE_ACCESS_TOKEN") or "").strip()
+        snapshot["access_token_configured"] = bool(access_token)
+        snapshot["refresh_token_configured"] = bool((os.getenv("YOUTUBE_REFRESH_TOKEN") or "").strip())
+        snapshot["token_expired"] = _youtube_token_expired()
+
+    if access_token and not snapshot["token_expired"]:
+        try:
+            snapshot["channel"] = fetch_youtube_channel(access_token)
+            snapshot["authenticated"] = True
+        except Exception as exc:  # noqa: BLE001
+            snapshot["error"] = str(exc)
+    return snapshot
+
+
+def _youtube_access_token_ready() -> str:
+    refresh_token_value = (os.getenv("YOUTUBE_REFRESH_TOKEN") or "").strip()
+    access_token = (os.getenv("YOUTUBE_ACCESS_TOKEN") or "").strip()
+    if access_token and not _youtube_token_expired():
+        return access_token
+    if not refresh_token_value:
+        raise ValueError("YouTube nao autenticado. Conecte a conta antes de publicar.")
+    tokens = refresh_youtube_token(refresh_token_value)
+    updates = _youtube_token_updates(tokens)
+    if updates:
+        _write_env_updates(updates)
+    refreshed = (os.getenv("YOUTUBE_ACCESS_TOKEN") or "").strip()
+    if not refreshed:
+        raise ValueError("Nao foi possivel renovar o token do YouTube.")
+    return refreshed
 
 
 def _recent_site_social_offer_ids(db, limit: int = 20) -> list[int]:
@@ -691,6 +826,15 @@ def _env_settings_snapshot() -> dict:
         "auto_story_limit": max(1, int((os.getenv("AUTO_STORY_LIMIT") or "1").strip() or "1")),
         "whatsapp": whatsapp_settings_snapshot(),
         "sftp": sftp_settings_snapshot(),
+        "youtube": {
+            "client_id": os.getenv("YOUTUBE_CLIENT_ID") or "",
+            "client_secret_configured": bool((os.getenv("YOUTUBE_CLIENT_SECRET") or "").strip()),
+            "redirect_uri": os.getenv("YOUTUBE_REDIRECT_URI") or "",
+            "access_token_configured": bool((os.getenv("YOUTUBE_ACCESS_TOKEN") or "").strip()),
+            "refresh_token_configured": bool((os.getenv("YOUTUBE_REFRESH_TOKEN") or "").strip()),
+            "cookies_from_browser": os.getenv("YTDLP_COOKIES_FROM_BROWSER") or "",
+            "cookies_file": os.getenv("YTDLP_COOKIES_FILE") or "",
+        },
     }
 
 
@@ -1566,6 +1710,18 @@ def manager_ui_assets(asset_path: str, _: str = Depends(require_manager_auth)):
     if not asset.exists() or not asset.is_file():
         raise HTTPException(status_code=404, detail="Asset nao encontrado.")
 
+    text_media_types = {
+        ".html": "text/html; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".js": "application/javascript; charset=utf-8",
+        ".jsx": "text/babel; charset=utf-8",
+        ".json": "application/json; charset=utf-8",
+        ".svg": "image/svg+xml; charset=utf-8",
+    }
+    media_type = text_media_types.get(asset.suffix.lower())
+    if media_type:
+        return Response(content=asset.read_text(encoding="utf-8"), media_type=media_type)
+
     return FileResponse(asset)
 
 
@@ -1720,13 +1876,35 @@ def dashboard_api_mercadolivre_relink_existing_preview(payload: DashboardMercado
 
 
 @app.get("/dashboard/api/offers")
-def dashboard_api_offers(q: str = "", limit: int = 12, _: str = Depends(require_manager_auth)):
+def dashboard_api_offers(q: str = "", limit: int = 10, page: int = 1, _: str = Depends(require_manager_auth)):
     db = SessionLocal()
     try:
-        normalized_limit = min(max(int(limit or 12), 1), 50)
+        ensure_dashboard_tables(db)
+        normalized_limit = min(max(int(limit or 10), 1), 50)
+        normalized_page = max(int(page or 1), 1)
         query = (q or "").strip()
-        params: dict[str, Any] = {"limit": normalized_limit}
-        sql = """
+        params: dict[str, Any] = {"limit": normalized_limit, "offset": 0}
+        where_sql = ""
+        if query:
+            where_sql = """
+            WHERE titulo LIKE :query
+               OR slug LIKE :query
+               OR loja LIKE :query
+               OR categoria LIKE :query
+               OR tags LIKE :query
+            """
+            params["query"] = f"%{query}%"
+        total = int(
+            db.execute(
+                text(f"SELECT COUNT(*) FROM ofertas {where_sql}"),
+                {key: value for key, value in params.items() if key == "query"},
+            ).scalar()
+            or 0
+        )
+        pages = max(1, (total + normalized_limit - 1) // normalized_limit)
+        normalized_page = min(normalized_page, pages)
+        params["offset"] = (normalized_page - 1) * normalized_limit
+        sql = f"""
             SELECT
               id,
               slug,
@@ -1734,6 +1912,14 @@ def dashboard_api_offers(q: str = "", limit: int = 12, _: str = Depends(require_
               descricao,
               preco,
               preco_antigo,
+              desconto_percentual,
+              preco_pix,
+              preco_outros_meios,
+              parcelas_texto,
+              frete_texto,
+              avaliacao_nota,
+              avaliacao_total,
+              promocao_texto,
               loja,
               url_afiliado,
               cupom,
@@ -1745,23 +1931,21 @@ def dashboard_api_offers(q: str = "", limit: int = 12, _: str = Depends(require_
               expira_em,
               atualizado_em
             FROM ofertas
+            {where_sql}
+            ORDER BY atualizado_em DESC, id DESC
+            LIMIT :limit OFFSET :offset
         """
-        if query:
-            sql += """
-            WHERE titulo LIKE :query
-               OR slug LIKE :query
-               OR loja LIKE :query
-               OR categoria LIKE :query
-               OR tags LIKE :query
-            """
-            params["query"] = f"%{query}%"
-        sql += " ORDER BY atualizado_em DESC, id DESC LIMIT :limit"
         rows = db.execute(text(sql), params).mappings().all()
         items = [
             {
                 **dict(row),
                 "preco": float(row["preco"] or 0),
                 "preco_antigo": float(row["preco_antigo"]) if row["preco_antigo"] is not None else None,
+                "desconto_percentual": int(row["desconto_percentual"]) if row["desconto_percentual"] is not None else None,
+                "preco_pix": float(row["preco_pix"]) if row["preco_pix"] is not None else None,
+                "preco_outros_meios": float(row["preco_outros_meios"]) if row["preco_outros_meios"] is not None else None,
+                "avaliacao_nota": float(row["avaliacao_nota"]) if row["avaliacao_nota"] is not None else None,
+                "avaliacao_total": int(row["avaliacao_total"]) if row["avaliacao_total"] is not None else None,
                 "destaque": bool(row["destaque"]),
                 "ativo": bool(row["ativo"]),
                 "offer_url": f"{_site_base_url()}/oferta.php?slug={row['slug']}",
@@ -1769,7 +1953,14 @@ def dashboard_api_offers(q: str = "", limit: int = 12, _: str = Depends(require_
             }
             for row in rows
         ]
-        return {"count": len(items), "items": items}
+        return {
+            "count": len(items),
+            "total": total,
+            "page": normalized_page,
+            "pages": pages,
+            "limit": normalized_limit,
+            "items": items,
+        }
     finally:
         db.close()
 
@@ -1778,6 +1969,7 @@ def dashboard_api_offers(q: str = "", limit: int = 12, _: str = Depends(require_
 def dashboard_api_offer_update(offer_id: int, payload: DashboardOfferUpdatePayload, _: str = Depends(require_manager_auth)):
     db = SessionLocal()
     try:
+        ensure_dashboard_tables(db)
         existing = db.execute(text("SELECT id FROM ofertas WHERE id = :id LIMIT 1"), {"id": offer_id}).scalar()
         if not existing:
             raise HTTPException(status_code=404, detail="Oferta nao encontrada.")
@@ -1789,6 +1981,11 @@ def dashboard_api_offer_update(offer_id: int, payload: DashboardOfferUpdatePaylo
 
         slug = _normalize_offer_slug(db, payload.slug, title, ignore_id=offer_id)
         old_price = _parse_decimal(payload.preco_antigo, default=0.0) if payload.preco_antigo not in (None, "") else None
+        discount_percent = int(_parse_decimal(payload.desconto_percentual, default=0.0)) if payload.desconto_percentual not in (None, "") else None
+        pix_price = _parse_decimal(payload.preco_pix, default=0.0) if payload.preco_pix not in (None, "") else None
+        other_price = _parse_decimal(payload.preco_outros_meios, default=0.0) if payload.preco_outros_meios not in (None, "") else None
+        rating = _parse_decimal(payload.avaliacao_nota, default=0.0) if payload.avaliacao_nota not in (None, "") else None
+        rating_count = int(_parse_decimal(payload.avaliacao_total, default=0.0)) if payload.avaliacao_total not in (None, "") else None
         expires_at = (payload.expira_em or "").strip() or None
         if expires_at and "T" in expires_at:
             expires_at = expires_at.replace("T", " ") + ":00"
@@ -1802,6 +1999,14 @@ def dashboard_api_offer_update(offer_id: int, payload: DashboardOfferUpdatePaylo
                     descricao = :descricao,
                     preco = :preco,
                     preco_antigo = :preco_antigo,
+                    desconto_percentual = :desconto_percentual,
+                    preco_pix = :preco_pix,
+                    preco_outros_meios = :preco_outros_meios,
+                    parcelas_texto = :parcelas_texto,
+                    frete_texto = :frete_texto,
+                    avaliacao_nota = :avaliacao_nota,
+                    avaliacao_total = :avaliacao_total,
+                    promocao_texto = :promocao_texto,
                     loja = :loja,
                     url_afiliado = :url_afiliado,
                     cupom = :cupom,
@@ -1822,6 +2027,14 @@ def dashboard_api_offer_update(offer_id: int, payload: DashboardOfferUpdatePaylo
                 "descricao": (payload.descricao or "").strip() or None,
                 "preco": _parse_decimal(payload.preco, default=0.0),
                 "preco_antigo": old_price,
+                "desconto_percentual": discount_percent,
+                "preco_pix": pix_price,
+                "preco_outros_meios": other_price,
+                "parcelas_texto": (payload.parcelas_texto or "").strip() or None,
+                "frete_texto": (payload.frete_texto or "").strip() or None,
+                "avaliacao_nota": rating,
+                "avaliacao_total": rating_count,
+                "promocao_texto": (payload.promocao_texto or "").strip() or None,
                 "loja": (payload.loja or "").strip().lower() or None,
                 "url_afiliado": affiliate_url,
                 "cupom": (payload.cupom or "").strip() or None,
@@ -1844,6 +2057,14 @@ def dashboard_api_offer_update(offer_id: int, payload: DashboardOfferUpdatePaylo
                   descricao,
                   preco,
                   preco_antigo,
+                  desconto_percentual,
+                  preco_pix,
+                  preco_outros_meios,
+                  parcelas_texto,
+                  frete_texto,
+                  avaliacao_nota,
+                  avaliacao_total,
+                  promocao_texto,
                   loja,
                   url_afiliado,
                   cupom,
@@ -1865,6 +2086,11 @@ def dashboard_api_offer_update(offer_id: int, payload: DashboardOfferUpdatePaylo
             **dict(row),
             "preco": float(row["preco"] or 0),
             "preco_antigo": float(row["preco_antigo"]) if row["preco_antigo"] is not None else None,
+            "desconto_percentual": int(row["desconto_percentual"]) if row["desconto_percentual"] is not None else None,
+            "preco_pix": float(row["preco_pix"]) if row["preco_pix"] is not None else None,
+            "preco_outros_meios": float(row["preco_outros_meios"]) if row["preco_outros_meios"] is not None else None,
+            "avaliacao_nota": float(row["avaliacao_nota"]) if row["avaliacao_nota"] is not None else None,
+            "avaliacao_total": int(row["avaliacao_total"]) if row["avaliacao_total"] is not None else None,
             "destaque": bool(row["destaque"]),
             "ativo": bool(row["ativo"]),
             "offer_url": f"{_site_base_url()}/oferta.php?slug={row['slug']}",
@@ -2140,6 +2366,111 @@ def dashboard_api_social_run(payload: DashboardSocialRunPayload, _: str = Depend
     return execute_social_run(payload.platform, payload.mode, payload.limit, payload.offer_ids)
 
 
+@app.post("/dashboard/api/youtube/cuts/analyze")
+def dashboard_api_youtube_cuts_analyze(payload: DashboardYoutubeCutsAnalyzePayload, _: str = Depends(require_manager_auth)):
+    try:
+        return analyze_youtube_video_for_cuts(payload.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Falha ao consultar metadados do YouTube: {e}")
+
+
+@app.post("/dashboard/api/youtube/cuts/process")
+def dashboard_api_youtube_cuts_process(payload: DashboardYoutubeCutsProcessPayload, _: str = Depends(require_manager_auth)):
+    try:
+        mode = (payload.mode or "short").strip().lower()
+        max_limit = 3 if mode == "long" else 8
+        limit = max(1, min(int(payload.limit or 5), max_limit))
+        result = process_youtube_video_for_cuts(
+            payload.url,
+            limit=limit,
+            mode=mode,
+            selection_strategy=payload.selection_strategy,
+        )
+        result["youtube_auth"] = _youtube_auth_snapshot(refresh=False)
+        for item in result.get("cuts") or []:
+            item["publish_draft"] = build_youtube_cut_publish_draft(result["job_id"], int(item.get("cut_id") or 0))
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Falha ao consultar YouTube: {e}")
+
+
+@app.get("/dashboard/api/youtube/oauth/status")
+def dashboard_api_youtube_oauth_status(_: str = Depends(require_manager_auth)):
+    try:
+        return {"ok": True, "youtube_auth": _youtube_auth_snapshot(refresh=True)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Falha ao consultar autenticacao do YouTube: {e}")
+
+
+@app.get("/dashboard/api/youtube/oauth/url")
+def dashboard_api_youtube_oauth_url(_: str = Depends(require_manager_auth)):
+    try:
+        state = secrets.token_hex(16)
+        _write_env_updates({"YOUTUBE_OAUTH_STATE": state})
+        return {"ok": True, **build_youtube_auth_url(state)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/dashboard/api/youtube/cuts/publish")
+def dashboard_api_youtube_cuts_publish(payload: DashboardYoutubeCutPublishPayload, _: str = Depends(require_manager_auth)):
+    try:
+        draft = build_youtube_cut_publish_draft(payload.job_id, payload.cut_id, privacy_status=payload.privacy_status)
+        title = (payload.title or draft["title"]).strip()
+        description = (payload.description or draft["description"]).strip()
+        privacy_status = (payload.privacy_status or draft["privacy_status"]).strip().lower()
+        mode = (payload.mode or draft.get("mode") or "short").strip().lower()
+        access_token = _youtube_access_token_ready()
+        video_path = youtube_cut_video_path(payload.job_id, payload.cut_id)
+        published = upload_youtube_short(
+            access_token,
+            video_path,
+            title=title,
+            description=description,
+            privacy_status=privacy_status,
+        )
+        video_id = str(published.get("id") or "").strip()
+        thumbnail_result = None
+        thumbnail_error = ""
+        thumbnail_filename = str(draft.get("thumbnail_filename") or "").strip()
+        if mode == "long" and video_id and thumbnail_filename:
+            try:
+                thumbnail_path = youtube_cuts_asset_path(payload.job_id, thumbnail_filename)
+                thumbnail_result = upload_youtube_thumbnail(access_token, video_id, thumbnail_path)
+            except Exception as exc:  # noqa: BLE001
+                thumbnail_error = str(exc)
+        return {
+            "ok": True,
+            "job_id": payload.job_id,
+            "cut_id": payload.cut_id,
+            "mode": mode,
+            "privacy_status": privacy_status,
+            "youtube_video_id": video_id,
+            "youtube_url": f"https://www.youtube.com/watch?v={video_id}" if video_id else "",
+            "thumbnail_result": thumbnail_result,
+            "thumbnail_error": thumbnail_error,
+            "result": published,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Falha ao publicar no YouTube: {e}")
+
+
+@app.get("/dashboard/api/youtube/cuts/assets/{job_id}/{filename}")
+def dashboard_api_youtube_cuts_asset(job_id: str, filename: str, _: str = Depends(require_manager_auth)):
+    try:
+        return FileResponse(youtube_cuts_asset_path(job_id, filename))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @app.post("/dashboard/api/automation/import/run-now")
 def dashboard_api_automation_import_run_now(payload: DashboardJobRunPayload, _: str = Depends(require_manager_auth)):
     providers = payload.providers or _env_settings_snapshot().get("auto_import_providers") or ["mercadolivre"]
@@ -2238,6 +2569,16 @@ def dashboard_api_settings_save(payload: DashboardSettingsPayload, _: str = Depe
         updates["SFTP_REMOTE_PATH"] = payload.sftp_remote_path.strip()
     if payload.stories_public_base_url is not None:
         updates["STORIES_PUBLIC_BASE_URL"] = payload.stories_public_base_url.strip()
+    if payload.youtube_client_id is not None:
+        updates["YOUTUBE_CLIENT_ID"] = payload.youtube_client_id.strip()
+    if payload.youtube_client_secret is not None and payload.youtube_client_secret.strip() != "":
+        updates["YOUTUBE_CLIENT_SECRET"] = payload.youtube_client_secret.strip()
+    if payload.youtube_redirect_uri is not None:
+        updates["YOUTUBE_REDIRECT_URI"] = payload.youtube_redirect_uri.strip()
+    if payload.ytdlp_cookies_from_browser is not None:
+        updates["YTDLP_COOKIES_FROM_BROWSER"] = payload.ytdlp_cookies_from_browser.strip()
+    if payload.ytdlp_cookies_file is not None:
+        updates["YTDLP_COOKIES_FILE"] = payload.ytdlp_cookies_file.strip()
 
     if not updates:
         return {"ok": True, "message": "Nenhuma alteracao recebida.", "settings": _env_settings_snapshot(), "reauth_required": False}
@@ -2435,6 +2776,37 @@ def meli_oauth_url():
         return build_auth_url()
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/integrations/youtube/oauth/callback")
+def youtube_oauth_callback(code: str | None = None, state: str | None = None, error: str | None = None, error_description: str | None = None):
+    if error:
+        return HTMLResponse(f"<html><body><h2>OAuth YouTube falhou</h2><p>{error}</p><p>{error_description or ''}</p></body></html>")
+    if not code:
+        return HTMLResponse("<html><body><h2>OAuth YouTube incompleto</h2><p>Code nao recebido no callback.</p></body></html>", status_code=400)
+
+    expected_state = (os.getenv("YOUTUBE_OAUTH_STATE") or "").strip()
+    if expected_state and state and expected_state != state:
+        return HTMLResponse("<html><body><h2>OAuth YouTube recusado</h2><p>State invalido no callback.</p></body></html>", status_code=400)
+
+    try:
+        tokens = exchange_youtube_code(code)
+        updates = _youtube_token_updates(tokens, keep_existing_refresh=True)
+        updates["YOUTUBE_OAUTH_STATE"] = ""
+        _write_env_updates(updates)
+        channel = _youtube_auth_snapshot(refresh=False).get("channel") or {}
+        channel_title = channel.get("title") or "canal conectado"
+        return HTMLResponse(
+            "<html><body>"
+            "<h2>YouTube conectado</h2>"
+            f"<p>Conta autorizada com sucesso: {channel_title}</p>"
+            "<p>Voce pode fechar esta aba e voltar ao manager.</p>"
+            "</body></html>"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Falha no callback do YouTube: {e}")
 
 
 @app.get("/integrations/meli/callback")

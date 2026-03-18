@@ -8,7 +8,7 @@ $pdo = db();
 $filter = trim((string) ($_GET['loja'] ?? ''));
 $mode = trim((string) ($_GET['modo'] ?? ''));
 $search = trim((string) ($_GET['q'] ?? ''));
-$limit = 30;
+$limit = 10;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   admin_csrf_check_or_die();
@@ -98,30 +98,6 @@ $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $ofertas = $stmt->fetchAll();
 $lojas = $pdo->query('SELECT loja, COUNT(*) AS total FROM ofertas GROUP BY loja ORDER BY total DESC, loja ASC')->fetchAll();
-$visibleCount = count($ofertas);
-$activeCount = 0;
-$featuredCount = 0;
-$visibleClicks = 0;
-foreach ($ofertas as $item) {
-  $activeCount += ((int) $item['ativo'] === 1) ? 1 : 0;
-  $featuredCount += ((int) $item['destaque'] === 1) ? 1 : 0;
-  $visibleClicks += (int) ($item['clicks'] ?? 0);
-}
-$invalidMeliCount = (int) $pdo->query("
-  SELECT COUNT(*)
-  FROM ofertas
-  WHERE LOWER(loja) = 'mercado livre'
-    AND (
-      url_afiliado NOT LIKE '%/social/%'
-      AND url_afiliado NOT LIKE '%matt_tool=%'
-      AND url_afiliado NOT LIKE '%affiliate-profile%'
-      AND url_afiliado NOT LIKE '%polycard_client=affiliates%'
-      AND (
-        url_afiliado NOT LIKE '%wid=%'
-        OR url_afiliado NOT LIKE '%sid=affiliates%'
-      )
-    )
-")->fetchColumn();
 $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
 
 function admin_offer_tag_parts($rawTags) {
@@ -144,6 +120,10 @@ function admin_offer_tag_parts($rawTags) {
   }
 
   return $clean;
+}
+
+function admin_offer_tag_is_not_url($value) {
+  return !admin_offer_is_url($value);
 }
 
 function admin_offer_is_url($value) {
@@ -214,29 +194,6 @@ function admin_offer_is_url($value) {
     </div>
   </section>
 
-  <section class="admin-stats-grid">
-    <article class="admin-stat-card">
-      <div class="admin-stat-label">Ofertas nesta visao</div>
-      <div class="admin-stat-value"><?= (int) $visibleCount ?></div>
-      <div class="admin-stat-foot"><?= $filter !== '' ? 'Filtro por loja ativo com exibição dos 30 mais recentes.' : 'Catálogo operacional travado nos 30 itens mais recentes.' ?></div>
-    </article>
-    <article class="admin-stat-card">
-      <div class="admin-stat-label">Ativas</div>
-      <div class="admin-stat-value"><?= (int) $activeCount ?></div>
-      <div class="admin-stat-foot"><?= (int) $featuredCount ?> em destaque neste recorte.</div>
-    </article>
-    <article class="admin-stat-card">
-      <div class="admin-stat-label">Cliques somados</div>
-      <div class="admin-stat-value"><?= number_format((int) $visibleClicks, 0, ',', '.') ?></div>
-      <div class="admin-stat-foot">Ordenação prioriza atualização e cadastro recente.</div>
-    </article>
-    <article class="admin-stat-card">
-      <div class="admin-stat-label">ML para revisar</div>
-      <div class="admin-stat-value"><?= (int) $invalidMeliCount ?></div>
-      <div class="admin-stat-foot">Links sem marcador oficial de afiliado.</div>
-    </article>
-  </section>
-
   <section class="admin-panel">
     <form method="get" class="admin-filter-form">
       <div class="admin-search-toolbar">
@@ -265,11 +222,11 @@ function admin_offer_is_url($value) {
       <?php endif; ?>
     </form>
     <div class="admin-filter-row">
-      <span class="admin-meta-chip admin-meta-chip-soft">Exibindo sempre os 30 últimos itens</span>
+      <span class="admin-meta-chip admin-meta-chip-soft">Exibindo sempre os 10 últimos itens</span>
       <?php foreach ($lojas as $loja): ?>
         <a class="badge" href="/admin/ofertas.php?<?= http_build_query(['loja' => $loja['loja']]) ?>"><?= h($loja['loja']) ?> (<?= (int) $loja['total'] ?>)</a>
       <?php endforeach; ?>
-    </a>
+    </div>
   </section>
 
   <section class="admin-panel">
@@ -288,7 +245,7 @@ function admin_offer_is_url($value) {
           <?php $isMeli = strtolower((string) $o['loja']) === 'mercado livre'; ?>
           <?php $isAffiliateOk = $isMeli ? admin_is_meli_affiliate_url($o['url_afiliado']) : false; ?>
           <?php $tagParts = admin_offer_tag_parts($o['tags']); ?>
-          <?php $tagChips = array_values(array_filter($tagParts, static fn($item) => !admin_offer_is_url($item))); ?>
+          <?php $tagChips = array_values(array_filter($tagParts, 'admin_offer_tag_is_not_url')); ?>
           <article class="admin-offer-card">
             <div class="admin-offer-layout">
               <div>
@@ -396,5 +353,3 @@ function admin_offer_is_url($value) {
 </script>
 </body>
 </html>
-
-

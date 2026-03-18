@@ -40,6 +40,18 @@ $offerDescription = trim((string) ($offer['descricao'] ?? ''));
 $offerDescription = preg_replace('/\s*\|\s*Comiss(?:a|ã)o:\s*[^|]+/iu', '', $offerDescription);
 $offerDescription = preg_replace('/\s*\|\s*Retorno estimado:\s*[^|]+/iu', '', $offerDescription);
 $displayDescription = preg_replace('/MLB\d+/', site_category_label($offer['categoria']), $offerDescription);
+$commerceHighlights = [];
+if (!empty($offer['desconto_percentual'])) { $commerceHighlights[] = $offer['desconto_percentual'] . '% OFF'; }
+if (!empty($offer['preco_pix'])) { $commerceHighlights[] = 'No Pix: ' . site_money($offer['preco_pix']); }
+if (!empty($offer['preco_outros_meios'])) { $commerceHighlights[] = 'Outros meios: ' . site_money($offer['preco_outros_meios']); }
+if (!empty($offer['parcelas_texto'])) { $commerceHighlights[] = 'Parcelamento: ' . $offer['parcelas_texto']; }
+if (!empty($offer['frete_texto'])) { $commerceHighlights[] = 'Frete: ' . $offer['frete_texto']; }
+if (!empty($offer['avaliacao_nota'])) {
+  $ratingText = 'Avaliacao: ' . number_format((float) $offer['avaliacao_nota'], 1, ',', '.');
+  $ratingText .= !empty($offer['avaliacao_total']) ? '/5 (' . number_format((int) $offer['avaliacao_total'], 0, ',', '.') . ')' : '/5';
+  $commerceHighlights[] = $ratingText;
+}
+if (!empty($offer['promocao_texto'])) { $commerceHighlights[] = 'Promocao: ' . $offer['promocao_texto']; }
 $descriptionParts = preg_split('/[\r\n]+|[.;â€¢]+/', $offerDescription) ?: [];
 $sellingPoints = [];
 foreach ($descriptionParts as $part) {
@@ -182,6 +194,15 @@ if ($shareImage === '') {
                 <?php endif; ?>
               </div>
             </div>
+
+            <?php if ($commerceHighlights): ?>
+              <div class="detail-commerce-grid">
+                <?php foreach ($commerceHighlights as $highlight): ?>
+                  <span class="detail-commerce-chip"><?= h($highlight) ?></span>
+                <?php endforeach; ?>
+              </div>
+            <?php endif; ?>
+
 
             <div class="cta-row" style="justify-content:flex-start;">
               <a class="button button-primary" href="?slug=<?= urlencode($offer['slug']) ?>&go=1" target="_blank" rel="noopener sponsored nofollow">Ir para a oferta</a>

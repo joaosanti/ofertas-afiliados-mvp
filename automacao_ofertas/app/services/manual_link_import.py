@@ -104,6 +104,120 @@ def _normalize_price(value: Any) -> float:
     return round(parsed or 0.0, 2)
 
 
+def _safe_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(str(value).replace('.', '').replace(',', '.')))
+    except ValueError:
+        return None
+
+
+def _clean_snippet(value: Any, limit: int = 160) -> str | None:
+    text = re.sub(r"\s+", " ", unescape(str(value or ""))).strip(" -:|,.")
+    if not text:
+        return None
+    return text[:limit]
+
+
+def _html_plain_text(html_text: str) -> str:
+    content = re.sub(r"<script[\s\S]*?</script>", " ", html_text or "", flags=re.IGNORECASE)
+    content = re.sub(r"<style[\s\S]*?</style>", " ", content, flags=re.IGNORECASE)
+    content = re.sub(r"<[^>]+>", " ", content)
+    return re.sub(r"\s+", " ", unescape(content)).strip()
+
+
+def _discount_percent(price: Any, old_price: Any) -> int | None:
+    current = _normalize_price(price)
+    previous = _normalize_price(old_price)
+    if current <= 0 or previous <= current:
+        return None
+    return int(round(((previous - current) / previous) * 100))
+
+
+def _extract_amazon_offer_metadata(html_text: str, price: Any, old_price: Any) -> dict[str, Any]:
+    plain = _html_plain_text(html_text)
+    rating = _safe_float(_extract_first(plain, [
+        r"([0-5][\.,][0-9])\s+de\s+5\s+estrelas",
+        r"([0-5][\.,][0-9])\s+de\s+5",
+    ]))
+    rating_count = _safe_int(_extract_first(plain, [
+        r"([\d\.,]+)\s+avaliac(?:ao|oes)",
+        r"([\d\.,]+)\s+classificac(?:ao|oes)",
+    ]))
+    installments = _clean_snippet(_extract_first(plain, [
+        r"((?:em ate|ate)\s+\d+x\s+de\s+R\$\s*[\d\.,]+(?:\s+sem juros)?)",
+        r"(\d+x\s+de\s+R\$\s*[\d\.,]+(?:\s+sem juros)?)",
+    ]))
+    shipping = _clean_snippet(_extract_first(plain, [
+        r"(Entrega GRATIS[^\.]{0,80})",
+        r"(Frete GRATIS[^\.]{0,80})",
+        r"(Entrega gratis[^\.]{0,80})",
+        r"(Frete gratis[^\.]{0,80})",
+    ]))
+    promo_bits = []
+    for pattern in [
+        r"(R\$\s*[\d\.,]+\s*off[^\.]{0,90})",
+        r"(Mais por Menos:[^\.]{0,110})",
+        r"(Cupom de desconto[^\.]{0,110})",
+    ]:
+        value = _clean_snippet(_extract_first(plain, [pattern]), 120)
+        if value and value not in promo_bits:
+            promo_bits.append(value)
+    discount_percent = _safe_int(_extract_first(plain, [r"-?(\d{1,2})%"])) or _discount_percent(price, old_price)
+    return {
+        "discount_percent": discount_percent,
+        "installments": installments,
+        "shipping": shipping,
+        "rating": rating,
+        "rating_count": rating_count,
+        "promotion_text": " | ".join(promo_bits[:2]) or None,
+    }
+
+
+def _extract_ml_offer_metadata(html_text: str, price: Any, old_price: Any) -> dict[str, Any]:
+    plain = _html_plain_text(html_text)
+    discount_percent = _safe_int(_extract_first(plain, [r"(\d{1,2})%\s*OFF"])) or _discount_percent(price, old_price)
+    pix_price = _normalize_price(_extract_first(plain, [
+        r"R\$\s*([\d\.,]+)\s*(?:\d{1,2}%\s*OFF\s*)?no Pix",
+        r"no Pix ou[^R]{0,20}R\$\s*([\d\.,]+)",
+    ])) or None
+    if pix_price is None and "no pix" in plain.lower() and _normalize_price(price) > 0:
+        pix_price = _normalize_price(price)
+    other_price = _normalize_price(_extract_first(plain, [r"R\$\s*([\d\.,]+)\s*em outros meios"])) or None
+    installments = _clean_snippet(_extract_first(plain, [
+        r"((?:em|por)\s+\d+x\s+de\s*R\$\s*[\d\.,]+(?:\s+sem juros)?)",
+        r"(\d+x\s+de\s+R\$\s*[\d\.,]+(?:\s+sem juros)?)",
+    ]))
+    shipping = _clean_snippet(_extract_first(plain, [
+        r"(Chegara gratis[^\.]{0,80})",
+        r"(Frete gratis[^\.]{0,80})",
+        r"(Frete GRATIS[^\.]{0,80})",
+    ]))
+    rating = _safe_float(_extract_first(plain, [
+        r"Avaliacao\s*([0-5][\.,][0-9])\s*de\s*5",
+        r"([0-5][\.,][0-9])\s+de\s+5",
+    ]))
+    rating_count = _safe_int(_extract_first(plain, [
+        r"Avaliacao\s*[0-5][\.,][0-9]\s*de\s*5[^\d]{0,20}([\d\.,]+)",
+        r"\(([\d\.,]+)\)",
+    ]))
+    promotion_text = _clean_snippet(_extract_first(plain, [
+        r"(\d{1,2}%\s*OFF[^\.]{0,120})",
+        r"(no Pix ou Saldo no Mercado Pago[^\.]{0,120})",
+    ]), 140)
+    return {
+        "discount_percent": discount_percent,
+        "pix_price": pix_price,
+        "other_price": other_price,
+        "installments": installments,
+        "shipping": shipping,
+        "rating": rating,
+        "rating_count": rating_count,
+        "promotion_text": promotion_text,
+    }
+
+
 def _normalize_link(link: str) -> str:
     raw = (link or "").strip()
     if not raw:
@@ -467,13 +581,20 @@ def _build_ml_offer_from_api(item_id: str, affiliate_url: str, fallback_html: st
         )
     )
     canonical_hint = str(payload.get("permalink") or "").strip() or affiliate_url
+    price = float(payload.get("price") or 0)
+    old_price = float(payload["original_price"]) if payload.get("original_price") else None
+    commerce_metadata = _extract_ml_offer_metadata(fallback_html or "", price, old_price)
+    if not commerce_metadata.get("shipping") and bool(((payload.get("shipping") or {}).get("free_shipping"))):
+        commerce_metadata["shipping"] = "Frete gr?tis"
+    if not commerce_metadata.get("discount_percent"):
+        commerce_metadata["discount_percent"] = _discount_percent(price, old_price)
     return {
         "provider": "mercadolivre",
         "store": "Mercado Livre",
         "title": title,
         "description": description,
-        "price": float(payload.get("price") or 0),
-        "old_price": float(payload["original_price"]) if payload.get("original_price") else None,
+        "price": price,
+        "old_price": old_price,
         "url": affiliate_url,
         "canonical_url": affiliate_url,
         "image": image,
@@ -487,6 +608,7 @@ def _build_ml_offer_from_api(item_id: str, affiliate_url: str, fallback_html: st
         "import_allowed": bool(meta["official"]),
         "item_id": item_id,
         "product_id": str(payload.get("catalog_product_id") or "").strip() or _extract_ml_product_id_from_url(canonical_hint),
+        **commerce_metadata,
     }
 
 
@@ -789,6 +911,12 @@ def _extract_generic_offer(provider: str, source_url: str, final_url: str, html_
         normalized_title = (title or "").strip().lower()
         if normalized_title in {"mercado livre", "mercadolivre"} or price <= 0:
             raise ValueError("Mercado Livre nao retornou os dados do produto. Isso normalmente acontece quando a pagina foi bloqueada temporariamente.")
+    commerce_metadata: dict[str, Any] = {}
+    if provider == "amazon":
+        commerce_metadata = _extract_amazon_offer_metadata(html_text, price, old_price)
+    elif provider == "mercadolivre":
+        commerce_metadata = _extract_ml_offer_metadata(html_text, price, old_price)
+
     affiliate_detected, affiliate_code = _detect_affiliate(final_url or source_url)
     import_allowed = True
     affiliate_warning = None
@@ -819,6 +947,7 @@ def _extract_generic_offer(provider: str, source_url: str, final_url: str, html_
         "affiliate_status": affiliate_status,
         "affiliate_warning": affiliate_warning,
         "import_allowed": import_allowed,
+        **commerce_metadata,
     }
 
 

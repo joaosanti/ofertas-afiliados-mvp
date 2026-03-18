@@ -8,10 +8,27 @@ $socialPreviewPayload = $_SESSION['admin_social_preview'] ?? null;
 unset($_SESSION['admin_social_preview']);
 $search = trim((string) ($_GET['q'] ?? ''));
 $store = trim((string) ($_GET['loja'] ?? ''));
-$limitDefault = ($search !== '' || $store !== '') ? 30 : 24;
+$limitDefault = 10;
 $limit = (int) ($_GET['limit'] ?? $limitDefault);
-$limit = max(6, min($limit, 60));
+$limit = max(1, min($limit, 30));
+$page = max(1, (int) ($_GET['page'] ?? 1));
 $resultPayload = null;
+
+function social_admin_query(array $overrides = []) {
+  global $search, $store, $limit, $page;
+  $params = [
+    'q' => $search,
+    'loja' => $store,
+    'limit' => $limit,
+    'page' => $page,
+  ];
+  foreach ($overrides as $key => $value) {
+    $params[$key] = $value;
+  }
+  return http_build_query(array_filter($params, static function ($value) {
+    return $value !== '' && $value !== null;
+  }));
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   admin_csrf_check_or_die();
@@ -20,7 +37,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   if ($action === 'publish_selected') {
     $platform = trim((string) ($_POST['platform'] ?? 'facebook'));
     $mode = trim((string) ($_POST['mode'] ?? 'feed'));
-    $offerIds = array_values(array_filter(array_map('intval', (array) ($_POST['offer_ids'] ?? []))));
+    $offerIds = array_values(array_unique(array_filter(array_map('intval', (array) ($_POST['offer_ids'] ?? [])))));
 
     if (!$offerIds) {
       admin_flash_set('error', 'Selecione pelo menos uma oferta para publicar.');
@@ -53,21 +70,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       admin_flash_set('error', (string) ($resultPayload['error'] ?? 'Falha ao executar o job Python.'));
     }
 
-    $query = [];
-    if ($search !== '') {
-      $query['q'] = $search;
-    }
-    if ($store !== '') {
-      $query['loja'] = $store;
-    }
-    $query['limit'] = $limit;
-
-    header('Location: /admin/social.php?' . http_build_query($query));
+    header('Location: /admin/social.php?' . social_admin_query(['page' => 1]));
     exit;
   }
 }
 
-$offers = admin_fetch_social_candidates($pdo, $search, $store, $limit);
+$offersPayload = admin_fetch_social_candidates($pdo, $search, $store, $limit, $page);
+$offers = (array) ($offersPayload['items'] ?? []);
+$offersTotal = (int) ($offersPayload['total'] ?? 0);
+$page = (int) ($offersPayload['page'] ?? $page);
+$totalPages = (int) ($offersPayload['pages'] ?? 1);
 $stores = $pdo->query("
   SELECT loja, COUNT(*) AS total
   FROM ofertas
@@ -75,7 +87,7 @@ $stores = $pdo->query("
   GROUP BY loja
   ORDER BY total DESC, loja ASC
 ")->fetchAll();
-$recentRuns = admin_fetch_recent_runs($pdo, 'social', 12);
+$recentRuns = admin_fetch_recent_runs($pdo, 'social', 3);
 $pythonEnabled = admin_python_job_enabled();
 $shellEnabled = admin_shell_exec_enabled();
 $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
@@ -208,7 +220,11 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
         </div>
         <div class="admin-field">
           <label for="limit">Limite</label>
-          <input id="limit" type="number" name="limit" value="<?= (int) $limit ?>" min="6" max="48">
+          <input id="limit" type="number" name="limit" value="<?= (int) $limit ?>" min="1" max="30">
+        </div>
+        <div class="admin-field">
+          <label for="page">Pagina</label>
+          <input id="page" type="number" name="page" value="<?= (int) $page ?>" min="1" max="<?= max(1, $totalPages) ?>">
         </div>
         <div class="admin-field admin-field-submit">
           <label>&nbsp;</label>
@@ -220,7 +236,7 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
     <form method="post">
       <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
       <input type="hidden" name="acao" value="publish_selected">
-      <div class="admin-field-grid" style="margin-top:18px;">
+      <div class="admin-field-grid admin-field-grid-compact" style="margin-top:18px;">
         <div class="admin-field">
           <label for="platform_manual">Plataforma</label>
           <select id="platform_manual" name="platform">
@@ -239,6 +255,10 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
             <option value="story">Story</option>
             <option value="web">WhatsApp Web Local</option>
           </select>
+        </div>
+        <div class="admin-field admin-field-submit">
+          <label>&nbsp;</label>
+          <button class="btn" type="submit" id="social-manual-submit">Publicar selecionadas</button>
         </div>
       </div>
 
@@ -296,6 +316,11 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
       <?php if (!$offers): ?>
         <div class="admin-empty" style="margin-top:18px;">Nenhuma oferta elegível para publicação com estes filtros.</div>
       <?php else: ?>
+        <div class="admin-meta-row" style="margin-top:18px;">
+          <span class="admin-meta-chip"><?= (int) $offersTotal ?> ofertas elegiveis</span>
+          <span class="admin-meta-chip">pagina <?= (int) $page ?> de <?= (int) $totalPages ?></span>
+          <span class="admin-meta-chip" id="social-selected-count">0 selecionadas</span>
+        </div>
         <div class="admin-offers-grid" style="margin-top:18px;">
           <?php foreach ($offers as $offer): ?>
             <article class="admin-offer-card">
@@ -327,7 +352,7 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                 <div class="admin-mini-grid">
                   <div class="admin-side-card">
                     <label class="admin-check-chip">
-                      <input type="checkbox" name="offer_ids[]" value="<?= (int) $offer['id'] ?>">
+                      <input type="checkbox" name="offer_ids[]" value="<?= (int) $offer['id'] ?>" data-social-offer-checkbox>
                       Selecionar oferta <?= (int) $offer['id'] ?>
                     </label>
                   </div>
@@ -340,9 +365,21 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
             </article>
           <?php endforeach; ?>
         </div>
-        <div class="admin-form-actions" style="margin-top:18px;">
-          <button class="btn" type="submit" id="social-manual-submit">Publicar selecionadas</button>
-        </div>
+        <?php if ($totalPages > 1): ?>
+          <div class="admin-meta-row" style="margin-top:18px; gap:10px; flex-wrap:wrap;">
+            <?php if ($page > 1): ?>
+              <a class="btn-link" href="/admin/social.php?<?= h(social_admin_query(['page' => $page - 1])) ?>">Pagina anterior</a>
+            <?php endif; ?>
+            <?php for ($pageNumber = max(1, $page - 2); $pageNumber <= min($totalPages, $page + 2); $pageNumber++): ?>
+              <a class="btn-link <?= $pageNumber === $page ? 'primary' : '' ?>" href="/admin/social.php?<?= h(social_admin_query(['page' => $pageNumber])) ?>">
+                <?= (int) $pageNumber ?>
+              </a>
+            <?php endfor; ?>
+            <?php if ($page < $totalPages): ?>
+              <a class="btn-link" href="/admin/social.php?<?= h(social_admin_query(['page' => $page + 1])) ?>">Proxima pagina</a>
+            <?php endif; ?>
+          </div>
+        <?php endif; ?>
       <?php endif; ?>
     </form>
   </section>
@@ -404,6 +441,67 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
 
     window.addEventListener('resize', syncMenuState);
     syncMenuState();
+  })();
+
+  (function () {
+    var storageKey = 'admin-social-selected-offers';
+    var form = document.querySelector('form[method="post"]');
+    var checkboxes = document.querySelectorAll('[data-social-offer-checkbox]');
+    var selectedCount = document.getElementById('social-selected-count');
+    if (!form || !checkboxes.length) {
+      return;
+    }
+
+    function loadSelected() {
+      try {
+        return JSON.parse(window.localStorage.getItem(storageKey) || '[]');
+      } catch (error) {
+        return [];
+      }
+    }
+
+    function saveSelected(values) {
+      window.localStorage.setItem(storageKey, JSON.stringify(values));
+    }
+
+    function updateSelectedCount(values) {
+      if (selectedCount) {
+        selectedCount.textContent = values.length + ' selecionadas';
+      }
+    }
+
+    var selected = loadSelected().map(function (value) { return String(value); });
+    checkboxes.forEach(function (checkbox) {
+      var value = String(checkbox.value);
+      checkbox.checked = selected.indexOf(value) !== -1;
+      checkbox.addEventListener('change', function () {
+        var current = loadSelected().map(function (item) { return String(item); });
+        if (checkbox.checked) {
+          if (current.indexOf(value) === -1) {
+            current.push(value);
+          }
+        } else {
+          current = current.filter(function (item) { return item !== value; });
+        }
+        saveSelected(current);
+        updateSelectedCount(current);
+      });
+    });
+    updateSelectedCount(selected);
+
+    form.addEventListener('submit', function () {
+      form.querySelectorAll('input[data-social-selected-hidden]').forEach(function (input) {
+        input.remove();
+      });
+      loadSelected().forEach(function (value) {
+        var hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = 'offer_ids[]';
+        hidden.value = value;
+        hidden.setAttribute('data-social-selected-hidden', '1');
+        form.appendChild(hidden);
+      });
+    });
   })();
 
   (function () {

@@ -16,6 +16,14 @@ $oferta = [
   'descricao' => '',
   'preco' => '',
   'preco_antigo' => '',
+  'desconto_percentual' => '',
+  'preco_pix' => '',
+  'preco_outros_meios' => '',
+  'parcelas_texto' => '',
+  'frete_texto' => '',
+  'avaliacao_nota' => '',
+  'avaliacao_total' => '',
+  'promocao_texto' => '',
   'loja' => '',
   'url_afiliado' => '',
   'cupom' => '',
@@ -48,6 +56,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $descricao = trim((string) ($_POST['descricao'] ?? ''));
   $precoRaw = trim((string) ($_POST['preco'] ?? ''));
   $precoAntigoRaw = trim((string) ($_POST['preco_antigo'] ?? ''));
+  $descontoPercentualRaw = trim((string) ($_POST['desconto_percentual'] ?? ''));
+  $precoPixRaw = trim((string) ($_POST['preco_pix'] ?? ''));
+  $precoOutrosMeiosRaw = trim((string) ($_POST['preco_outros_meios'] ?? ''));
+  $parcelasTexto = substr(trim((string) ($_POST['parcelas_texto'] ?? '')), 0, 120);
+  $freteTexto = substr(trim((string) ($_POST['frete_texto'] ?? '')), 0, 160);
+  $avaliacaoNotaRaw = trim((string) ($_POST['avaliacao_nota'] ?? ''));
+  $avaliacaoTotalRaw = trim((string) ($_POST['avaliacao_total'] ?? ''));
+  $promocaoTexto = substr(trim((string) ($_POST['promocao_texto'] ?? '')), 0, 255);
   $loja = strtolower(substr(trim((string) ($_POST['loja'] ?? '')), 0, 40));
   $urlAfiliado = trim((string) ($_POST['url_afiliado'] ?? ''));
   $cupom = substr(trim((string) ($_POST['cupom'] ?? '')), 0, 60);
@@ -64,6 +80,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $slug = admin_unique_slug($pdo, admin_normalize_slug($slugInput, $titulo), $idPost);
     $preco = admin_parse_decimal($precoRaw);
     $precoAntigo = ($precoAntigoRaw !== '') ? admin_parse_decimal($precoAntigoRaw) : null;
+    $descontoPercentual = ($descontoPercentualRaw !== '') ? (int) round(admin_parse_decimal($descontoPercentualRaw)) : null;
+    $precoPix = ($precoPixRaw !== '') ? admin_parse_decimal($precoPixRaw) : null;
+    $precoOutrosMeios = ($precoOutrosMeiosRaw !== '') ? admin_parse_decimal($precoOutrosMeiosRaw) : null;
+    $parcelasTexto = ($parcelasTexto !== '') ? $parcelasTexto : null;
+    $freteTexto = ($freteTexto !== '') ? $freteTexto : null;
+    $avaliacaoNota = ($avaliacaoNotaRaw !== '') ? admin_parse_decimal($avaliacaoNotaRaw) : null;
+    $avaliacaoTotal = ($avaliacaoTotalRaw !== '') ? (int) round(admin_parse_decimal($avaliacaoTotalRaw)) : null;
+    $promocaoTexto = ($promocaoTexto !== '') ? $promocaoTexto : null;
     $cupom = ($cupom !== '') ? $cupom : null;
     $imagemUrl = ($imagemUrl !== '') ? $imagemUrl : null;
     $tags = ($tags !== '') ? $tags : null;
@@ -72,19 +96,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($idPost > 0) {
       $sql = 'UPDATE ofertas
-              SET slug=?, titulo=?, descricao=?, preco=?, preco_antigo=?, loja=?, url_afiliado=?, cupom=?, imagem_url=?, categoria=?, tags=?, destaque=?, ativo=?, expira_em=?
+              SET slug=?, titulo=?, descricao=?, preco=?, preco_antigo=?, desconto_percentual=?, preco_pix=?, preco_outros_meios=?, parcelas_texto=?, frete_texto=?, avaliacao_nota=?, avaliacao_total=?, promocao_texto=?, loja=?, url_afiliado=?, cupom=?, imagem_url=?, categoria=?, tags=?, destaque=?, ativo=?, expira_em=?
               WHERE id=?';
       $pdo->prepare($sql)->execute([
-        $slug, $titulo, $descricao, $preco, $precoAntigo, $loja, $urlAfiliado, $cupom, $imagemUrl, $categoria, $tags, $destaque, $ativo, $expiraEm, $idPost,
+        $slug, $titulo, $descricao, $preco, $precoAntigo, $descontoPercentual, $precoPix, $precoOutrosMeios, $parcelasTexto, $freteTexto, $avaliacaoNota, $avaliacaoTotal, $promocaoTexto, $loja, $urlAfiliado, $cupom, $imagemUrl, $categoria, $tags, $destaque, $ativo, $expiraEm, $idPost,
       ]);
     } else {
       $creatorId = $currentAdmin ? (int) ($currentAdmin['id'] ?? 0) : null;
       $creatorLogin = $currentAdmin ? admin_current_login_name() : null;
       $sql = 'INSERT INTO ofertas
-              (slug, titulo, descricao, preco, preco_antigo, loja, url_afiliado, cupom, imagem_url, categoria, tags, destaque, ativo, criado_por_admin_id, criado_por_login, expira_em)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)';
+              (slug, titulo, descricao, preco, preco_antigo, desconto_percentual, preco_pix, preco_outros_meios, parcelas_texto, frete_texto, avaliacao_nota, avaliacao_total, promocao_texto, loja, url_afiliado, cupom, imagem_url, categoria, tags, destaque, ativo, criado_por_admin_id, criado_por_login, expira_em)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)';
       $pdo->prepare($sql)->execute([
-        $slug, $titulo, $descricao, $preco, $precoAntigo, $loja, $urlAfiliado, $cupom, $imagemUrl, $categoria, $tags, $destaque, $ativo, $creatorId, $creatorLogin, $expiraEm,
+        $slug, $titulo, $descricao, $preco, $precoAntigo, $descontoPercentual, $precoPix, $precoOutrosMeios, $parcelasTexto, $freteTexto, $avaliacaoNota, $avaliacaoTotal, $promocaoTexto, $loja, $urlAfiliado, $cupom, $imagemUrl, $categoria, $tags, $destaque, $ativo, $creatorId, $creatorLogin, $expiraEm,
       ]);
       $idPost = (int) $pdo->lastInsertId();
     }
@@ -104,6 +128,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     'descricao' => $descricao,
     'preco' => $precoRaw,
     'preco_antigo' => $precoAntigoRaw,
+    'desconto_percentual' => $descontoPercentualRaw,
+    'preco_pix' => $precoPixRaw,
+    'preco_outros_meios' => $precoOutrosMeiosRaw,
+    'parcelas_texto' => $parcelasTexto ?? '',
+    'frete_texto' => $freteTexto ?? '',
+    'avaliacao_nota' => $avaliacaoNotaRaw,
+    'avaliacao_total' => $avaliacaoTotalRaw,
+    'promocao_texto' => $promocaoTexto ?? '',
     'loja' => $loja,
     'url_afiliado' => $urlAfiliado,
     'cupom' => $cupom ?? '',
@@ -208,6 +240,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <input id="preco_antigo" name="preco_antigo" value="<?= h($oferta['preco_antigo']) ?>">
         </div>
         <div class="admin-field">
+          <label for="desconto_percentual">Desconto (%)</label>
+          <input id="desconto_percentual" name="desconto_percentual" value="<?= h($oferta['desconto_percentual']) ?>">
+        </div>
+        <div class="admin-field">
+          <label for="preco_pix">Preco no Pix</label>
+          <input id="preco_pix" name="preco_pix" value="<?= h($oferta['preco_pix']) ?>">
+        </div>
+        <div class="admin-field">
+          <label for="preco_outros_meios">Preco em outros meios</label>
+          <input id="preco_outros_meios" name="preco_outros_meios" value="<?= h($oferta['preco_outros_meios']) ?>">
+        </div>
+        <div class="admin-field">
           <label for="loja">Loja</label>
           <input id="loja" name="loja" value="<?= h($oferta['loja']) ?>">
         </div>
@@ -231,13 +275,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <label for="tags">Tags (separadas por virgula)</label>
           <input id="tags" name="tags" value="<?= h($oferta['tags']) ?>">
         </div>
+        <div class="admin-field is-full">
+          <label for="parcelas_texto">Parcelamento</label>
+          <input id="parcelas_texto" name="parcelas_texto" value="<?= h($oferta['parcelas_texto']) ?>" placeholder="Ex.: 10x de R$ 12,90 sem juros">
+        </div>
+        <div class="admin-field is-full">
+          <label for="frete_texto">Frete</label>
+          <input id="frete_texto" name="frete_texto" value="<?= h($oferta['frete_texto']) ?>" placeholder="Ex.: Frete gratis / Chega amanha">
+        </div>
+        <div class="admin-field">
+          <label for="avaliacao_nota">Avaliacao</label>
+          <input id="avaliacao_nota" name="avaliacao_nota" value="<?= h($oferta['avaliacao_nota']) ?>">
+        </div>
+        <div class="admin-field">
+          <label for="avaliacao_total">Total de avaliacoes</label>
+          <input id="avaliacao_total" name="avaliacao_total" value="<?= h($oferta['avaliacao_total']) ?>">
+        </div>
         <div class="admin-field">
           <label for="expira_em">Expira em</label>
           <input id="expira_em" type="datetime-local" name="expira_em" value="<?= h($oferta['expira_em']) ?>">
         </div>
         <div class="admin-field is-full">
           <label for="descricao">Descrição</label>
-          <textarea id="descricao" name="descricao" rows="4"><?= h($oferta['descricao']) ?></textarea>
+          <div class="admin-field is-full">
+          <label for="promocao_texto">Promocao / destaque comercial</label>
+          <input id="promocao_texto" name="promocao_texto" value="<?= h($oferta['promocao_texto']) ?>" placeholder="Ex.: 42% OFF no Pix ou saldo Mercado Pago">
+        </div>
+        <textarea id="descricao" name="descricao" rows="4"><?= h($oferta['descricao']) ?></textarea>
         </div>
       </div>
       <div class="admin-check-row">
@@ -280,7 +344,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <?php if (!empty($oferta['cupom'])): ?>
           <span class="admin-meta-chip">cupom <?= h($oferta['cupom']) ?></span>
         <?php endif; ?>
-        <span class="admin-status <?= ((int) $oferta['ativo'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $oferta['ativo'] === 1) ? 'Ativa' : 'Inativa' ?></span>
+        <?php if (!empty($oferta['preco_pix'])): ?>
+          <span class="admin-meta-chip">Pix R$ <?= h((string) $oferta['preco_pix']) ?></span>
+        <?php endif; ?>
+        <?php if (!empty($oferta['parcelas_texto'])): ?>
+          <span class="admin-meta-chip"><?= h($oferta['parcelas_texto']) ?></span>
+        <?php endif; ?>
+        <?php if (!empty($oferta['frete_texto'])): ?>
+          <span class="admin-meta-chip"><?= h($oferta['frete_texto']) ?></span>
+        <?php endif; ?>
+<span class="admin-status <?= ((int) $oferta['ativo'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $oferta['ativo'] === 1) ? 'Ativa' : 'Inativa' ?></span>
         <span class="admin-status <?= ((int) $oferta['destaque'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $oferta['destaque'] === 1) ? 'Destaque' : 'Normal' ?></span>
       </div>
 
@@ -297,6 +370,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       <div class="admin-side-card">
         <strong>Descrição</strong>
         <div class="admin-description"><?= nl2br(h($oferta['descricao'] ?: 'Use este campo para destacar pontos fortes, prazo, voltagem, tamanho ou restrições do produto.')) ?></div>
+      </div>
+
+      <div class="admin-side-card">
+        <strong>Informa??es comerciais</strong>
+        <div class="admin-description"><?php
+          $commerceLines = [];
+          if ($oferta['desconto_percentual'] !== '') { $commerceLines[] = 'Desconto: ' . $oferta['desconto_percentual'] . '%'; }
+          if ($oferta['preco_pix'] !== '') { $commerceLines[] = 'Preco no Pix: R$ ' . $oferta['preco_pix']; }
+          if ($oferta['preco_outros_meios'] !== '') { $commerceLines[] = 'Outros meios: R$ ' . $oferta['preco_outros_meios']; }
+          if ($oferta['parcelas_texto'] !== '') { $commerceLines[] = 'Parcelamento: ' . $oferta['parcelas_texto']; }
+          if ($oferta['frete_texto'] !== '') { $commerceLines[] = 'Frete: ' . $oferta['frete_texto']; }
+          if ($oferta['avaliacao_nota'] !== '') {
+            $ratingLine = 'Avaliacao: ' . $oferta['avaliacao_nota'] . '/5';
+            if ($oferta['avaliacao_total'] !== '') { $ratingLine .= ' (' . $oferta['avaliacao_total'] . ')'; }
+            $commerceLines[] = $ratingLine;
+          }
+          if ($oferta['promocao_texto'] !== '') { $commerceLines[] = 'Promocao: ' . $oferta['promocao_texto']; }
+          echo nl2br(h($commerceLines ? implode("
+", $commerceLines) : 'Sem dados comerciais extras nesta oferta.'));
+        ?></div>
       </div>
 
       <div class="admin-preview-actions">

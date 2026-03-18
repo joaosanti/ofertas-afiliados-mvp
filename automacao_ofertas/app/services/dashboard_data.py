@@ -134,6 +134,14 @@ RECENT_OFFERS_SQL = text(
       categoria,
       preco,
       preco_antigo,
+      desconto_percentual,
+      preco_pix,
+      preco_outros_meios,
+      parcelas_texto,
+      frete_texto,
+      avaliacao_nota,
+      avaliacao_total,
+      promocao_texto,
       cupom,
       imagem_url,
       atualizado_em
@@ -182,7 +190,30 @@ RUNS_BY_DAY_SQL = text(
 )
 
 
+def ensure_offer_columns(db) -> None:
+    required_columns = {
+        "desconto_percentual": "ALTER TABLE ofertas ADD COLUMN desconto_percentual INT NULL AFTER preco_antigo",
+        "preco_pix": "ALTER TABLE ofertas ADD COLUMN preco_pix DECIMAL(10,2) NULL AFTER desconto_percentual",
+        "preco_outros_meios": "ALTER TABLE ofertas ADD COLUMN preco_outros_meios DECIMAL(10,2) NULL AFTER preco_pix",
+        "parcelas_texto": "ALTER TABLE ofertas ADD COLUMN parcelas_texto VARCHAR(120) NULL AFTER preco_outros_meios",
+        "frete_texto": "ALTER TABLE ofertas ADD COLUMN frete_texto VARCHAR(160) NULL AFTER parcelas_texto",
+        "avaliacao_nota": "ALTER TABLE ofertas ADD COLUMN avaliacao_nota DECIMAL(4,2) NULL AFTER frete_texto",
+        "avaliacao_total": "ALTER TABLE ofertas ADD COLUMN avaliacao_total INT NULL AFTER avaliacao_nota",
+        "promocao_texto": "ALTER TABLE ofertas ADD COLUMN promocao_texto VARCHAR(255) NULL AFTER avaliacao_total",
+    }
+    existing = {str(row["Field"]) for row in db.execute(text("SHOW COLUMNS FROM ofertas")).mappings().all()}
+    changed = False
+    for column, sql in required_columns.items():
+        if column in existing:
+            continue
+        db.execute(text(sql))
+        changed = True
+    if changed:
+        db.commit()
+
+
 def ensure_dashboard_tables(db) -> None:
+    ensure_offer_columns(db)
     db.execute(CREATE_EXECUTIONS_SQL)
     db.commit()
 
@@ -360,7 +391,7 @@ def fetch_dashboard_snapshot(db) -> dict[str, Any]:
     category_rows = db.execute(CATEGORIES_SQL).mappings().all()
     top_clicked_rows = db.execute(TOP_CLICKED_SQL, {"days": 30, "limit": 10}).mappings().all()
     recent_offer_rows = db.execute(RECENT_OFFERS_SQL, {"limit": 10}).mappings().all()
-    recent_run_rows = db.execute(RECENT_RUNS_SQL, {"limit": 5}).mappings().all()
+    recent_run_rows = db.execute(RECENT_RUNS_SQL, {"limit": 3}).mappings().all()
     run_chart_rows = db.execute(RUNS_BY_DAY_SQL, {"days": 14}).mappings().all()
 
     clicks_by_day = [{"label": str(row["day"]), "value": int(row["total"] or 0)} for row in click_rows]
@@ -406,6 +437,11 @@ def fetch_dashboard_snapshot(db) -> dict[str, Any]:
                 "categoria": _category_label(row["categoria"]),
                 "preco": float(row["preco"] or 0),
                 "preco_antigo": float(row["preco_antigo"]) if row["preco_antigo"] is not None else None,
+                "desconto_percentual": int(row["desconto_percentual"]) if row.get("desconto_percentual") is not None else None,
+                "preco_pix": float(row["preco_pix"]) if row.get("preco_pix") is not None else None,
+                "preco_outros_meios": float(row["preco_outros_meios"]) if row.get("preco_outros_meios") is not None else None,
+                "avaliacao_nota": float(row["avaliacao_nota"]) if row.get("avaliacao_nota") is not None else None,
+                "avaliacao_total": int(row["avaliacao_total"]) if row.get("avaliacao_total") is not None else None,
             }
             for row in recent_offer_rows
         ],
