@@ -2,9 +2,151 @@
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/funcoes.php';
 
+function site_cache_dir() {
+  $dir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'zeropreco-site-cache';
+  if (!is_dir($dir)) {
+    @mkdir($dir, 0775, true);
+  }
+  return $dir;
+}
+
+function site_cache_file($key) {
+  return site_cache_dir() . DIRECTORY_SEPARATOR . preg_replace('/[^a-z0-9_-]+/i', '-', (string) $key) . '.cache.php';
+}
+
+function site_cache_get($key, $ttlSeconds) {
+  $path = site_cache_file($key);
+  if (!is_file($path)) {
+    return null;
+  }
+
+  if ((time() - (int) @filemtime($path)) > max(1, (int) $ttlSeconds)) {
+    @unlink($path);
+    return null;
+  }
+
+  $raw = @file_get_contents($path);
+  if (!is_string($raw) || $raw === '') {
+    return null;
+  }
+
+  $payload = @unserialize($raw, ['allowed_classes' => false]);
+  return is_array($payload) && array_key_exists('data', $payload) ? $payload['data'] : null;
+}
+
+function site_cache_set($key, $data) {
+  $path = site_cache_file($key);
+  @file_put_contents($path, serialize(['saved_at' => gmdate('c'), 'data' => $data]), LOCK_EX);
+}
+
+function site_log_dir() {
+  $dir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'zeropreco-site-logs';
+  if (!is_dir($dir)) {
+    @mkdir($dir, 0775, true);
+  }
+  return $dir;
+}
+
+function site_click_log_file() {
+  return site_log_dir() . DIRECTORY_SEPARATOR . 'outbound-clicks.jsonl';
+}
+
+function site_log_offer_click($offer, $redirectUrl, $requestProfile = null, $location = null) {
+  $profile = is_array($requestProfile) ? $requestProfile : click_request_profile();
+  $geo = is_array($location) ? $location : click_location_context();
+  $payload = [
+    'timestamp' => gmdate('c'),
+    'offer_id' => isset($offer['id']) ? (int) $offer['id'] : 0,
+    'slug' => (string) ($offer['slug'] ?? ''),
+    'store' => (string) ($offer['loja'] ?? ''),
+    'title' => (string) ($offer['titulo'] ?? ''),
+    'target_url' => substr(trim((string) $redirectUrl), 0, 4000),
+    'request_uri' => substr((string) ($_SERVER['REQUEST_URI'] ?? ''), 0, 1000),
+    'referer' => substr((string) ($_SERVER['HTTP_REFERER'] ?? ''), 0, 2000),
+    'user_agent' => substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 500),
+    'request_method' => substr((string) ($_SERVER['REQUEST_METHOD'] ?? ''), 0, 12),
+    'ip_hash' => ip_hash(),
+    'remote_addr_suffix' => substr((string) ($_SERVER['REMOTE_ADDR'] ?? ''), -8),
+    'traffic_type' => !empty($profile['is_bot']) ? 'bot' : 'human',
+    'is_bot' => !empty($profile['is_bot']),
+    'bot_reason' => substr((string) ($profile['reason'] ?? ''), 0, 120),
+    'country_code' => substr((string) ($geo['country_code'] ?? ''), 0, 8),
+    'country_name' => substr((string) ($geo['country_name'] ?? ''), 0, 80),
+    'region_name' => substr((string) ($geo['region_name'] ?? ''), 0, 80),
+    'city_name' => substr((string) ($geo['city_name'] ?? ''), 0, 80),
+    'location_source' => substr((string) ($geo['source'] ?? ''), 0, 40),
+    'locale_hint' => substr((string) ($geo['locale_hint'] ?? ''), 0, 80),
+  ];
+
+  @file_put_contents(
+    site_click_log_file(),
+    json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL,
+    FILE_APPEND | LOCK_EX
+  );
+}
+
 function site_tags_to_list($tags) {
-  $items = array_filter(array_map('trim', explode(',', (string) $tags)));
-  return array_values(array_unique($items));
+  return tag_list_from_string($tags);
+}
+
+function site_decode_tag_url($tags, $prefix) {
+  return tag_url_decode($tags, $prefix);
+}
+
+function site_offer_video_url($offer) {
+  $manualVideoUrl = site_decode_tag_url($offer['tags'] ?? '', 'offer_video_url:');
+  if ($manualVideoUrl !== '') {
+    return $manualVideoUrl;
+  }
+  return site_decode_tag_url($offer['tags'] ?? '', 'shopee_video_url:');
+}
+
+function site_remote_video_url_is_available($url) {
+  static $cache = [];
+
+  $value = trim((string) $url);
+  if ($value === '' || !preg_match('~^https?://~i', $value)) {
+    return false;
+  }
+
+  if (array_key_exists($value, $cache)) {
+    return $cache[$value];
+  }
+
+  if (!function_exists('curl_init')) {
+    $cache[$value] = true;
+    return true;
+  }
+
+  $ch = curl_init($value);
+  curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => false,
+    CURLOPT_FOLLOWLOCATION => true,
+    CURLOPT_MAXREDIRS => 3,
+    CURLOPT_CONNECTTIMEOUT => 3,
+    CURLOPT_TIMEOUT => 5,
+    CURLOPT_RANGE => '0-1',
+    CURLOPT_SSL_VERIFYPEER => true,
+    CURLOPT_SSL_VERIFYHOST => 2,
+    CURLOPT_USERAGENT => 'ZeroPrecoHomeVideoValidator/1.0',
+    CURLOPT_WRITEFUNCTION => static function ($curl, $data) {
+      return strlen($data);
+    },
+    CURLOPT_HEADERFUNCTION => static function ($curl, $header) {
+      return strlen($header);
+    },
+  ]);
+
+  curl_exec($ch);
+  $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+  $ok = $status >= 200 && $status < 400;
+  if (!$ok && $status === 206) {
+    $ok = true;
+  }
+  curl_close($ch);
+
+  $cache[$value] = $ok;
+  return $ok;
 }
 
 function site_offer_preferred_affiliate_url($offer) {
@@ -14,25 +156,9 @@ function site_offer_preferred_affiliate_url($offer) {
     return $affiliateUrl;
   }
 
-  foreach (site_tags_to_list($offer['tags'] ?? '') as $tag) {
-    if (!str_starts_with($tag, 'meli_social_url:')) {
-      continue;
-    }
-
-    $encoded = substr($tag, strlen('meli_social_url:'));
-    if ($encoded === '') {
-      continue;
-    }
-
-    $padding = strlen($encoded) % 4;
-    if ($padding > 0) {
-      $encoded .= str_repeat('=', 4 - $padding);
-    }
-
-    $decoded = base64_decode(strtr($encoded, '-_', '+/'), true);
-    if ($decoded !== false && str_contains((string) $decoded, '/social/')) {
-      return trim((string) $decoded);
-    }
+  $socialUrl = site_decode_tag_url($offer['tags'] ?? '', 'meli_social_url:');
+  if ($socialUrl !== '' && str_contains($socialUrl, '/social/')) {
+    return $socialUrl;
   }
 
   return $affiliateUrl;
@@ -488,6 +614,259 @@ function site_fill_store_section(array $offers, array $selectionIds, $limit = 8)
   return array_slice($primary, 0, $limit);
 }
 
+function site_priority_store_list() {
+  return ['Amazon', 'Mercado Livre', 'Shopee'];
+}
+
+function site_mix_store_groups(array $grouped, array $storeOrder, $limit = 12) {
+  $limit = max(1, (int) $limit);
+  $mixed = [];
+
+  while (count($mixed) < $limit) {
+    $progress = false;
+    foreach ($storeOrder as $store) {
+      if (empty($grouped[$store])) {
+        continue;
+      }
+      $mixed[] = array_shift($grouped[$store]);
+      $progress = true;
+      if (count($mixed) >= $limit) {
+        break;
+      }
+    }
+    if (!$progress) {
+      break;
+    }
+  }
+
+  return $mixed;
+}
+
+function site_fetch_recent_ranked_store_offers(PDO $pdo, $store, $limit = 8, $filters = []) {
+  $store = trim((string) $store);
+  $limit = max(1, min((int) $limit, 36));
+  $priceMax = isset($filters['price_max']) ? (float) $filters['price_max'] : null;
+  $priceMin = isset($filters['price_min']) ? (float) $filters['price_min'] : null;
+  $couponOnly = !empty($filters['coupon_only']);
+
+  $where = [
+    "o.ativo = 1",
+    "(o.expira_em IS NULL OR o.expira_em > NOW())",
+    "o.loja = ?",
+  ];
+  $params = [$store];
+
+  if ($priceMin !== null) {
+    $where[] = "o.preco >= ?";
+    $params[] = $priceMin;
+  }
+  if ($priceMax !== null) {
+    $where[] = "o.preco <= ?";
+    $params[] = $priceMax;
+  }
+  if ($couponOnly) {
+    $where[] = "o.cupom IS NOT NULL";
+    $where[] = "o.cupom <> ''";
+  }
+
+  $query = "
+    SELECT
+      o.*,
+      COUNT(c.id) AS clicks
+    FROM ofertas o
+    LEFT JOIN cliques c ON c.oferta_id = o.id
+    WHERE " . implode("\n      AND ", $where) . "
+    GROUP BY o.id
+    ORDER BY
+      CASE
+        WHEN DATE(COALESCE(o.atualizado_em, o.criado_em)) = CURDATE() THEN 3
+        WHEN COALESCE(o.atualizado_em, o.criado_em) >= NOW() - INTERVAL 3 DAY THEN 2
+        WHEN COALESCE(o.atualizado_em, o.criado_em) >= NOW() - INTERVAL 10 DAY THEN 1
+        ELSE 0
+      END DESC,
+      o.destaque DESC,
+      (CASE WHEN o.cupom IS NOT NULL AND o.cupom <> '' THEN 1 ELSE 0 END) DESC,
+      (CASE WHEN o.preco_antigo IS NOT NULL AND o.preco_antigo > o.preco THEN ((o.preco_antigo - o.preco) / o.preco_antigo) ELSE 0 END) DESC,
+      clicks DESC,
+      COALESCE(o.atualizado_em, o.criado_em) DESC
+    LIMIT {$limit}
+  ";
+
+  $stmt = $pdo->prepare($query);
+  $stmt->execute($params);
+  return $stmt->fetchAll();
+}
+
+function site_fetch_recent_balanced_offers(PDO $pdo, $limit = 12, $filters = [], $stores = null) {
+  $limit = max(1, min((int) $limit, 24));
+  $stores = is_array($stores) && $stores ? array_values($stores) : site_priority_store_list();
+  $perStore = max(4, (int) ceil($limit / max(1, count($stores))) + 2);
+
+  $grouped = [];
+  foreach ($stores as $store) {
+    $grouped[$store] = site_fetch_recent_ranked_store_offers($pdo, $store, $perStore, $filters);
+  }
+
+  $mixed = site_mix_store_groups($grouped, $stores, $limit);
+  if (count($mixed) >= $limit) {
+    return $mixed;
+  }
+
+  $selectedIds = [];
+  foreach ($mixed as $offer) {
+    $selectedIds[(int) ($offer['id'] ?? 0)] = true;
+  }
+
+  foreach ($stores as $store) {
+    foreach ($grouped[$store] as $offer) {
+      $offerId = (int) ($offer['id'] ?? 0);
+      if ($offerId > 0 && isset($selectedIds[$offerId])) {
+        continue;
+      }
+      $mixed[] = $offer;
+      if ($offerId > 0) {
+        $selectedIds[$offerId] = true;
+      }
+      if (count($mixed) >= $limit) {
+        break 2;
+      }
+    }
+  }
+
+  return $mixed;
+}
+
+function site_fetch_daily_best_offers(PDO $pdo, $limit = 12, $filters = []) {
+  $limit = max(1, min((int) $limit, 36));
+  $priceMax = isset($filters['price_max']) ? (float) $filters['price_max'] : null;
+  $priceMin = isset($filters['price_min']) ? (float) $filters['price_min'] : null;
+  $couponOnly = !empty($filters['coupon_only']);
+  $store = trim((string) ($filters['store'] ?? ''));
+
+  $where = [
+    "o.ativo = 1",
+    "(o.expira_em IS NULL OR o.expira_em > NOW())",
+  ];
+  $params = [];
+
+  if ($store !== '') {
+    $where[] = "o.loja = ?";
+    $params[] = $store;
+  }
+  if ($priceMin !== null) {
+    $where[] = "o.preco >= ?";
+    $params[] = $priceMin;
+  }
+  if ($priceMax !== null) {
+    $where[] = "o.preco <= ?";
+    $params[] = $priceMax;
+  }
+  if ($couponOnly) {
+    $where[] = "o.cupom IS NOT NULL";
+    $where[] = "o.cupom <> ''";
+  }
+
+  $query = "
+    SELECT
+      o.*,
+      COUNT(c.id) AS clicks,
+      (
+        CASE
+          WHEN DATE(COALESCE(o.atualizado_em, o.criado_em)) = CURDATE() THEN 180
+          WHEN COALESCE(o.atualizado_em, o.criado_em) >= NOW() - INTERVAL 2 DAY THEN 130
+          WHEN COALESCE(o.atualizado_em, o.criado_em) >= NOW() - INTERVAL 7 DAY THEN 85
+          ELSE 35
+        END +
+        CASE WHEN o.destaque = 1 THEN 45 ELSE 0 END +
+        CASE WHEN o.cupom IS NOT NULL AND o.cupom <> '' THEN 32 ELSE 0 END +
+        CASE
+          WHEN o.preco_antigo IS NOT NULL AND o.preco_antigo > o.preco
+            THEN LEAST(ROUND(((o.preco_antigo - o.preco) / o.preco_antigo) * 100), 60)
+          ELSE 0
+        END +
+        LEAST(COUNT(c.id), 25) * 4
+      ) AS daily_score
+    FROM ofertas o
+    LEFT JOIN cliques c
+      ON c.oferta_id = o.id
+      AND c.criado_em >= NOW() - INTERVAL 14 DAY
+    WHERE " . implode("\n      AND ", $where) . "
+    GROUP BY o.id
+    ORDER BY daily_score DESC, COALESCE(o.atualizado_em, o.criado_em) DESC, o.destaque DESC, o.id DESC
+    LIMIT {$limit}
+  ";
+
+  $stmt = $pdo->prepare($query);
+  $stmt->execute($params);
+  return $stmt->fetchAll();
+}
+
+function site_fetch_shopee_home_carousel(PDO $pdo, $limit = 6) {
+  $limit = max(1, min((int) $limit, 10));
+  $stmt = $pdo->prepare("
+    SELECT
+      o.*,
+      COUNT(c.id) AS clicks
+    FROM ofertas o
+    LEFT JOIN cliques c
+      ON c.oferta_id = o.id
+      AND c.criado_em >= NOW() - INTERVAL 14 DAY
+    WHERE o.ativo = 1
+      AND (o.expira_em IS NULL OR o.expira_em > NOW())
+      AND o.loja = 'Shopee'
+      AND o.imagem_url IS NOT NULL
+      AND o.imagem_url <> ''
+    GROUP BY o.id
+    ORDER BY
+      CASE WHEN o.tags LIKE '%offer_video_url:%' OR o.tags LIKE '%shopee_video_url:%' THEN 1 ELSE 0 END DESC,
+      CASE
+        WHEN DATE(COALESCE(o.atualizado_em, o.criado_em)) = CURDATE() THEN 3
+        WHEN COALESCE(o.atualizado_em, o.criado_em) >= NOW() - INTERVAL 3 DAY THEN 2
+        WHEN COALESCE(o.atualizado_em, o.criado_em) >= NOW() - INTERVAL 10 DAY THEN 1
+        ELSE 0
+      END DESC,
+      CASE
+        WHEN o.preco_antigo IS NOT NULL AND o.preco_antigo > o.preco
+          THEN ((o.preco_antigo - o.preco) / o.preco_antigo)
+        ELSE 0
+      END DESC,
+      o.destaque DESC,
+      clicks DESC,
+      COALESCE(o.atualizado_em, o.criado_em) DESC,
+      o.id DESC
+    LIMIT {$limit}
+  ");
+  $stmt->execute();
+  $items = [];
+  foreach ($stmt->fetchAll() as $offer) {
+    $offer['video_url'] = site_offer_video_url($offer);
+    $offer['has_video'] = $offer['video_url'] !== '' && site_remote_video_url_is_available($offer['video_url']);
+    if (!$offer['has_video']) {
+      $offer['video_url'] = '';
+    }
+    $items[] = $offer;
+  }
+
+  if ($items) {
+    return [
+      'mode' => array_filter($items, static fn($item) => !empty($item['has_video'])) ? 'video' : 'cards',
+      'items' => $items,
+    ];
+  }
+
+  $fallback = site_fetch_daily_best_offers($pdo, $limit, ['store' => 'Shopee']);
+  foreach ($fallback as &$offer) {
+    $offer['video_url'] = '';
+    $offer['has_video'] = false;
+  }
+  unset($offer);
+
+  return [
+    'mode' => 'cards',
+    'items' => $fallback,
+  ];
+}
+
 function site_fetch_social_published_offers(PDO $pdo, $limit = 12) {
   $limit = max(1, min((int) $limit, 24));
   $candidateLimit = max($limit * 4, 40);
@@ -610,6 +989,13 @@ function site_pick_home_categories(PDO $pdo, $preferred = [], $limit = 4) {
 }
 
 function site_fetch_home_data(PDO $pdo) {
+  $cacheKey = 'home-data-v4';
+  $cached = site_cache_get($cacheKey, 60);
+  if (is_array($cached)) {
+    return $cached;
+  }
+
+  $heroCarousel = site_fetch_shopee_home_carousel($pdo, 6);
   $selectionMix = site_fetch_social_published_offers($pdo, 14);
   $selectionIds = array_map(static fn($offer) => (int) ($offer['id'] ?? $offer['offer_id'] ?? 0), $selectionMix);
 
@@ -624,22 +1010,9 @@ function site_fetch_home_data(PDO $pdo) {
     LIMIT 4
   ")->fetchAll();
 
-  $dealRush = $pdo->query("
-    SELECT o.*, COUNT(c.id) AS clicks
-    FROM ofertas o
-    LEFT JOIN cliques c ON c.oferta_id = o.id
-    WHERE o.ativo = 1
-      AND (o.expira_em IS NULL OR o.expira_em > NOW())
-      AND o.preco > 0
-      AND o.preco <= 199.90
-    GROUP BY o.id
-    ORDER BY
-      (CASE WHEN o.preco_antigo IS NOT NULL AND o.preco_antigo > o.preco THEN 1 ELSE 0 END) DESC,
-      o.destaque DESC,
-      clicks DESC,
-      o.atualizado_em DESC
-    LIMIT 16
-  ")->fetchAll();
+  $dealRush = site_fetch_recent_balanced_offers($pdo, 12, [
+    'price_max' => 199.90,
+  ]);
 
   $meliTrending = site_fill_store_section(site_fetch_store_trending($pdo, 'Mercado Livre', 60), $selectionIds, 16);
   $shopeeTrending = site_fill_store_section(site_fetch_store_trending($pdo, 'Shopee', 60), $selectionIds, 16);
@@ -676,7 +1049,9 @@ function site_fetch_home_data(PDO $pdo) {
       'offers' => $categoryOffers,
     ];
   }
-  return [
+  $result = [
+    'hero_carousel' => $heroCarousel['items'],
+    'hero_carousel_mode' => $heroCarousel['mode'],
     'selection_mix' => $selectionMix,
     'top_clicked' => $topClicked,
     'deal_rush' => $dealRush,
@@ -687,11 +1062,19 @@ function site_fetch_home_data(PDO $pdo) {
     'filters' => site_build_filters($pdo),
     'active_offer_count' => site_count_active_offers($pdo),
   ];
+  site_cache_set($cacheKey, $result);
+  return $result;
 }
 
 function site_fetch_category_data(PDO $pdo, $category) {
   $normalizedCategory = trim((string) $category);
   $store = trim((string) ($_GET['store'] ?? ''));
+  $cacheKey = 'category-data-v1-' . md5($normalizedCategory . '|' . $store);
+  $cached = site_cache_get($cacheKey, 120);
+  if (is_array($cached)) {
+    return $cached;
+  }
+
   $hasStore = $store !== '';
   $stmt = $pdo->prepare("
     SELECT *
@@ -719,13 +1102,15 @@ function site_fetch_category_data(PDO $pdo, $category) {
   ");
   $topByStoreStmt->execute([$normalizedCategory, $normalizedCategory, $store, $store]);
 
-  return [
+  $result = [
     'offers' => $offers,
     'stores' => $topByStoreStmt->fetchAll(),
     'filters' => site_build_filters($pdo),
     'store' => $store,
     'has_store' => $hasStore,
   ];
+  site_cache_set($cacheKey, $result);
+  return $result;
 }
 
 function site_search_offers(PDO $pdo, $query, $limit = 60) {
@@ -940,79 +1325,50 @@ function site_fetch_instagram_landing_data(PDO $pdo) {
 }
 
 function site_fetch_deals_of_day_data(PDO $pdo) {
-  $bestDeals = $pdo->query("
-    SELECT o.*, COUNT(c.id) AS clicks
-    FROM ofertas o
-    LEFT JOIN cliques c ON c.oferta_id = o.id
-    WHERE o.ativo = 1
-      AND (o.expira_em IS NULL OR o.expira_em > NOW())
-    GROUP BY o.id
-    ORDER BY
-      o.destaque DESC,
-      (CASE WHEN o.cupom IS NOT NULL AND o.cupom <> '' THEN 1 ELSE 0 END) DESC,
-      (CASE WHEN o.preco_antigo IS NOT NULL AND o.preco_antigo > o.preco THEN ((o.preco_antigo - o.preco) / o.preco_antigo) ELSE 0 END) DESC,
-      clicks DESC,
-      o.atualizado_em DESC
-    LIMIT 12
-  ")->fetchAll();
+  $bestDeals = site_fetch_daily_best_offers($pdo, 12);
 
-  $budgetDeals = $pdo->query("
-    SELECT o.*, COUNT(c.id) AS clicks
-    FROM ofertas o
-    LEFT JOIN cliques c ON c.oferta_id = o.id
-    WHERE o.ativo = 1
-      AND (o.expira_em IS NULL OR o.expira_em > NOW())
-      AND o.preco > 0
-      AND o.preco <= 149.90
-    GROUP BY o.id
-    ORDER BY
-      (CASE WHEN o.preco_antigo IS NOT NULL AND o.preco_antigo > o.preco THEN 1 ELSE 0 END) DESC,
-      o.destaque DESC,
-      clicks DESC,
-      o.atualizado_em DESC
-    LIMIT 10
-  ")->fetchAll();
+  $budgetDeals = site_fetch_daily_best_offers($pdo, 10, [
+    'price_max' => 149.90,
+  ]);
 
   $budgetStrictCount = count($budgetDeals);
   if ($budgetStrictCount < 10) {
+    $fallbackDeals = site_fetch_daily_best_offers($pdo, 10, [
+      'price_min' => 149.91,
+      'price_max' => 199.90,
+    ]);
     $existingIds = array_map(static fn($offer) => (int) ($offer['id'] ?? 0), $budgetDeals);
-    $placeholders = implode(',', array_fill(0, max(1, count($existingIds)), '?'));
-    $excludedIds = $existingIds ?: [0];
-    $fallbackLimit = 10 - $budgetStrictCount;
-
-    $fallbackStmt = $pdo->prepare("
-      SELECT o.*, COUNT(c.id) AS clicks
-      FROM ofertas o
-      LEFT JOIN cliques c ON c.oferta_id = o.id
-      WHERE o.ativo = 1
-        AND (o.expira_em IS NULL OR o.expira_em > NOW())
-        AND o.preco > 149.90
-        AND o.preco <= 199.90
-        AND o.id NOT IN ({$placeholders})
-      GROUP BY o.id
-      ORDER BY
-        (CASE WHEN o.preco_antigo IS NOT NULL AND o.preco_antigo > o.preco THEN 1 ELSE 0 END) DESC,
-        o.destaque DESC,
-        clicks DESC,
-        o.atualizado_em DESC
-      LIMIT {$fallbackLimit}
-    ");
-    $fallbackStmt->execute($excludedIds);
-    $budgetDeals = array_merge($budgetDeals, $fallbackStmt->fetchAll());
+    foreach ($fallbackDeals as $offer) {
+      $offerId = (int) ($offer['id'] ?? 0);
+      if ($offerId > 0 && in_array($offerId, $existingIds, true)) {
+        continue;
+      }
+      $budgetDeals[] = $offer;
+      $existingIds[] = $offerId;
+      if (count($budgetDeals) >= 10) {
+        break;
+      }
+    }
   }
 
-  $couponDeals = $pdo->query("
-    SELECT o.*, COUNT(c.id) AS clicks
+  $couponDeals = site_fetch_daily_best_offers($pdo, 6, [
+    'coupon_only' => true,
+  ]);
+
+  $freshDealsCount = (int) $pdo->query("
+    SELECT COUNT(*)
     FROM ofertas o
-    LEFT JOIN cliques c ON c.oferta_id = o.id
     WHERE o.ativo = 1
       AND (o.expira_em IS NULL OR o.expira_em > NOW())
-      AND o.cupom IS NOT NULL
-      AND o.cupom <> ''
-    GROUP BY o.id
-    ORDER BY o.destaque DESC, clicks DESC, o.atualizado_em DESC
-    LIMIT 6
-  ")->fetchAll();
+      AND COALESCE(o.atualizado_em, o.criado_em) >= NOW() - INTERVAL 1 DAY
+  ")->fetchColumn();
+
+  $lastRefreshAt = (string) $pdo->query("
+    SELECT MAX(COALESCE(o.atualizado_em, o.criado_em))
+    FROM ofertas o
+    WHERE o.ativo = 1
+      AND (o.expira_em IS NULL OR o.expira_em > NOW())
+  ")->fetchColumn();
 
   $topClicked = $pdo->query("
     SELECT o.*, COUNT(c.id) AS clicks
@@ -1032,5 +1388,7 @@ function site_fetch_deals_of_day_data(PDO $pdo) {
     'coupon_deals' => $couponDeals,
     'top_clicked' => $topClicked,
     'active_offer_count' => site_count_active_offers($pdo),
+    'fresh_deals_count' => $freshDealsCount,
+    'last_refresh_at' => $lastRefreshAt,
   ];
 }

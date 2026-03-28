@@ -3,11 +3,60 @@ require_once __DIR__ . '/_init.php';
 admin_require_login();
 
 $flash = admin_flash_get();
-
 $pdo = db();
 $currentAdmin = admin_current_user();
 $id = (int) ($_GET['id'] ?? 0);
 $erro = '';
+
+function admin_request_public_base_url() {
+  $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+    || ((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+  $scheme = $https ? 'https' : 'http';
+  $host = trim((string) ($_SERVER['HTTP_HOST'] ?? 'zeropreco.com.br'));
+  return $scheme . '://' . $host;
+}
+
+function admin_offer_video_upload_dir() {
+  $dir = dirname(__DIR__) . '/uploads/ofertas_videos';
+  if (!is_dir($dir)) {
+    @mkdir($dir, 0775, true);
+  }
+  return $dir;
+}
+
+function admin_offer_video_public_url($filename) {
+  return admin_request_public_base_url() . '/uploads/ofertas_videos/' . rawurlencode((string) $filename);
+}
+
+function admin_offer_video_save_upload($file) {
+  if (!is_array($file) || empty($file['tmp_name']) || !is_uploaded_file((string) $file['tmp_name'])) {
+    return '';
+  }
+
+  if (!empty($file['error']) && (int) $file['error'] !== UPLOAD_ERR_OK) {
+    throw new RuntimeException('Falha no upload do video.');
+  }
+
+  $originalName = (string) ($file['name'] ?? 'video.mp4');
+  $extension = strtolower((string) pathinfo($originalName, PATHINFO_EXTENSION));
+  $allowedExtensions = ['mp4', 'webm', 'mov', 'm4v'];
+  if (!in_array($extension, $allowedExtensions, true)) {
+    throw new RuntimeException('Use um arquivo MP4, WEBM, MOV ou M4V.');
+  }
+
+  $size = (int) ($file['size'] ?? 0);
+  if ($size <= 0 || $size > (80 * 1024 * 1024)) {
+    throw new RuntimeException('O video precisa ter ate 80 MB.');
+  }
+
+  $filename = 'oferta-video-' . date('Ymd-His') . '-' . bin2hex(random_bytes(4)) . '.' . $extension;
+  $targetPath = admin_offer_video_upload_dir() . '/' . $filename;
+  if (!move_uploaded_file((string) $file['tmp_name'], $targetPath)) {
+    throw new RuntimeException('Nao consegui salvar o video enviado.');
+  }
+
+  return admin_offer_video_public_url($filename);
+}
 
 $oferta = [
   'id' => 0,
@@ -28,6 +77,7 @@ $oferta = [
   'url_afiliado' => '',
   'cupom' => '',
   'imagem_url' => '',
+  'video_url' => '',
   'categoria' => 'geral',
   'tags' => '',
   'destaque' => 0,
@@ -36,15 +86,16 @@ $oferta = [
 ];
 
 if ($id > 0) {
-  $stmt = $pdo->prepare('SELECT * FROM ofertas WHERE id=? LIMIT 1');
+  $stmt = $pdo->prepare('SELECT * FROM ofertas WHERE id = ? LIMIT 1');
   $stmt->execute([$id]);
   $row = $stmt->fetch();
   if (!$row) {
     http_response_code(404);
-    exit('Oferta não encontrada');
+    exit('Oferta nao encontrada');
   }
   $oferta = $row;
-  $oferta['expira_em'] = $row['expira_em'] ? str_replace(' ', 'T', substr($row['expira_em'], 0, 16)) : '';
+  $oferta['expira_em'] = $row['expira_em'] ? str_replace(' ', 'T', substr((string) $row['expira_em'], 0, 16)) : '';
+  $oferta['video_url'] = tag_url_decode($row['tags'] ?? '', 'offer_video_url:');
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -68,17 +119,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $urlAfiliado = trim((string) ($_POST['url_afiliado'] ?? ''));
   $cupom = substr(trim((string) ($_POST['cupom'] ?? '')), 0, 60);
   $imagemUrl = trim((string) ($_POST['imagem_url'] ?? ''));
+  $videoUrl = trim((string) ($_POST['video_url'] ?? ''));
   $categoria = substr(trim((string) ($_POST['categoria'] ?? 'geral')), 0, 80);
-  $tags = substr(trim((string) ($_POST['tags'] ?? '')), 0, 255);
+  $tagsInput = substr(trim((string) ($_POST['tags'] ?? '')), 0, 255);
   $destaque = isset($_POST['destaque']) ? 1 : 0;
   $ativo = isset($_POST['ativo']) ? 1 : 0;
   $expiraRaw = trim((string) ($_POST['expira_em'] ?? ''));
 
   if ($titulo === '' || $urlAfiliado === '' || $precoRaw === '') {
-    $erro = 'Título, preço e link afiliado são obrigatórios.';
-  } else {
+    $erro = 'Titulo, preco e link afiliado sao obrigatorios.';
+  }
+
+  if ($erro === '' && $videoUrl !== '' && !preg_match('~^https?://~i', $videoUrl)) {
+    $erro = 'A URL do video precisa comecar com http:// ou https://.';
+  }
+
+  if ($erro === '') {
+    try {
+      $uploadedVideoUrl = admin_offer_video_save_upload($_FILES['video_arquivo'] ?? null);
+      if ($uploadedVideoUrl !== '') {
+        $videoUrl = $uploadedVideoUrl;
+      }
+    } catch (Throwable $uploadError) {
+      $erro = $uploadError->getMessage();
+    }
+  }
+
+  if ($erro === '') {
     $slug = admin_unique_slug($pdo, admin_normalize_slug($slugInput, $titulo), $idPost);
     $preco = admin_parse_decimal($precoRaw);
+    if (admin_offer_price_is_zero_or_less($preco)) {
+      admin_flash_set('success', 'Oferta ignorada porque o preco esta zerado.');
+      $redirect = '/admin/oferta_editar.php';
+      if ($idPost > 0) {
+        $redirect .= '?id=' . $idPost;
+      }
+      header('Location: ' . $redirect);
+      exit;
+    }
+
     $precoAntigo = ($precoAntigoRaw !== '') ? admin_parse_decimal($precoAntigoRaw) : null;
     $descontoPercentual = ($descontoPercentualRaw !== '') ? (int) round(admin_parse_decimal($descontoPercentualRaw)) : null;
     $precoPix = ($precoPixRaw !== '') ? admin_parse_decimal($precoPixRaw) : null;
@@ -90,35 +169,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $promocaoTexto = ($promocaoTexto !== '') ? $promocaoTexto : null;
     $cupom = ($cupom !== '') ? $cupom : null;
     $imagemUrl = ($imagemUrl !== '') ? $imagemUrl : null;
-    $tags = ($tags !== '') ? $tags : null;
+    $tagsProcessed = tag_url_upsert($tagsInput, 'offer_video_url:', $videoUrl);
+    if (strlen($tagsProcessed) > 255) {
+      $erro = 'As tags ficaram grandes demais. Remova algumas tags antes de salvar o video.';
+    }
+    $tags = ($tagsProcessed !== '') ? $tagsProcessed : null;
     $categoria = ($categoria !== '') ? $categoria : 'geral';
     $expiraEm = ($expiraRaw !== '') ? str_replace('T', ' ', $expiraRaw) . ':00' : null;
 
-    if ($idPost > 0) {
-      $sql = 'UPDATE ofertas
-              SET slug=?, titulo=?, descricao=?, preco=?, preco_antigo=?, desconto_percentual=?, preco_pix=?, preco_outros_meios=?, parcelas_texto=?, frete_texto=?, avaliacao_nota=?, avaliacao_total=?, promocao_texto=?, loja=?, url_afiliado=?, cupom=?, imagem_url=?, categoria=?, tags=?, destaque=?, ativo=?, expira_em=?
-              WHERE id=?';
-      $pdo->prepare($sql)->execute([
-        $slug, $titulo, $descricao, $preco, $precoAntigo, $descontoPercentual, $precoPix, $precoOutrosMeios, $parcelasTexto, $freteTexto, $avaliacaoNota, $avaliacaoTotal, $promocaoTexto, $loja, $urlAfiliado, $cupom, $imagemUrl, $categoria, $tags, $destaque, $ativo, $expiraEm, $idPost,
-      ]);
-    } else {
-      $creatorId = $currentAdmin ? (int) ($currentAdmin['id'] ?? 0) : null;
-      $creatorLogin = $currentAdmin ? admin_current_login_name() : null;
-      $sql = 'INSERT INTO ofertas
-              (slug, titulo, descricao, preco, preco_antigo, desconto_percentual, preco_pix, preco_outros_meios, parcelas_texto, frete_texto, avaliacao_nota, avaliacao_total, promocao_texto, loja, url_afiliado, cupom, imagem_url, categoria, tags, destaque, ativo, criado_por_admin_id, criado_por_login, expira_em)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)';
-      $pdo->prepare($sql)->execute([
-        $slug, $titulo, $descricao, $preco, $precoAntigo, $descontoPercentual, $precoPix, $precoOutrosMeios, $parcelasTexto, $freteTexto, $avaliacaoNota, $avaliacaoTotal, $promocaoTexto, $loja, $urlAfiliado, $cupom, $imagemUrl, $categoria, $tags, $destaque, $ativo, $creatorId, $creatorLogin, $expiraEm,
-      ]);
-      $idPost = (int) $pdo->lastInsertId();
-    }
+    if ($erro === '') {
+      if ($idPost > 0) {
+        $sql = 'UPDATE ofertas
+                SET slug=?, titulo=?, descricao=?, preco=?, preco_antigo=?, desconto_percentual=?, preco_pix=?, preco_outros_meios=?, parcelas_texto=?, frete_texto=?, avaliacao_nota=?, avaliacao_total=?, promocao_texto=?, loja=?, url_afiliado=?, cupom=?, imagem_url=?, categoria=?, tags=?, destaque=?, ativo=?, expira_em=?
+                WHERE id=?';
+        $pdo->prepare($sql)->execute([
+          $slug, $titulo, $descricao, $preco, $precoAntigo, $descontoPercentual, $precoPix, $precoOutrosMeios, $parcelasTexto, $freteTexto, $avaliacaoNota, $avaliacaoTotal, $promocaoTexto, $loja, $urlAfiliado, $cupom, $imagemUrl, $categoria, $tags, $destaque, $ativo, $expiraEm, $idPost,
+        ]);
+      } else {
+        $creatorId = $currentAdmin ? (int) ($currentAdmin['id'] ?? 0) : null;
+        $creatorLogin = $currentAdmin ? admin_current_login_name() : null;
+        $sql = 'INSERT INTO ofertas
+                (slug, titulo, descricao, preco, preco_antigo, desconto_percentual, preco_pix, preco_outros_meios, parcelas_texto, frete_texto, avaliacao_nota, avaliacao_total, promocao_texto, loja, url_afiliado, cupom, imagem_url, categoria, tags, destaque, ativo, criado_por_admin_id, criado_por_login, expira_em)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)';
+        $pdo->prepare($sql)->execute([
+          $slug, $titulo, $descricao, $preco, $precoAntigo, $descontoPercentual, $precoPix, $precoOutrosMeios, $parcelasTexto, $freteTexto, $avaliacaoNota, $avaliacaoTotal, $promocaoTexto, $loja, $urlAfiliado, $cupom, $imagemUrl, $categoria, $tags, $destaque, $ativo, $creatorId, $creatorLogin, $expiraEm,
+        ]);
+        $idPost = (int) $pdo->lastInsertId();
+      }
 
-    if ($destaque === 1) {
-      admin_enforce_featured_limit($pdo, $loja, $idPost);
-    }
+      if ($destaque === 1) {
+        admin_enforce_featured_limit($pdo, $loja, $idPost);
+      }
 
-    header('Location: /admin/oferta_editar.php?id=' . $idPost . '&ok=1');
-    exit;
+      header('Location: /admin/oferta_editar.php?id=' . $idPost . '&ok=1');
+      exit;
+    }
   }
 
   $oferta = [
@@ -140,12 +225,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     'url_afiliado' => $urlAfiliado,
     'cupom' => $cupom ?? '',
     'imagem_url' => $imagemUrl ?? '',
+    'video_url' => $videoUrl,
     'categoria' => $categoria,
-    'tags' => $tags ?? '',
+    'tags' => $tagsInput ?? '',
     'destaque' => $destaque,
     'ativo' => $ativo,
     'expira_em' => $expiraRaw,
   ];
+}
+
+$pageTitle = ((int) ($oferta['id'] ?? 0) > 0) ? 'Editar oferta' : 'Nova oferta';
+$videoPreviewUrl = trim((string) ($oferta['video_url'] ?? ''));
+if ($videoPreviewUrl === '') {
+  $videoPreviewUrl = tag_url_decode($oferta['tags'] ?? '', 'shopee_video_url:');
 }
 ?>
 <!doctype html>
@@ -153,7 +245,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Admin - <?= $id > 0 ? 'Editar oferta' : 'Nova oferta' ?></title>
+  <title>Admin - <?= h($pageTitle) ?></title>
   <link rel="icon" type="image/png" href="/assets/img/logo-zp.png">
   <link rel="stylesheet" href="/assets/css/style.css">
   <link rel="stylesheet" href="/assets/css/admin.css">
@@ -168,8 +260,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         </div>
       </a>
       <div class="admin-brand-copy">
-        <strong>Zero Preço Admin</strong>
-        <span>Controle ofertas, links e publicações em um só lugar.</span>
+        <strong>Zero Preco Admin</strong>
+        <span>Controle ofertas, links e publicacoes em um so lugar.</span>
       </div>
     </div>
     <div class="admin-header-actions">
@@ -184,14 +276,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <div class="admin-hero-head">
       <div class="admin-hero-copy">
         <span class="admin-kicker">Editor visual</span>
-        <h1><?= $id > 0 ? 'Editar oferta' : 'Nova oferta' ?></h1>
+        <h1><?= h($pageTitle) ?></h1>
       </div>
       <div class="admin-hero-actions">
         <?php if (!empty($oferta['url_afiliado'])): ?>
-          <a class="btn-link primary" href="<?= h($oferta['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Testar link afiliado</a>
+          <a class="btn-link primary" href="<?= h((string) $oferta['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Testar link afiliado</a>
         <?php endif; ?>
         <?php if (!empty($oferta['slug'])): ?>
-          <a class="badge" href="/oferta.php?slug=<?= urlencode((string) $oferta['slug']) ?>" target="_blank" rel="noopener">Ver página</a>
+          <a class="badge" href="/oferta.php?slug=<?= urlencode((string) $oferta['slug']) ?>" target="_blank" rel="noopener">Ver pagina</a>
         <?php endif; ?>
       </div>
     </div>
@@ -199,138 +291,159 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
   <div class="admin-form-shell">
     <section class="admin-form">
-    <?php if ($flash): ?>
-      <div class="admin-alert <?= h((string) ($flash['type'] ?? '')) ?>"><?= h((string) ($flash['message'] ?? '')) ?></div>
-    <?php endif; ?>
-    <?php if (isset($_GET['ok']) && $_GET['ok'] === '1'): ?>
-      <div class="admin-alert success">Oferta salva com sucesso.</div>
-    <?php endif; ?>
-    <?php if ($erro): ?>
-      <div class="admin-alert error"><?= h($erro) ?></div>
-    <?php endif; ?>
-
-    <div>
-      <h2 class="admin-form-title">Dados principais</h2>
-      <p class="admin-form-copy">Preencha os campos essenciais do produto. O slug pode ficar vazio para geração automática.</p>
-      <?php if (!empty($oferta['criado_por_login'])): ?>
-        <div class="admin-help" style="margin-top:10px;">Cadastrado por <?= h((string) $oferta['criado_por_login']) ?></div>
-      <?php elseif ($currentAdmin): ?>
-        <div class="admin-help" style="margin-top:10px;">Novo cadastro será salvo como <?= h(admin_current_login_name()) ?></div>
+      <?php if ($flash): ?>
+        <div class="admin-alert <?= h((string) ($flash['type'] ?? '')) ?>"><?= h((string) ($flash['message'] ?? '')) ?></div>
       <?php endif; ?>
-    </div>
+      <?php if (isset($_GET['ok']) && $_GET['ok'] === '1'): ?>
+        <div class="admin-alert success">Oferta salva com sucesso.</div>
+      <?php endif; ?>
+      <?php if ($erro): ?>
+        <div class="admin-alert error"><?= h($erro) ?></div>
+      <?php endif; ?>
 
-    <form method="post">
-      <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
-      <input type="hidden" name="id" value="<?= (int) ($oferta['id'] ?? 0) ?>">
-      <div class="admin-field-grid">
-        <div class="admin-field is-full">
-          <label for="titulo">Título*</label>
-          <input id="titulo" name="titulo" value="<?= h($oferta['titulo']) ?>" required>
-        </div>
-        <div class="admin-field is-full">
-          <label for="slug">Slug (deixe vazio para gerar automaticamente)</label>
-          <input id="slug" name="slug" value="<?= h($oferta['slug']) ?>">
-        </div>
-        <div class="admin-field">
-          <label for="preco">Preço*</label>
-          <input id="preco" name="preco" value="<?= h($oferta['preco']) ?>" required>
-        </div>
-        <div class="admin-field">
-          <label for="preco_antigo">Preço antigo</label>
-          <input id="preco_antigo" name="preco_antigo" value="<?= h($oferta['preco_antigo']) ?>">
-        </div>
-        <div class="admin-field">
-          <label for="desconto_percentual">Desconto (%)</label>
-          <input id="desconto_percentual" name="desconto_percentual" value="<?= h($oferta['desconto_percentual']) ?>">
-        </div>
-        <div class="admin-field">
-          <label for="preco_pix">Preco no Pix</label>
-          <input id="preco_pix" name="preco_pix" value="<?= h($oferta['preco_pix']) ?>">
-        </div>
-        <div class="admin-field">
-          <label for="preco_outros_meios">Preco em outros meios</label>
-          <input id="preco_outros_meios" name="preco_outros_meios" value="<?= h($oferta['preco_outros_meios']) ?>">
-        </div>
-        <div class="admin-field">
-          <label for="loja">Loja</label>
-          <input id="loja" name="loja" value="<?= h($oferta['loja']) ?>">
-        </div>
-        <div class="admin-field">
-          <label for="categoria">Categoria</label>
-          <input id="categoria" name="categoria" value="<?= h($oferta['categoria']) ?>">
-        </div>
-        <div class="admin-field is-full">
-          <label for="url_afiliado">URL afiliado*</label>
-          <input id="url_afiliado" type="url" name="url_afiliado" value="<?= h($oferta['url_afiliado']) ?>" required>
-        </div>
-        <div class="admin-field">
-          <label for="cupom">Cupom</label>
-          <input id="cupom" name="cupom" value="<?= h($oferta['cupom']) ?>">
-        </div>
-        <div class="admin-field">
-          <label for="imagem_url">Imagem URL</label>
-          <input id="imagem_url" type="url" name="imagem_url" value="<?= h($oferta['imagem_url']) ?>">
-        </div>
-        <div class="admin-field is-full">
-          <label for="tags">Tags (separadas por virgula)</label>
-          <input id="tags" name="tags" value="<?= h($oferta['tags']) ?>">
-        </div>
-        <div class="admin-field is-full">
-          <label for="parcelas_texto">Parcelamento</label>
-          <input id="parcelas_texto" name="parcelas_texto" value="<?= h($oferta['parcelas_texto']) ?>" placeholder="Ex.: 10x de R$ 12,90 sem juros">
-        </div>
-        <div class="admin-field is-full">
-          <label for="frete_texto">Frete</label>
-          <input id="frete_texto" name="frete_texto" value="<?= h($oferta['frete_texto']) ?>" placeholder="Ex.: Frete gratis / Chega amanha">
-        </div>
-        <div class="admin-field">
-          <label for="avaliacao_nota">Avaliacao</label>
-          <input id="avaliacao_nota" name="avaliacao_nota" value="<?= h($oferta['avaliacao_nota']) ?>">
-        </div>
-        <div class="admin-field">
-          <label for="avaliacao_total">Total de avaliacoes</label>
-          <input id="avaliacao_total" name="avaliacao_total" value="<?= h($oferta['avaliacao_total']) ?>">
-        </div>
-        <div class="admin-field">
-          <label for="expira_em">Expira em</label>
-          <input id="expira_em" type="datetime-local" name="expira_em" value="<?= h($oferta['expira_em']) ?>">
-        </div>
-        <div class="admin-field is-full">
-          <label for="descricao">Descrição</label>
+      <div>
+        <h2 class="admin-form-title">Dados principais</h2>
+        <p class="admin-form-copy">Preencha os campos essenciais do produto. O slug pode ficar vazio para geracao automatica.</p>
+        <?php if (!empty($oferta['criado_por_login'])): ?>
+          <div class="admin-help" style="margin-top:10px;">Cadastrado por <?= h((string) $oferta['criado_por_login']) ?></div>
+        <?php elseif ($currentAdmin): ?>
+          <div class="admin-help" style="margin-top:10px;">Novo cadastro sera salvo como <?= h(admin_current_login_name()) ?></div>
+        <?php endif; ?>
+      </div>
+
+      <form method="post" enctype="multipart/form-data">
+        <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+        <input type="hidden" name="id" value="<?= (int) ($oferta['id'] ?? 0) ?>">
+        <div class="admin-field-grid">
           <div class="admin-field is-full">
-          <label for="promocao_texto">Promocao / destaque comercial</label>
-          <input id="promocao_texto" name="promocao_texto" value="<?= h($oferta['promocao_texto']) ?>" placeholder="Ex.: 42% OFF no Pix ou saldo Mercado Pago">
+            <label for="titulo">Titulo*</label>
+            <input id="titulo" name="titulo" value="<?= h((string) $oferta['titulo']) ?>" required>
+          </div>
+          <div class="admin-field is-full">
+            <label for="slug">Slug (deixe vazio para gerar automaticamente)</label>
+            <input id="slug" name="slug" value="<?= h((string) $oferta['slug']) ?>">
+          </div>
+          <div class="admin-field">
+            <label for="preco">Preco*</label>
+            <input id="preco" name="preco" value="<?= h((string) $oferta['preco']) ?>" required>
+          </div>
+          <div class="admin-field">
+            <label for="preco_antigo">Preco antigo</label>
+            <input id="preco_antigo" name="preco_antigo" value="<?= h((string) $oferta['preco_antigo']) ?>">
+          </div>
+          <div class="admin-field">
+            <label for="desconto_percentual">Desconto (%)</label>
+            <input id="desconto_percentual" name="desconto_percentual" value="<?= h((string) $oferta['desconto_percentual']) ?>">
+          </div>
+          <div class="admin-field">
+            <label for="preco_pix">Preco no Pix</label>
+            <input id="preco_pix" name="preco_pix" value="<?= h((string) $oferta['preco_pix']) ?>">
+          </div>
+          <div class="admin-field">
+            <label for="preco_outros_meios">Preco em outros meios</label>
+            <input id="preco_outros_meios" name="preco_outros_meios" value="<?= h((string) $oferta['preco_outros_meios']) ?>">
+          </div>
+          <div class="admin-field">
+            <label for="loja">Loja</label>
+            <input id="loja" name="loja" value="<?= h((string) $oferta['loja']) ?>">
+          </div>
+          <div class="admin-field">
+            <label for="categoria">Categoria</label>
+            <input id="categoria" name="categoria" value="<?= h((string) $oferta['categoria']) ?>">
+          </div>
+          <div class="admin-field is-full">
+            <label for="url_afiliado">URL afiliado*</label>
+            <input id="url_afiliado" type="url" name="url_afiliado" value="<?= h((string) $oferta['url_afiliado']) ?>" required>
+          </div>
+          <div class="admin-field">
+            <label for="cupom">Cupom</label>
+            <input id="cupom" name="cupom" value="<?= h((string) $oferta['cupom']) ?>">
+          </div>
+          <div class="admin-field">
+            <label for="imagem_url">Imagem URL</label>
+            <input id="imagem_url" type="url" name="imagem_url" value="<?= h((string) $oferta['imagem_url']) ?>">
+          </div>
+          <div class="admin-field is-full">
+            <label for="video_url">Video URL</label>
+            <input id="video_url" type="url" name="video_url" value="<?= h((string) ($oferta['video_url'] ?? '')) ?>" placeholder="https://...mp4 ou video publico da Shopee">
+          </div>
+          <div class="admin-field is-full">
+            <label for="video_arquivo">Upload de video</label>
+            <input id="video_arquivo" type="file" name="video_arquivo" accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov,.m4v">
+            <div class="admin-help" style="margin-top:8px;">Se enviar um arquivo, ele substitui a URL acima para esta oferta.</div>
+          </div>
+          <div class="admin-field is-full">
+            <label for="tags">Tags (separadas por virgula)</label>
+            <input id="tags" name="tags" value="<?= h((string) $oferta['tags']) ?>">
+          </div>
+          <div class="admin-field is-full">
+            <label for="parcelas_texto">Parcelamento</label>
+            <input id="parcelas_texto" name="parcelas_texto" value="<?= h((string) $oferta['parcelas_texto']) ?>" placeholder="Ex.: 10x de R$ 12,90 sem juros">
+          </div>
+          <div class="admin-field is-full">
+            <label for="frete_texto">Frete</label>
+            <input id="frete_texto" name="frete_texto" value="<?= h((string) $oferta['frete_texto']) ?>" placeholder="Ex.: Frete gratis / Chega amanha">
+          </div>
+          <div class="admin-field">
+            <label for="avaliacao_nota">Avaliacao</label>
+            <input id="avaliacao_nota" name="avaliacao_nota" value="<?= h((string) $oferta['avaliacao_nota']) ?>">
+          </div>
+          <div class="admin-field">
+            <label for="avaliacao_total">Total de avaliacoes</label>
+            <input id="avaliacao_total" name="avaliacao_total" value="<?= h((string) $oferta['avaliacao_total']) ?>">
+          </div>
+          <div class="admin-field">
+            <label for="expira_em">Expira em</label>
+            <input id="expira_em" type="datetime-local" name="expira_em" value="<?= h((string) $oferta['expira_em']) ?>">
+          </div>
+          <div class="admin-field is-full">
+            <label for="promocao_texto">Promocao / destaque comercial</label>
+            <input id="promocao_texto" name="promocao_texto" value="<?= h((string) $oferta['promocao_texto']) ?>" placeholder="Ex.: 42% OFF no Pix ou saldo Mercado Pago">
+          </div>
+          <div class="admin-field is-full">
+            <label for="descricao">Descricao</label>
+            <textarea id="descricao" name="descricao" rows="4"><?= h((string) $oferta['descricao']) ?></textarea>
+          </div>
         </div>
-        <textarea id="descricao" name="descricao" rows="4"><?= h($oferta['descricao']) ?></textarea>
+
+        <div class="admin-check-row">
+          <label class="admin-check-chip"><input type="checkbox" name="ativo" value="1" <?= ((int) $oferta['ativo'] === 1) ? 'checked' : '' ?>> Ativa</label>
+          <label class="admin-check-chip"><input type="checkbox" name="destaque" value="1" <?= ((int) $oferta['destaque'] === 1) ? 'checked' : '' ?>> Destaque</label>
         </div>
-      </div>
-      <div class="admin-check-row">
-        <label class="admin-check-chip"><input type="checkbox" name="ativo" value="1" <?= ((int) $oferta['ativo'] === 1) ? 'checked' : '' ?>> Ativa</label>
-        <label class="admin-check-chip"><input type="checkbox" name="destaque" value="1" <?= ((int) $oferta['destaque'] === 1) ? 'checked' : '' ?>> Destaque</label>
-      </div>
-      <div class="admin-form-actions">
-        <button class="btn" type="submit">Salvar</button>
-        <?php if (!empty($oferta['url_afiliado'])): ?>
-          <a class="badge" href="<?= h($oferta['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Testar link afiliado</a>
-        <?php endif; ?>
-        <?php if (!empty($oferta['slug'])): ?>
-          <a class="badge" href="/oferta.php?slug=<?= urlencode((string) $oferta['slug']) ?>&go=1" target="_blank" rel="noopener sponsored nofollow">Abrir pelo site</a>
-        <?php endif; ?>
-      </div>
-    </form>
+
+        <div class="admin-form-actions">
+          <button class="btn" type="submit">Salvar</button>
+          <?php if (!empty($oferta['url_afiliado'])): ?>
+            <a class="badge" href="<?= h((string) $oferta['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Testar link afiliado</a>
+          <?php endif; ?>
+          <?php if (!empty($oferta['slug'])): ?>
+            <a class="badge" href="/oferta.php?slug=<?= urlencode((string) $oferta['slug']) ?>&go=1" target="_blank" rel="noopener sponsored nofollow">Abrir pelo site</a>
+          <?php endif; ?>
+        </div>
+      </form>
     </section>
 
     <aside class="admin-preview">
       <?php if (!empty($oferta['imagem_url'])): ?>
-        <img class="admin-preview-thumb" src="<?= h($oferta['imagem_url']) ?>" alt="<?= h($oferta['titulo'] ?: 'Preview da oferta') ?>">
+        <img class="admin-preview-thumb" src="<?= h((string) $oferta['imagem_url']) ?>" alt="<?= h((string) ($oferta['titulo'] ?: 'Preview da oferta')) ?>">
       <?php else: ?>
         <div class="admin-preview-thumb is-empty"><?= h(strtoupper(substr((string) ($oferta['loja'] ?: 'oferta'), 0, 2))) ?></div>
       <?php endif; ?>
 
+      <?php if ($videoPreviewUrl !== ''): ?>
+        <div class="admin-side-card">
+          <strong>Preview do video</strong>
+          <video controls preload="metadata" style="width:100%;margin-top:12px;border-radius:18px;background:#081b45;">
+            <source src="<?= h($videoPreviewUrl) ?>">
+          </video>
+          <div class="admin-help" style="margin-top:8px;">O social vai tentar usar este video no formato de reel.</div>
+        </div>
+      <?php endif; ?>
+
       <div>
         <span class="admin-kicker">Preview rapido</span>
-        <h3 class="admin-card-title" style="margin-top: 10px;"><?= h($oferta['titulo'] ?: 'Título da oferta') ?></h3>
-        <div class="admin-card-subtitle"><?= h($oferta['loja'] ?: 'loja') ?> · <?= h($oferta['categoria'] ?: 'categoria') ?></div>
+        <h3 class="admin-card-title" style="margin-top:10px;"><?= h((string) ($oferta['titulo'] ?: 'Titulo da oferta')) ?></h3>
+        <div class="admin-card-subtitle"><?= h((string) ($oferta['loja'] ?: 'loja')) ?> · <?= h((string) ($oferta['categoria'] ?: 'categoria')) ?></div>
       </div>
 
       <div class="admin-preview-price">
@@ -342,38 +455,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
       <div class="admin-meta-row">
         <?php if (!empty($oferta['cupom'])): ?>
-          <span class="admin-meta-chip">cupom <?= h($oferta['cupom']) ?></span>
+          <span class="admin-meta-chip">cupom <?= h((string) $oferta['cupom']) ?></span>
         <?php endif; ?>
         <?php if (!empty($oferta['preco_pix'])): ?>
           <span class="admin-meta-chip">Pix R$ <?= h((string) $oferta['preco_pix']) ?></span>
         <?php endif; ?>
         <?php if (!empty($oferta['parcelas_texto'])): ?>
-          <span class="admin-meta-chip"><?= h($oferta['parcelas_texto']) ?></span>
+          <span class="admin-meta-chip"><?= h((string) $oferta['parcelas_texto']) ?></span>
         <?php endif; ?>
         <?php if (!empty($oferta['frete_texto'])): ?>
-          <span class="admin-meta-chip"><?= h($oferta['frete_texto']) ?></span>
+          <span class="admin-meta-chip"><?= h((string) $oferta['frete_texto']) ?></span>
         <?php endif; ?>
-<span class="admin-status <?= ((int) $oferta['ativo'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $oferta['ativo'] === 1) ? 'Ativa' : 'Inativa' ?></span>
+        <span class="admin-status <?= ((int) $oferta['ativo'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $oferta['ativo'] === 1) ? 'Ativa' : 'Inativa' ?></span>
         <span class="admin-status <?= ((int) $oferta['destaque'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $oferta['destaque'] === 1) ? 'Destaque' : 'Normal' ?></span>
       </div>
 
       <div class="admin-side-card">
         <strong>Slug final</strong>
-        <div class="admin-url-box"><?= h($oferta['slug'] ?: 'será gerado automaticamente') ?></div>
+        <div class="admin-url-box"><?= h((string) ($oferta['slug'] ?: 'sera gerado automaticamente')) ?></div>
       </div>
 
       <div class="admin-side-card">
         <strong>Link afiliado</strong>
-        <div class="admin-url-box"><?= h($oferta['url_afiliado'] ?: 'preencha a URL afiliada para validar o destino') ?></div>
+        <div class="admin-url-box"><?= h((string) ($oferta['url_afiliado'] ?: 'preencha a URL afiliada para validar o destino')) ?></div>
+      </div>
+
+      <?php if ($videoPreviewUrl !== ''): ?>
+        <div class="admin-side-card">
+          <strong>Video vinculado</strong>
+          <div class="admin-url-box"><?= h($videoPreviewUrl) ?></div>
+        </div>
+      <?php endif; ?>
+
+      <div class="admin-side-card">
+        <strong>Descricao</strong>
+        <div class="admin-description"><?= nl2br(h((string) ($oferta['descricao'] ?: 'Use este campo para destacar pontos fortes, prazo, voltagem, tamanho ou restricoes do produto.'))) ?></div>
       </div>
 
       <div class="admin-side-card">
-        <strong>Descrição</strong>
-        <div class="admin-description"><?= nl2br(h($oferta['descricao'] ?: 'Use este campo para destacar pontos fortes, prazo, voltagem, tamanho ou restrições do produto.')) ?></div>
-      </div>
-
-      <div class="admin-side-card">
-        <strong>Informa??es comerciais</strong>
+        <strong>Informacoes comerciais</strong>
         <div class="admin-description"><?php
           $commerceLines = [];
           if ($oferta['desconto_percentual'] !== '') { $commerceLines[] = 'Desconto: ' . $oferta['desconto_percentual'] . '%'; }
@@ -383,21 +503,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           if ($oferta['frete_texto'] !== '') { $commerceLines[] = 'Frete: ' . $oferta['frete_texto']; }
           if ($oferta['avaliacao_nota'] !== '') {
             $ratingLine = 'Avaliacao: ' . $oferta['avaliacao_nota'] . '/5';
-            if ($oferta['avaliacao_total'] !== '') { $ratingLine .= ' (' . $oferta['avaliacao_total'] . ')'; }
+            if ($oferta['avaliacao_total'] !== '') {
+              $ratingLine .= ' (' . $oferta['avaliacao_total'] . ')';
+            }
             $commerceLines[] = $ratingLine;
           }
           if ($oferta['promocao_texto'] !== '') { $commerceLines[] = 'Promocao: ' . $oferta['promocao_texto']; }
-          echo nl2br(h($commerceLines ? implode("
-", $commerceLines) : 'Sem dados comerciais extras nesta oferta.'));
+          echo nl2br(h($commerceLines ? implode("\n", $commerceLines) : 'Sem dados comerciais extras nesta oferta.'));
         ?></div>
       </div>
 
       <div class="admin-preview-actions">
         <?php if (!empty($oferta['slug'])): ?>
-          <a class="btn-link" href="/oferta.php?slug=<?= urlencode((string) $oferta['slug']) ?>" target="_blank" rel="noopener">Ver página</a>
+          <a class="btn-link" href="/oferta.php?slug=<?= urlencode((string) $oferta['slug']) ?>" target="_blank" rel="noopener">Ver pagina</a>
         <?php endif; ?>
         <?php if (!empty($oferta['url_afiliado'])): ?>
-          <a class="btn-link primary" href="<?= h($oferta['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Loja afiliada</a>
+          <a class="btn-link primary" href="<?= h((string) $oferta['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Loja afiliada</a>
         <?php endif; ?>
       </div>
     </aside>

@@ -13,6 +13,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PUBLIC_HTML_DIR = PROJECT_ROOT / "public_html"
 AUTOMATION_DIR = PROJECT_ROOT / "automacao_ofertas"
 STORIES_DIR = PUBLIC_HTML_DIR / "stories"
+AUTOMATION_DEPLOY_IGNORES = (
+    ".venv",
+    "__pycache__",
+    "dashboard_ui/node_modules",
+    "runtime",
+)
+COMMON_IGNORE_SEGMENTS = (
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "runtime",
+    "tmp",
+    "tmp_browser_profiles",
+)
 
 
 @dataclass(slots=True)
@@ -223,40 +237,118 @@ def _ensure_remote_dir(client: Any, remote_dir: str) -> None:
             client.mkdir(current)
 
 
+def _should_ignore_relative_path(
+    relative_path: str,
+    *,
+    ignore_prefixes: tuple[str, ...] = (),
+    ignore_segments: tuple[str, ...] = (),
+) -> bool:
+    normalized = relative_path.strip("/").replace("\\", "/")
+    if not normalized:
+        return False
+
+    normalized_ignores = tuple(prefix.strip("/").replace("\\", "/") for prefix in ignore_prefixes if prefix)
+    if normalized_ignores and any(
+        normalized == prefix or normalized.startswith(f"{prefix}/")
+        for prefix in normalized_ignores
+    ):
+        return True
+
+    parts = [part.strip().lower() for part in normalized.split("/") if part.strip()]
+    if not parts:
+        return False
+
+    ignored_segments = {segment.strip().lower() for segment in ignore_segments if segment.strip()}
+    if ignored_segments and any(part in ignored_segments for part in parts):
+        return True
+
+    filename = parts[-1]
+    return filename.startswith("tmp_") or filename.endswith(".tmp")
+
+
+def _remote_file_matches_local(client: Any, file_path: Path, remote_path: str) -> bool:
+    try:
+        remote_attrs = client.stat(remote_path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+    if stat.S_ISDIR(remote_attrs.st_mode):
+        return False
+
+    local_stat = file_path.stat()
+    local_size = int(local_stat.st_size)
+    local_mtime = int(local_stat.st_mtime)
+    remote_size = int(getattr(remote_attrs, "st_size", -1))
+    remote_mtime = int(getattr(remote_attrs, "st_mtime", -1))
+    if remote_size != local_size:
+        return False
+    if remote_mtime == local_mtime:
+        return True
+
+    with file_path.open("rb") as local_handle, client.open(remote_path, "rb") as remote_handle:
+        while True:
+            local_chunk = local_handle.read(65536)
+            remote_chunk = remote_handle.read(65536)
+            if local_chunk != remote_chunk:
+                return False
+            if not local_chunk:
+                return True
+
+
+def _upload_file_if_changed(client: Any, file_path: Path, remote_path: str) -> tuple[bool, dict[str, Any]]:
+    item = {
+        "relative_path": "",
+        "local_path": str(file_path),
+        "remote_path": remote_path,
+        "size": int(file_path.stat().st_size),
+    }
+    if _remote_file_matches_local(client, file_path, remote_path):
+        item["status"] = "skipped"
+        return False, item
+
+    _ensure_remote_dir(client, posixpath.dirname(remote_path))
+    client.put(str(file_path), remote_path)
+    local_mtime = int(file_path.stat().st_mtime)
+    try:
+        client.utime(remote_path, (local_mtime, local_mtime))
+    except OSError:
+        pass
+    item["status"] = "uploaded"
+    return True, item
+
+
 def _upload_directory(
     client: Any,
     local_dir: Path,
     remote_dir: str,
     *,
     ignore_prefixes: tuple[str, ...] = (),
-) -> list[dict[str, Any]]:
+) -> dict[str, list[dict[str, Any]]]:
     uploaded: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     base_dir = local_dir.resolve()
-    normalized_ignores = tuple(prefix.strip("/").replace("\\", "/") for prefix in ignore_prefixes if prefix)
 
     for file_path in sorted(base_dir.rglob("*")):
         if not file_path.is_file():
             continue
         relative_path = file_path.relative_to(base_dir).as_posix()
-        if normalized_ignores and any(
-            relative_path == prefix or relative_path.startswith(f"{prefix}/")
-            for prefix in normalized_ignores
+        if _should_ignore_relative_path(
+            relative_path,
+            ignore_prefixes=ignore_prefixes,
+            ignore_segments=COMMON_IGNORE_SEGMENTS,
         ):
             continue
         target_path = posixpath.join(remote_dir, relative_path)
-        target_dir = posixpath.dirname(target_path)
-        _ensure_remote_dir(client, target_dir)
-        client.put(str(file_path), target_path)
-        uploaded.append(
-            {
-                "relative_path": relative_path,
-                "local_path": str(file_path),
-                "remote_path": target_path,
-                "size": file_path.stat().st_size,
-            }
-        )
+        changed, item = _upload_file_if_changed(client, file_path, target_path)
+        item["relative_path"] = relative_path
+        if changed:
+            uploaded.append(item)
+        else:
+            skipped.append(item)
 
-    return uploaded
+    return {"uploaded": uploaded, "skipped": skipped}
 
 
 def deploy_stories_via_sftp(
@@ -276,23 +368,25 @@ def deploy_stories_via_sftp(
     try:
         _ensure_remote_dir(client, config.stories_remote_dir)
         if only_files:
-            uploaded = []
+            uploaded: list[dict[str, Any]] = []
+            skipped: list[dict[str, Any]] = []
             for filename in only_files:
                 file_path = local_dir / filename
                 target_path = posixpath.join(config.stories_remote_dir, filename)
-                client.put(str(file_path), target_path)
-                uploaded.append(
-                    {
-                        "relative_path": filename,
-                        "local_path": str(file_path),
-                        "remote_path": target_path,
-                        "size": file_path.stat().st_size,
-                        "public_url": story_public_url(filename),
-                    }
-                )
+                changed, item = _upload_file_if_changed(client, file_path, target_path)
+                item["relative_path"] = filename
+                item["public_url"] = story_public_url(filename)
+                if changed:
+                    uploaded.append(item)
+                else:
+                    skipped.append(item)
         else:
-            uploaded = _upload_directory(client, local_dir, config.stories_remote_dir)
+            transfer = _upload_directory(client, local_dir, config.stories_remote_dir)
+            uploaded = transfer["uploaded"]
+            skipped = transfer["skipped"]
             for item in uploaded:
+                item["public_url"] = story_public_url(item["relative_path"])
+            for item in skipped:
                 item["public_url"] = story_public_url(item["relative_path"])
 
         return {
@@ -301,7 +395,9 @@ def deploy_stories_via_sftp(
             "host": config.host,
             "remote_dir": config.stories_remote_dir,
             "count": len(uploaded),
+            "skipped_count": len(skipped),
             "items": uploaded,
+            "skipped_items": skipped,
         }
     finally:
         client.close()
@@ -320,15 +416,17 @@ def deploy_public_site_via_sftp(
     transport, client = factory(config)
     try:
         _ensure_remote_dir(client, config.remote_root)
-        uploaded = _upload_directory(client, PUBLIC_HTML_DIR, config.remote_root, ignore_prefixes=("stories",))
+        transfer = _upload_directory(client, PUBLIC_HTML_DIR, config.remote_root, ignore_prefixes=("stories",))
         return {
             "ok": True,
             "target": "public_html",
             "host": config.host,
             "remote_dir": config.remote_root,
-            "count": len(uploaded),
+            "count": len(transfer["uploaded"]),
+            "skipped_count": len(transfer["skipped"]),
             "ignored": ["stories"],
-            "items": uploaded,
+            "items": transfer["uploaded"],
+            "skipped_items": transfer["skipped"],
         }
     finally:
         client.close()
@@ -347,20 +445,22 @@ def deploy_automation_backend_via_sftp(
     transport, client = factory(config)
     try:
         _ensure_remote_dir(client, config.automation_remote_dir)
-        uploaded = _upload_directory(
+        transfer = _upload_directory(
             client,
             AUTOMATION_DIR,
             config.automation_remote_dir,
-            ignore_prefixes=(".venv", "__pycache__", "dashboard_ui/node_modules"),
+            ignore_prefixes=AUTOMATION_DEPLOY_IGNORES,
         )
         return {
             "ok": True,
             "target": "automacao_ofertas",
             "host": config.host,
             "remote_dir": config.automation_remote_dir,
-            "count": len(uploaded),
-            "ignored": [".venv", "__pycache__", "dashboard_ui/node_modules"],
-            "items": uploaded,
+            "count": len(transfer["uploaded"]),
+            "skipped_count": len(transfer["skipped"]),
+            "ignored": list(AUTOMATION_DEPLOY_IGNORES),
+            "items": transfer["uploaded"],
+            "skipped_items": transfer["skipped"],
         }
     finally:
         client.close()

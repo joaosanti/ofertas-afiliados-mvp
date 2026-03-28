@@ -67,7 +67,7 @@ function ml_bulk_fetch_invalid_items(PDO $pdo) {
   ");
   $items = $stmt->fetchAll();
   $items = array_values(array_filter($items, static function ($item) {
-    return admin_affiliate_audit('Mercado Livre', $item['url_afiliado'])['severity'] !== 'ok';
+    return !admin_affiliate_is_acceptable(admin_affiliate_audit('Mercado Livre', $item['url_afiliado']));
   }));
   if ($statusFilter === '') {
     return $items;
@@ -121,7 +121,7 @@ function ml_bulk_summary(PDO $pdo) {
   $total = count($rows);
   $invalid = 0;
   foreach ($rows as $row) {
-    if (admin_affiliate_audit('Mercado Livre', $row['url_afiliado'])['severity'] !== 'ok') {
+    if (!admin_affiliate_is_acceptable(admin_affiliate_audit('Mercado Livre', $row['url_afiliado']))) {
       $invalid++;
     }
   }

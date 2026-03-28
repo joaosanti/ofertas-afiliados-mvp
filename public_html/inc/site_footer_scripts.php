@@ -244,4 +244,196 @@
       });
     });
   }());
+
+  (function () {
+    var rails = document.querySelectorAll('[data-auto-carousel]');
+    if (!rails.length) return;
+
+    rails.forEach(function (rail) {
+      var speed = Number(rail.getAttribute('data-auto-carousel-speed') || 0.6);
+      var isPaused = false;
+      var rafId = 0;
+
+      function step() {
+        if (!isPaused) {
+          rail.scrollLeft += speed;
+          if (rail.scrollLeft >= (rail.scrollWidth - rail.clientWidth) / 2) {
+            rail.scrollLeft = 0;
+          }
+        }
+        rafId = window.requestAnimationFrame(step);
+      }
+
+      rail.addEventListener('mouseenter', function () {
+        isPaused = true;
+      });
+      rail.addEventListener('mouseleave', function () {
+        isPaused = false;
+      });
+      rail.addEventListener('touchstart', function () {
+        isPaused = true;
+      }, { passive: true });
+      rail.addEventListener('touchend', function () {
+        isPaused = false;
+      }, { passive: true });
+
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        return;
+      }
+
+      step();
+
+      window.addEventListener('beforeunload', function () {
+        if (rafId) {
+          window.cancelAnimationFrame(rafId);
+        }
+      });
+    });
+  }());
+
+  (function () {
+    var root = document.querySelector('[data-home-video-player]');
+    if (!root) return;
+
+    var video = root.querySelector('[data-home-video-element]');
+    var titleNode = root.querySelector('[data-home-video-title]');
+    var storeNode = root.querySelector('[data-home-video-store]');
+    var priceNode = root.querySelector('[data-home-video-price]');
+    var oldPriceNode = root.querySelector('[data-home-video-old-price]');
+    var discountNode = root.querySelector('[data-home-video-discount]');
+    var linkNode = root.querySelector('[data-home-video-link]');
+    var soundButton = root.querySelector('[data-home-video-sound]');
+    var soundIcon = root.querySelector('[data-home-video-sound-icon]');
+    var prevButton = root.querySelector('[data-home-video-prev]');
+    var nextButton = root.querySelector('[data-home-video-next]');
+    var playlistNode = root.querySelector('[data-home-video-playlist]');
+    if (!video || !playlistNode) return;
+
+    var playlist = [];
+    try {
+      playlist = JSON.parse(playlistNode.textContent || '[]');
+    } catch (error) {
+      playlist = [];
+    }
+
+    if (!playlist.length) {
+      return;
+    }
+
+    var currentIndex = 0;
+    var soundEnabled = !video.muted;
+
+    function setHidden(node, shouldHide) {
+      if (!node) return;
+      node.classList.toggle('is-hidden', !!shouldHide);
+    }
+
+    function syncSoundButton() {
+      if (!soundButton) return;
+      soundEnabled = !video.muted;
+      soundButton.classList.toggle('is-active', soundEnabled);
+      soundButton.setAttribute('aria-label', soundEnabled ? 'Desativar som' : 'Ativar som');
+      soundButton.setAttribute('title', soundEnabled ? 'Desativar som' : 'Ativar som');
+      if (soundIcon) {
+        soundIcon.innerHTML = soundEnabled ? '&#128266;' : '&#128263;';
+      }
+    }
+
+    function updateVideo(item, shouldAutoPlay) {
+      if (!item || !item.video_url) return;
+
+      video.pause();
+      video.src = item.video_url;
+      video.poster = item.poster || '';
+      video.muted = !soundEnabled;
+      video.load();
+
+      if (titleNode) titleNode.textContent = item.title || '';
+      if (storeNode) storeNode.textContent = item.store || '';
+      if (priceNode) priceNode.textContent = item.price || '';
+      if (oldPriceNode) {
+        oldPriceNode.textContent = item.old_price || '';
+        setHidden(oldPriceNode, !item.old_price);
+      }
+      if (discountNode) {
+        discountNode.textContent = item.discount ? ('-' + item.discount + '%') : '';
+        setHidden(discountNode, !item.discount);
+      }
+      if (linkNode) {
+        linkNode.href = item.href || '#';
+      }
+
+      if (shouldAutoPlay) {
+        var playPromise = video.play();
+        if (playPromise && typeof playPromise.catch === 'function') {
+          playPromise.catch(function () {
+            video.muted = true;
+            syncSoundButton();
+            var fallbackPlay = video.play();
+            if (fallbackPlay && typeof fallbackPlay.catch === 'function') {
+              fallbackPlay.catch(function () {});
+            }
+          });
+        }
+      }
+    }
+
+    function nextVideo() {
+      if (playlist.length <= 1) {
+        video.currentTime = 0;
+        var replay = video.play();
+        if (replay && typeof replay.catch === 'function') {
+          replay.catch(function () {});
+        }
+        return;
+      }
+
+      currentIndex = (currentIndex + 1) % playlist.length;
+      updateVideo(playlist[currentIndex], true);
+    }
+
+    function previousVideo() {
+      if (playlist.length <= 1) {
+        video.currentTime = 0;
+        var replay = video.play();
+        if (replay && typeof replay.catch === 'function') {
+          replay.catch(function () {});
+        }
+        return;
+      }
+
+      currentIndex = (currentIndex - 1 + playlist.length) % playlist.length;
+      updateVideo(playlist[currentIndex], true);
+    }
+
+    video.addEventListener('ended', nextVideo);
+    video.addEventListener('error', nextVideo);
+    video.addEventListener('volumechange', syncSoundButton);
+
+    if (prevButton) {
+      prevButton.addEventListener('click', previousVideo);
+      prevButton.classList.toggle('is-hidden', playlist.length <= 1);
+    }
+
+    if (nextButton) {
+      nextButton.addEventListener('click', nextVideo);
+      nextButton.classList.toggle('is-hidden', playlist.length <= 1);
+    }
+
+    if (soundButton) {
+      soundButton.addEventListener('click', function () {
+        video.muted = !video.muted;
+        syncSoundButton();
+        if (soundEnabled) {
+          var playPromise = video.play();
+          if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch(function () {});
+          }
+        }
+      });
+      syncSoundButton();
+    }
+
+    updateVideo(playlist[currentIndex], true);
+  }());
 </script>

@@ -3,6 +3,7 @@ import os
 from typing import Any
 
 from sqlalchemy import text
+from app.services.youtube_channels import bootstrap_legacy_env_youtube_channel, ensure_youtube_channel_tables
 
 
 CATEGORY_LABELS = {
@@ -48,6 +49,119 @@ CREATE_EXECUTIONS_SQL = text(
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """
 )
+
+CREATE_GROWTH_TARGETS_SQL = text(
+    """
+    CREATE TABLE IF NOT EXISTS growth_targets (
+      id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      platform VARCHAR(20) NOT NULL,
+      target_type VARCHAR(30) NOT NULL,
+      name VARCHAR(180) NOT NULL,
+      handle VARCHAR(180) NULL,
+      url VARCHAR(600) NOT NULL,
+      niche VARCHAR(140) NULL,
+      priority VARCHAR(20) NOT NULL DEFAULT 'media',
+      status VARCHAR(30) NOT NULL DEFAULT 'novo',
+      notes TEXT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      last_checked_at DATETIME NULL,
+      INDEX ix_growth_targets_platform (platform),
+      INDEX ix_growth_targets_status (status),
+      INDEX ix_growth_targets_priority (priority)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """
+)
+
+GROWTH_GUIDANCE = [
+    {
+        "platform": "facebook",
+        "title": "Ative recomendacoes da Pagina",
+        "summary": "Recomendacoes podem ajudar a Pagina a ser encontrada no Facebook e reforcam prova social.",
+        "action": "Deixar reviews/recomendacoes ligadas e monitorar a aba Reviews.",
+        "source_label": "Facebook Help Center",
+        "source_url": "https://www.facebook.com/help/www/548274415377576",
+        "verified": True,
+    },
+    {
+        "platform": "facebook",
+        "title": "Ative similar Page suggestions",
+        "summary": "Sua Pagina pode aparecer como recomendacao em Paginas parecidas.",
+        "action": "Verificar se a opcao de similar Page suggestions esta ligada.",
+        "source_label": "Facebook Help Center",
+        "source_url": "https://www.facebook.com/help/514622715244231/",
+        "verified": True,
+    },
+    {
+        "platform": "facebook",
+        "title": "Use Insights para descobrir horarios e posts fortes",
+        "summary": "A Meta informa quais posts tiveram mais engajamento e quando sua audiencia esta no Facebook.",
+        "action": "Revisar semanalmente os posts com mais engajamento e os horarios de audiencia ativa.",
+        "source_label": "Facebook Help Center",
+        "source_url": "https://www.facebook.com/help/268680253165747/",
+        "verified": True,
+    },
+    {
+        "platform": "facebook",
+        "title": "Revise audiencia e seguidores da Pagina",
+        "summary": "Os dados de Audience ajudam a entender quem segue a Pagina e ajustar pauta e linguagem.",
+        "action": "Checar Audience para ver perfil demografico e acompanhar crescimento de seguidores.",
+        "source_label": "Facebook Help Center",
+        "source_url": "https://www.facebook.com/help/810929305732263/",
+        "verified": True,
+    },
+    {
+        "platform": "facebook",
+        "title": "Convide pessoas a seguir a Pagina",
+        "summary": "A Meta permite convite manual para amigos curtirem/seguirem a Pagina.",
+        "action": "Reservar janelas semanais para enviar convites manuais.",
+        "source_label": "Facebook Help Center",
+        "source_url": "https://www.facebook.com/help/174333482624856",
+        "verified": True,
+    },
+    {
+        "platform": "facebook",
+        "title": "Siga Paginas relevantes como sua Pagina",
+        "summary": "Isso facilita interacao manual contextualizada em Paginas do mesmo nicho.",
+        "action": "Seguir Paginas do nicho como Pagina e comentar manualmente quando fizer sentido.",
+        "source_label": "Facebook Help Center",
+        "source_url": "https://www.facebook.com/help/www/932938890092217",
+        "verified": True,
+    },
+    {
+        "platform": "instagram",
+        "title": "Mantenha sugestoes de conta ligadas",
+        "summary": "Se voce desativa account suggestions no perfil, sua conta deixa de aparecer como sugestao em outros perfis.",
+        "action": "Confirmar que Show account suggestions on profiles esta ligado no perfil.",
+        "source_label": "Instagram Help Center",
+        "source_url": "https://www.facebook.com/help/530450580417848/",
+        "verified": True,
+    },
+    {
+        "platform": "instagram",
+        "title": "Use o Professional Dashboard e Insights",
+        "summary": "O painel profissional ajuda a acompanhar alcance, insights e referencias de conteudo.",
+        "action": "Revisar insights e salvar formatos/temas que mais geram alcance e seguidores.",
+        "source_label": "Instagram Help Center",
+        "source_url": "https://www.facebook.com/help/instagram/257516379077270",
+        "verified": True,
+    },
+    {
+        "platform": "instagram",
+        "title": "Acompanhe insights de conta e conteudo",
+        "summary": "O Instagram orienta usar insights de conta, posts e reels para entender o que atrai mais publico.",
+        "action": "Checar views, accounts reached e interactions por janela de 30 a 90 dias.",
+        "source_label": "Instagram Help Center",
+        "source_url": "https://www.facebook.com/help/1533933820244654/",
+        "verified": True,
+    },
+]
+
+GROWTH_GUARDRAILS = [
+    "Nao automatizar follow, unfollow, scraping de seguidores ou acoes em massa fora da API oficial.",
+    "Usar o radar para analise de concorrentes, pesquisa de temas, interacao manual e melhoria de conteudo.",
+    "Priorizar comentarios manuais em posts relevantes, collabs, reels fortes e paginas com audiencia parecida.",
+]
 
 
 OVERVIEW_SQL = text(
@@ -215,7 +329,10 @@ def ensure_offer_columns(db) -> None:
 def ensure_dashboard_tables(db) -> None:
     ensure_offer_columns(db)
     db.execute(CREATE_EXECUTIONS_SQL)
+    db.execute(CREATE_GROWTH_TARGETS_SQL)
     db.commit()
+    ensure_youtube_channel_tables(db)
+    bootstrap_legacy_env_youtube_channel(db)
 
 
 def _json_dump(value: Any) -> str | None:
@@ -454,4 +571,134 @@ def fetch_dashboard_snapshot(db) -> dict[str, Any]:
             for row in recent_run_rows
         ],
         "status": build_provider_status(),
+    }
+
+
+def _normalize_growth_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": int(row["id"] or 0),
+        "platform": str(row["platform"] or ""),
+        "target_type": str(row["target_type"] or ""),
+        "name": str(row["name"] or ""),
+        "handle": str(row["handle"] or ""),
+        "url": str(row["url"] or ""),
+        "niche": str(row["niche"] or ""),
+        "priority": str(row["priority"] or "media"),
+        "status": str(row["status"] or "novo"),
+        "notes": str(row["notes"] or ""),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "last_checked_at": row["last_checked_at"],
+    }
+
+
+def fetch_growth_targets(db) -> list[dict[str, Any]]:
+    ensure_dashboard_tables(db)
+    rows = db.execute(
+        text(
+            """
+            SELECT id, platform, target_type, name, handle, url, niche, priority, status, notes, created_at, updated_at, last_checked_at
+            FROM growth_targets
+            ORDER BY
+              CASE priority
+                WHEN 'alta' THEN 1
+                WHEN 'media' THEN 2
+                ELSE 3
+              END ASC,
+              updated_at DESC,
+              id DESC
+            """
+        )
+    ).mappings().all()
+    return [_normalize_growth_row(dict(row)) for row in rows]
+
+
+def create_growth_target(db, payload: dict[str, Any]) -> dict[str, Any]:
+    ensure_dashboard_tables(db)
+    result = db.execute(
+        text(
+            """
+            INSERT INTO growth_targets
+            (platform, target_type, name, handle, url, niche, priority, status, notes, last_checked_at)
+            VALUES
+            (:platform, :target_type, :name, :handle, :url, :niche, :priority, :status, :notes, :last_checked_at)
+            """
+        ),
+        payload,
+    )
+    db.commit()
+    created = db.execute(
+        text(
+            """
+            SELECT id, platform, target_type, name, handle, url, niche, priority, status, notes, created_at, updated_at, last_checked_at
+            FROM growth_targets
+            WHERE id = :id
+            """
+        ),
+        {"id": int(result.lastrowid)},
+    ).mappings().one()
+    return _normalize_growth_row(dict(created))
+
+
+def update_growth_target(db, target_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    ensure_dashboard_tables(db)
+    fields = []
+    params: dict[str, Any] = {"id": int(target_id)}
+    for key in ["platform", "target_type", "name", "handle", "url", "niche", "priority", "status", "notes", "last_checked_at"]:
+        if key not in payload:
+            continue
+        fields.append(f"{key} = :{key}")
+        params[key] = payload[key]
+    if not fields:
+        current = db.execute(
+            text(
+                """
+                SELECT id, platform, target_type, name, handle, url, niche, priority, status, notes, created_at, updated_at, last_checked_at
+                FROM growth_targets
+                WHERE id = :id
+                """
+            ),
+            {"id": int(target_id)},
+        ).mappings().first()
+        if current is None:
+            raise ValueError("Alvo de crescimento nao encontrado.")
+        return _normalize_growth_row(dict(current))
+
+    db.execute(text(f"UPDATE growth_targets SET {', '.join(fields)} WHERE id = :id"), params)
+    db.commit()
+    updated = db.execute(
+        text(
+            """
+            SELECT id, platform, target_type, name, handle, url, niche, priority, status, notes, created_at, updated_at, last_checked_at
+            FROM growth_targets
+            WHERE id = :id
+            """
+        ),
+        {"id": int(target_id)},
+    ).mappings().first()
+    if updated is None:
+        raise ValueError("Alvo de crescimento nao encontrado.")
+    return _normalize_growth_row(dict(updated))
+
+
+def delete_growth_target(db, target_id: int) -> None:
+    ensure_dashboard_tables(db)
+    db.execute(text("DELETE FROM growth_targets WHERE id = :id"), {"id": int(target_id)})
+    db.commit()
+
+
+def fetch_growth_radar(db) -> dict[str, Any]:
+    targets = fetch_growth_targets(db)
+    summary = {
+        "total": len(targets),
+        "instagram": sum(1 for item in targets if item["platform"] == "instagram"),
+        "facebook": sum(1 for item in targets if item["platform"] == "facebook"),
+        "active": sum(1 for item in targets if item["status"] not in {"arquivado"}),
+        "high_priority": sum(1 for item in targets if item["priority"] == "alta"),
+    }
+    return {
+        "targets": targets,
+        "guidance": list(GROWTH_GUIDANCE),
+        "guardrails": list(GROWTH_GUARDRAILS),
+        "summary": summary,
     }

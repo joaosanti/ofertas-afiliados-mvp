@@ -24,7 +24,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $tmpDir = sys_get_temp_dir();
     $target = $tmpDir . DIRECTORY_SEPARATOR . 'zp-import-' . bin2hex(random_bytes(8)) . '-' . basename((string) $_FILES['arquivo']['name']);
     if (!move_uploaded_file($_FILES['arquivo']['tmp_name'], $target)) {
-      admin_flash_set('error', 'Não foi possível mover o arquivo enviado.');
+      admin_flash_set('error', 'Nao foi possivel mover o arquivo enviado.');
       header('Location: /admin/importar.php');
       exit;
     }
@@ -68,9 +68,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
   if ($resultPayload !== null) {
     if (!empty($resultPayload['ok'])) {
-      admin_flash_set('success', 'Importação executada pelo Python com sucesso.');
+      $summary = is_array($resultPayload['result'] ?? null) ? $resultPayload['result'] : [];
+      $processed = (int) ($summary['processed'] ?? 0);
+      $created = (int) ($summary['created'] ?? 0);
+      $updated = (int) ($summary['updated'] ?? 0);
+      $skipped = (int) ($summary['skipped'] ?? 0);
+
+      if (($created + $updated) > 0) {
+        admin_flash_set('success', "Importacao concluida: {$created} criada(s), {$updated} atualizada(s), {$skipped} pulada(s).");
+      } else {
+        admin_flash_set('error', "Importacao concluida sem gravar ofertas: {$processed} processada(s), {$skipped} pulada(s).");
+      }
     } else {
-      admin_flash_set('error', (string) ($resultPayload['error'] ?? 'Falha ao executar importação.'));
+      admin_flash_set('error', (string) ($resultPayload['error'] ?? 'Falha ao executar importacao.'));
     }
     header('Location: /admin/importar.php');
     exit;
@@ -88,7 +98,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <link rel="stylesheet" href="/assets/css/admin.css?v=<?= urlencode($adminCssVersion) ?>">
 </head>
 <body class="admin-page">
-<header>
+<?php admin_render_header('importar'); ?>
+<template data-legacy-admin-header>
   <div class="container admin-header">
     <div class="admin-brand">
       <a class="admin-brand-link" href="/admin/ofertas.php">
@@ -97,8 +108,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         </div>
       </a>
       <div class="admin-brand-copy">
-        <strong>Zero Preço Admin</strong>
-        <span>Controle ofertas, links e publicações em um só lugar.</span>
+        <strong>Zero Preco Admin</strong>
+        <span>Controle ofertas, links e publicacoes em um so lugar.</span>
       </div>
     </div>
     <button
@@ -116,7 +127,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       <a class="badge" href="/admin/logout.php">Sair</a>
     </div>
   </div>
-</header>
+</template>
 
 <main class="container admin-shell">
   <?php if ($flash): ?>
@@ -136,7 +147,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <div class="admin-panel-head">
       <div>
         <h2 class="admin-section-title">Importar por arquivo</h2>
-        <p>Use CSV da Shopee ou TXT com links da Amazon/Mercado Livre. Os itens novos desta importação ficam marcados com o login <?= h($currentAdminLogin ?: 'atual') ?>.</p>
+        <p>Use CSV da Shopee ou TXT com links da Amazon/Mercado Livre. Os itens novos desta importacao ficam marcados com o login <?= h($currentAdminLogin ?: 'atual') ?>.</p>
       </div>
     </div>
     <form method="post" enctype="multipart/form-data">
@@ -166,7 +177,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <div class="admin-panel-head">
       <div>
         <h2 class="admin-section-title">Importar por texto e links</h2>
-        <p>Cole um link por linha. O Python identifica a loja, tenta ler os dados e grava as ofertas válidas com autoria do login atual.</p>
+        <p>Cole um link por linha. O Python identifica a loja, tenta ler os dados e grava as ofertas validas com autoria do login atual.</p>
       </div>
     </div>
     <form method="post">
@@ -187,12 +198,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <section class="admin-panel">
     <div class="admin-panel-head">
       <div>
-        <h2 class="admin-section-title">Histórico de importações</h2>
-        <p>Mostra os jobs de importação registrados no banco.</p>
+        <h2 class="admin-section-title">Historico de importacoes</h2>
+        <p>Mostra os jobs de importacao registrados no banco.</p>
       </div>
     </div>
     <?php if (!$recentRuns): ?>
-      <div class="admin-empty">Nenhuma importação registrada ainda.</div>
+      <div class="admin-empty">Nenhuma importacao registrada ainda.</div>
     <?php else: ?>
       <div class="admin-offers-grid">
         <?php foreach ($recentRuns as $run): ?>

@@ -3,6 +3,17 @@ require_once __DIR__ . '/inc/site.php';
 
 $pdo = db();
 $data = site_fetch_home_data($pdo);
+$heroCarousel = $data['hero_carousel'];
+$heroCarouselMode = (string) ($data['hero_carousel_mode'] ?? 'cards');
+$heroVideoItems = array_values(array_filter($heroCarousel, static function ($item) {
+  return !empty($item['has_video']) && !empty($item['video_url']);
+}));
+$heroHighlightedVideoItems = array_values(array_filter($heroVideoItems, static function ($item) {
+  return !empty($item['destaque']);
+}));
+$heroTopVideoItems = $heroHighlightedVideoItems ?: $heroVideoItems;
+$heroFeaturedVideo = $heroTopVideoItems[0] ?? null;
+$heroCarouselItems = $heroCarousel;
 $selectionMix = $data['selection_mix'];
 $topClicked = $data['top_clicked'];
 $dealRush = $data['deal_rush'];
@@ -21,8 +32,8 @@ $whatsappGroupLabel = site_whatsapp_group_label();
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Zero Preço | Comparador moderno com links afiliados</title>
-  <meta name="description" content="Seleção diária de ofertas e vitrines por marketplace com acesso rápido ao produto certo.">
+  <title>Zero Pre&ccedil;o | Comparador moderno com links afiliados</title>
+  <meta name="description" content="Sele&ccedil;&atilde;o diaria de ofertas e vitrines por marketplace com acesso rapido ao produto certo.">
   <link rel="icon" type="image/png" href="/assets/img/logo-zp.png">
   <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-8314124298799437" crossorigin="anonymous"></script>
   <?php require __DIR__ . '/inc/site_head_analytics.php'; ?>
@@ -34,61 +45,106 @@ $whatsappGroupLabel = site_whatsapp_group_label();
   <main class="page-shell" style="padding-top:18px;">
     <div class="container">
       <section class="section-panel home-conversion-hero">
-        <div class="home-conversion-grid">
-          <div class="home-conversion-copy">
-            <span class="eyebrow">Zero Preço</span>
-            <h1>Ofertas com preço direto e acesso rápido para a loja.</h1>
-            <div class="cta-row" style="justify-content:flex-start; flex-wrap:wrap; margin-top:20px;">
-              <a class="button button-primary" href="/ofertas-do-dia.php">Abrir Ofertas do Dia</a>
-              <a class="button button-secondary" href="<?= h($whatsappGroupLink) ?>" target="_blank" rel="noopener noreferrer">Entrar no WhatsApp</a>
-            </div>
+        <div class="home-conversion-toolbar">
+          <span class="eyebrow">Sele&ccedil;&atilde;o do momento</span>
+          <div class="cta-row home-conversion-actions">
+            <a class="button button-primary" href="/ofertas-do-dia.php">Abrir Ofertas do Dia</a>
+            <a class="button button-secondary" href="<?= h($whatsappGroupLink) ?>" target="_blank" rel="noopener noreferrer">Entrar no WhatsApp</a>
           </div>
         </div>
-      </section>
-
-      <?php if ($dealRush): ?>
-        <section class="section-panel" id="giro-rapido">
-          <div class="section-heading">
-            <div>
-              <h2>Giro Rápido</h2>
-            </div>
-            <a class="cta-link" href="/ofertas-do-dia.php#ofertas-ate-150">Ver até R$ 150</a>
+        <?php if ($heroFeaturedVideo): ?>
+          <?php
+            $heroVideoPlaylist = [];
+            foreach ($heroTopVideoItems as $videoItem) {
+              $heroVideoPlaylist[] = [
+                'title' => (string) $videoItem['titulo'],
+                'store' => (string) site_store_label($videoItem['loja']),
+                'price' => (string) site_money($videoItem['preco']),
+                'old_price' => !empty($videoItem['preco_antigo']) ? (string) site_money($videoItem['preco_antigo']) : '',
+                'discount' => site_discount_percent($videoItem['preco'], $videoItem['preco_antigo']),
+                'href' => (string) site_offer_redirect_href($videoItem['slug']),
+                'poster' => (string) ($videoItem['imagem_url'] ?: '/assets/img/sem-img.png'),
+                'video_url' => (string) $videoItem['video_url'],
+              ];
+            }
+            $featuredDiscount = site_discount_percent($heroFeaturedVideo['preco'], $heroFeaturedVideo['preco_antigo']);
+          ?>
+          <div class="hero-featured-video-shell" data-home-video-player>
+            <button class="hero-featured-video-nav hero-featured-video-nav-prev" type="button" data-home-video-prev aria-label="Video anterior" title="Video anterior">
+              <span aria-hidden="true">&#10094;</span>
+            </button>
+            <section class="hero-featured-video">
+              <div class="hero-featured-video-media">
+                <button class="hero-featured-video-sound" type="button" data-home-video-sound aria-label="Ativar som" title="Ativar som">
+                  <span aria-hidden="true" data-home-video-sound-icon>&#128266;</span>
+                </button>
+                <video
+                  controls
+                  muted
+                  autoplay
+                  playsinline
+                  preload="metadata"
+                  poster="<?= h($heroFeaturedVideo['imagem_url'] ?: '/assets/img/sem-img.png') ?>"
+                  data-home-video-element
+                >
+                  <source src="<?= h((string) $heroFeaturedVideo['video_url']) ?>" type="video/mp4">
+                </video>
+              </div>
+              <div class="hero-featured-video-copy">
+                <div class="kicker" data-home-video-store><?= h(site_store_label($heroFeaturedVideo['loja'])) ?></div>
+                <h2 data-home-video-title><?= h($heroFeaturedVideo['titulo']) ?></h2>
+                <div class="hero-media-price-row">
+                  <span class="hero-media-price-now" data-home-video-price><?= h(site_money($heroFeaturedVideo['preco'])) ?></span>
+                  <span class="hero-media-price-old<?= empty($heroFeaturedVideo['preco_antigo']) ? ' is-hidden' : '' ?>" data-home-video-old-price><?= !empty($heroFeaturedVideo['preco_antigo']) ? h(site_money($heroFeaturedVideo['preco_antigo'])) : '' ?></span>
+                  <span class="coupon-tag<?= $featuredDiscount === null ? ' is-hidden' : '' ?>" data-home-video-discount><?= $featuredDiscount !== null ? '-' . (int) $featuredDiscount . '%' : '' ?></span>
+                </div>
+                <div class="hero-featured-video-actions">
+                  <a class="button button-primary" href="<?= h(site_offer_redirect_href($heroFeaturedVideo['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow" data-home-video-link>Abrir oferta</a>
+                </div>
+              </div>
+            </section>
+            <button class="hero-featured-video-nav hero-featured-video-nav-next" type="button" data-home-video-next aria-label="Proximo video" title="Proximo video">
+              <span aria-hidden="true">&#10095;</span>
+            </button>
+            <script type="application/json" data-home-video-playlist><?= json_encode($heroVideoPlaylist, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?></script>
           </div>
-
-          <div class="rush-grid" id="giro-rapido-grid">
-            <?php foreach ($dealRush as $index => $offer): ?>
-              <?php $discount = site_discount_percent($offer['preco'], $offer['preco_antigo']); ?>
-              <article class="card compact-card" data-load-more-item>
-                <a class="card-media compact-media" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">
-                  <img src="<?= h($offer['imagem_url'] ?: '/assets/img/sem-img.png') ?>" alt="">
-                  <div class="card-badges">
-                    <?php if ($discount !== null): ?>
-                      <span class="flag flag-sale">-<?= $discount ?>%</span>
+        <?php endif; ?>
+        <?php if ($heroCarouselItems): ?>
+          <div class="hero-media-rail">
+            <div class="hero-media-track" data-auto-carousel data-auto-carousel-speed="0.7">
+              <?php foreach (array_merge($heroCarouselItems, $heroCarouselItems) as $offer): ?>
+                <?php $discount = site_discount_percent($offer['preco'], $offer['preco_antigo']); ?>
+                <a class="hero-media-card" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">
+                  <div class="hero-media-frame">
+                    <?php if (!empty($offer['has_video']) && !empty($offer['video_url'])): ?>
+                      <video muted autoplay loop playsinline preload="metadata" poster="<?= h($offer['imagem_url'] ?: '/assets/img/sem-img.png') ?>">
+                        <source src="<?= h((string) $offer['video_url']) ?>" type="video/mp4">
+                      </video>
+                      <span class="hero-media-badge">Video Shopee</span>
+                    <?php else: ?>
+                      <img src="<?= h($offer['imagem_url'] ?: '/assets/img/sem-img.png') ?>" alt="">
+                      <span class="hero-media-badge">Oferta em alta</span>
                     <?php endif; ?>
                   </div>
+                  <div class="hero-media-body">
+                    <div class="kicker"><?= h(site_store_label($offer['loja'])) ?></div>
+                    <div class="hero-media-title"><?= h($offer['titulo']) ?></div>
+                    <div class="hero-media-price-row">
+                      <span class="hero-media-price-now"><?= h(site_money($offer['preco'])) ?></span>
+                      <?php if (!empty($offer['preco_antigo'])): ?>
+                        <span class="hero-media-price-old"><?= h(site_money($offer['preco_antigo'])) ?></span>
+                      <?php endif; ?>
+                      <?php if ($discount !== null): ?>
+                        <span class="coupon-tag">-<?= $discount ?>%</span>
+                      <?php endif; ?>
+                    </div>
+                  </div>
                 </a>
-                <div class="card-body compact-body">
-                  <div class="kicker"><?= h(site_store_label($offer['loja'])) ?></div>
-                  <div class="card-title compact-title"><?= h($offer['titulo']) ?></div>
-                  <div class="price-row compact-price-row">
-                    <span class="price-now"><?= h(site_money($offer['preco'])) ?></span>
-                  </div>
-                  <div class="card-footer compact-footer">
-                    <span class="meta-chip">Baixo ticket</span>
-                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promoção</a>
-                  </div>
-                </div>
-              </article>
-            <?php endforeach; ?>
-          </div>
-
-          <?php if (count($dealRush) > 8): ?>
-            <div class="rush-more-wrap">
-              <button class="button button-secondary" type="button" data-load-more="#giro-rapido-grid" data-load-more-step="row" data-load-more-initial="2row">Mostrar mais</button>
+              <?php endforeach; ?>
             </div>
-          <?php endif; ?>
-        </section>
-      <?php endif; ?>
+          </div>
+        <?php endif; ?>
+      </section>
 
       <section class="section-panel" id="selecao-dia">
         <div class="section-heading">
@@ -114,7 +170,7 @@ $whatsappGroupLabel = site_whatsapp_group_label();
                           <span class="coupon-tag">-<?= site_discount_percent($offer['preco'], $offer['preco_antigo']) ?>%</span>
                         <?php endif; ?>
                       </div>
-                      <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promoção</a>
+                      <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promo&ccedil;&atilde;o</a>
                     </div>
                   </article>
                 <?php endforeach; ?>
@@ -122,15 +178,59 @@ $whatsappGroupLabel = site_whatsapp_group_label();
             <?php endforeach; ?>
           </div>
         <?php else: ?>
-          <div class="empty-state">Sem publicacoes em redes sociais ainda para montar a seleção do dia.</div>
+          <div class="empty-state">Sem publica&ccedil;&otilde;es em redes sociais ainda para montar a sele&ccedil;&atilde;o do dia.</div>
         <?php endif; ?>
       </section>
+
+      <?php if ($dealRush): ?>
+        <section class="section-panel" id="giro-rapido">
+          <div class="section-heading">
+            <div>
+              <h2>Giro R&aacute;pido</h2>
+            </div>
+            <a class="cta-link" href="/ofertas-do-dia.php#ofertas-ate-150">Ver at&eacute; R$ 150</a>
+          </div>
+
+          <div class="rush-grid" id="giro-rapido-grid">
+            <?php foreach ($dealRush as $offer): ?>
+              <?php $discount = site_discount_percent($offer['preco'], $offer['preco_antigo']); ?>
+              <article class="card compact-card" data-load-more-item>
+                <a class="card-media compact-media" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">
+                  <img src="<?= h($offer['imagem_url'] ?: '/assets/img/sem-img.png') ?>" alt="">
+                  <div class="card-badges">
+                    <?php if ($discount !== null): ?>
+                      <span class="flag flag-sale">-<?= $discount ?>%</span>
+                    <?php endif; ?>
+                  </div>
+                </a>
+                <div class="card-body compact-body">
+                  <div class="kicker"><?= h(site_store_label($offer['loja'])) ?></div>
+                  <div class="card-title compact-title"><?= h($offer['titulo']) ?></div>
+                  <div class="price-row compact-price-row">
+                    <span class="price-now"><?= h(site_money($offer['preco'])) ?></span>
+                  </div>
+                  <div class="card-footer compact-footer">
+                    <span class="meta-chip">Baixo ticket</span>
+                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promo&ccedil;&atilde;o</a>
+                  </div>
+                </div>
+              </article>
+            <?php endforeach; ?>
+          </div>
+
+          <?php if (count($dealRush) > 4): ?>
+            <div class="rush-more-wrap">
+              <button class="button button-secondary" type="button" data-load-more="#giro-rapido-grid" data-load-more-step="row" data-load-more-initial="row">Mostrar mais</button>
+            </div>
+          <?php endif; ?>
+        </section>
+      <?php endif; ?>
 
       <section class="whatsapp-banner">
         <div class="whatsapp-banner-copy">
           <span class="whatsapp-banner-kicker">Canal direto</span>
           <h2>Receba ofertas no WhatsApp</h2>
-          <p>Entre no <?= h($whatsappGroupLabel) ?> para receber promocoes com mais chance de giro e abrir o link da oferta sem ficar procurando no site inteiro.</p>
+          <p>Entre no <?= h($whatsappGroupLabel) ?> para receber promo&ccedil;&otilde;es com mais chance de giro e abrir o link da oferta sem ficar procurando no site inteiro.</p>
         </div>
         <div class="whatsapp-banner-actions">
           <a class="button button-primary" href="<?= h($whatsappGroupLink) ?>" target="_blank" rel="noopener noreferrer">Entrar no grupo</a>
@@ -169,7 +269,7 @@ $whatsappGroupLabel = site_whatsapp_group_label();
                     <?php endif; ?>
                   </div>
                   <div class="card-footer compact-footer">
-                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promoção</a>
+                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promo&ccedil;&atilde;o</a>
                   </div>
                 </div>
               </article>
@@ -217,7 +317,7 @@ $whatsappGroupLabel = site_whatsapp_group_label();
                     <?php endif; ?>
                   </div>
                   <div class="card-footer compact-footer">
-                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promoção</a>
+                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promo&ccedil;&atilde;o</a>
                   </div>
                 </div>
               </article>
@@ -265,7 +365,7 @@ $whatsappGroupLabel = site_whatsapp_group_label();
                     <?php endif; ?>
                   </div>
                   <div class="card-footer compact-footer">
-                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promoção</a>
+                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promo&ccedil;&atilde;o</a>
                   </div>
                 </div>
               </article>
@@ -312,7 +412,7 @@ $whatsappGroupLabel = site_whatsapp_group_label();
                     <?php endif; ?>
                   </div>
                   <div class="card-footer compact-footer">
-                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promoção</a>
+                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promo&ccedil;&atilde;o</a>
                   </div>
                 </div>
               </article>
@@ -332,8 +432,3 @@ $whatsappGroupLabel = site_whatsapp_group_label();
   <?php require __DIR__ . '/inc/site_footer_scripts.php'; ?>
 </body>
 </html>
-
-
-
-
-

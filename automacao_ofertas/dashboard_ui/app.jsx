@@ -57,6 +57,7 @@ const NAV_ITEMS = [
   { id: "analytics", label: "Analytics", note: "Cliques, categorias, lojas e produtos mais fortes." },
   { id: "execucoes", label: "Execuções", note: "Histórico operacional consolidado do backend Python." },
 ];
+NAV_ITEMS.splice(4, 0, { id: "crescimento", label: "Crescimento", note: "Radar de concorrentes, checklist oficial e fila manual para ganhar seguidores." });
 
 function fmtMoney(value) {
   const numeric = Number(value || 0);
@@ -492,6 +493,37 @@ function App() {
       expira_em: "",
     });
   }
+
+  function resetGrowthForm() {
+    setGrowthForm({
+      platform: "instagram",
+      target_type: "profile",
+      name: "",
+      handle: "",
+      url: "",
+      niche: "",
+      priority: "media",
+      status: "novo",
+      notes: "",
+    });
+  }
+  function resetYoutubeChannelForm(overrides = {}) {
+    setYoutubeChannelEditingId(null);
+    setYoutubeChannelForm({
+      name: "",
+      handle: "",
+      notes: "",
+      avoid_terms: "",
+      preferred_terms: "",
+      viral_tone: "",
+      client_id: snapshot?.settings?.youtube?.client_id || "",
+      client_secret: "",
+      redirect_uri: snapshot?.settings?.youtube?.redirect_uri || "",
+      is_default: false,
+      is_active: true,
+      ...overrides,
+    });
+  }
   const [socialForm, setSocialForm] = useState({ selected: "both:feed_story", limit: 120, query: "" });
   const [socialFilters, setSocialFilters] = useState({ store: "all", category: "all" });
   const [activeSection, setActiveSection] = useState("painel");
@@ -502,8 +534,42 @@ function App() {
   const [youtubeCutLoading, setYoutubeCutLoading] = useState(false);
   const [youtubeCutsPhase2, setYoutubeCutsPhase2] = useState(null);
   const [youtubeCutsPhase2Loading, setYoutubeCutsPhase2Loading] = useState(false);
+  const [growthRadar, setGrowthRadar] = useState(null);
+  const [growthLoading, setGrowthLoading] = useState(false);
+  const [growthSaving, setGrowthSaving] = useState(false);
+  const [growthForm, setGrowthForm] = useState({
+    platform: "instagram",
+    target_type: "profile",
+    name: "",
+    handle: "",
+    url: "",
+    niche: "",
+    priority: "media",
+    status: "novo",
+    notes: "",
+  });
   const [youtubeOauthStatus, setYoutubeOauthStatus] = useState(null);
   const [youtubeOauthLoading, setYoutubeOauthLoading] = useState(false);
+  const [youtubeChannelProfiles, setYoutubeChannelProfiles] = useState([]);
+  const [youtubeChannelsLoading, setYoutubeChannelsLoading] = useState(false);
+  const [youtubeChannelSaving, setYoutubeChannelSaving] = useState(false);
+  const [youtubeChannelEditingId, setYoutubeChannelEditingId] = useState(null);
+  const [youtubeSelectedChannelId, setYoutubeSelectedChannelId] = useState(null);
+  const [youtubeChannelForm, setYoutubeChannelForm] = useState({
+    name: "",
+    handle: "",
+    notes: "",
+    avoid_terms: "",
+    preferred_terms: "",
+    viral_tone: "",
+    client_id: "",
+    client_secret: "",
+    redirect_uri: "",
+    is_default: false,
+    is_active: true,
+  });
+  const [youtubeTrendIdeas, setYoutubeTrendIdeas] = useState(null);
+  const [youtubeTrendIdeasLoading, setYoutubeTrendIdeasLoading] = useState(false);
   const [youtubePublishingCutId, setYoutubePublishingCutId] = useState(null);
   const [whatsappGroups, setWhatsappGroups] = useState([]);
   const [whatsappGroupsLoading, setWhatsappGroupsLoading] = useState(false);
@@ -713,13 +779,29 @@ function App() {
       ytdlp_cookies_from_browser: settings.youtube?.cookies_from_browser || "",
       ytdlp_cookies_file: settings.youtube?.cookies_file || "",
     }));
+    const channels = settings.youtube?.channels || [];
+    setYoutubeChannelProfiles(channels);
+    if (!youtubeSelectedChannelId && channels.length) {
+      const preferred = channels.find((item) => item.is_default) || channels[0];
+      setYoutubeSelectedChannelId(Number(preferred.id));
+    }
   }, [snapshot?.settings]);
 
   useEffect(() => {
     if (activeSection === "youtube_cortes") {
+      loadYoutubeChannels();
       loadYoutubeOauthStatus();
     }
+    if (activeSection === "crescimento") {
+      loadGrowthRadar();
+    }
   }, [activeSection]);
+
+  useEffect(() => {
+    if (activeSection === "youtube_cortes") {
+      loadYoutubeOauthStatus(youtubeSelectedChannelId);
+    }
+  }, [youtubeSelectedChannelId]);
 
   async function loadSocialPreview(limit = socialForm.limit, query = socialForm.query) {
     setSocialLoading(true);
@@ -1120,6 +1202,7 @@ function App() {
           limit: youtubeCutMode === "long" ? 3 : 5,
           mode: youtubeCutMode,
           selection_strategy: youtubeShortSelectionStrategy,
+          channel_profile_id: youtubeSelectedChannelId || null,
         }),
       });
       setYoutubeCutsPhase2(data);
@@ -1132,10 +1215,73 @@ function App() {
     }
   }
 
-  async function loadYoutubeOauthStatus() {
+  async function loadYoutubeChannels() {
+    setYoutubeChannelsLoading(true);
+    try {
+      const data = await fetchJson("/dashboard/api/youtube/channels");
+      const profiles = data?.profiles || [];
+      setYoutubeChannelProfiles(profiles);
+      setYoutubeSelectedChannelId((current) => {
+        if (current && profiles.some((item) => Number(item.id) === Number(current))) return current;
+        const preferred = profiles.find((item) => item.is_default) || profiles[0];
+        return preferred ? Number(preferred.id) : null;
+      });
+    } catch (error) {
+      setYoutubeChannelProfiles([]);
+      setToast({ type: "error", message: `Falha ao carregar canais do YouTube: ${error.message}` });
+    } finally {
+      setYoutubeChannelsLoading(false);
+    }
+  }
+
+  async function handleYoutubeChannelSave() {
+    const normalizedName = String(youtubeChannelForm.name || "").trim();
+    if (!normalizedName) {
+      setToast({ type: "error", message: "Informe um nome para o perfil do canal." });
+      return;
+    }
+    setYoutubeChannelSaving(true);
+    try {
+      const url = youtubeChannelEditingId ? `/dashboard/api/youtube/channels/${youtubeChannelEditingId}` : "/dashboard/api/youtube/channels";
+      const data = await fetchJson(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(youtubeChannelForm),
+      });
+      await loadYoutubeChannels();
+      const profileId = Number(data?.profile?.id || 0);
+      if (profileId) {
+        setYoutubeSelectedChannelId(profileId);
+      }
+      resetYoutubeChannelForm();
+      setToast({ type: "success", message: youtubeChannelEditingId ? "Perfil do canal atualizado." : "Perfil do canal criado." });
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao salvar perfil do canal: ${error.message}` });
+    } finally {
+      setYoutubeChannelSaving(false);
+    }
+  }
+
+  async function handleYoutubeChannelDelete(profileId) {
+    if (!profileId) return;
+    if (!window.confirm("Remover este perfil de canal do YouTube?")) return;
+    try {
+      await fetchJson(`/dashboard/api/youtube/channels/${profileId}`, { method: "DELETE" });
+      if (Number(youtubeSelectedChannelId) === Number(profileId)) {
+        setYoutubeSelectedChannelId(null);
+      }
+      await loadYoutubeChannels();
+      setToast({ type: "success", message: "Perfil do canal removido." });
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao remover perfil do canal: ${error.message}` });
+    }
+  }
+
+  async function loadYoutubeOauthStatus(channelId = youtubeSelectedChannelId) {
     setYoutubeOauthLoading(true);
     try {
-      const data = await fetchJson("/dashboard/api/youtube/oauth/status");
+      const suffix = channelId ? `?channel_profile_id=${encodeURIComponent(channelId)}` : "";
+      const data = await fetchJson(`/dashboard/api/youtube/oauth/status${suffix}`);
       setYoutubeOauthStatus(data.youtube_auth || null);
     } catch (error) {
       setYoutubeOauthStatus(null);
@@ -1147,11 +1293,112 @@ function App() {
 
   async function handleYoutubeConnect() {
     try {
-      const data = await fetchJson("/dashboard/api/youtube/oauth/url");
+      const suffix = youtubeSelectedChannelId ? `?channel_profile_id=${encodeURIComponent(youtubeSelectedChannelId)}` : "";
+      const data = await fetchJson(`/dashboard/api/youtube/oauth/url${suffix}`);
       window.open(data.auth_url, "_blank", "noopener,noreferrer");
       setToast({ type: "info", message: "Abrimos a autorizacao do Google em uma nova aba." });
     } catch (error) {
       setToast({ type: "error", message: `Falha ao iniciar OAuth do YouTube: ${error.message}` });
+    }
+  }
+
+  async function handleLoadYoutubeTrendIdeas() {
+    setYoutubeTrendIdeasLoading(true);
+    try {
+      const params = new URLSearchParams({
+        recent_limit: "4",
+        videos_per_topic: "4",
+      });
+      if (youtubeSelectedChannelId) params.set("channel_profile_id", String(youtubeSelectedChannelId));
+      const data = await fetchJson(`/dashboard/api/youtube/trends/themes?${params.toString()}`);
+      setYoutubeTrendIdeas(data);
+      const ideaCount = Number(data?.ideas?.length || 0);
+      setToast({
+        type: ideaCount ? "success" : "info",
+        message: ideaCount
+          ? `${ideaCount} canal(is) com videos recentes para corte carregados das suas inscricoes.`
+          : "Nao encontrei videos de podcast/guerra/politica nas inscricoes nas ultimas 48 horas.",
+      });
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao buscar temas em alta: ${error.message}` });
+    } finally {
+      setYoutubeTrendIdeasLoading(false);
+    }
+  }
+
+  async function loadGrowthRadar() {
+    setGrowthLoading(true);
+    try {
+      const data = await fetchJson("/dashboard/api/growth/radar");
+      setGrowthRadar(data);
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao carregar radar de crescimento: ${error.message}` });
+    } finally {
+      setGrowthLoading(false);
+    }
+  }
+
+  async function handleGrowthTargetSave() {
+    const normalizedName = String(growthForm.name || "").trim();
+    const normalizedUrl = String(growthForm.url || "").trim();
+    if (!normalizedName || !normalizedUrl) {
+      setToast({ type: "error", message: "Informe pelo menos nome e URL do perfil/pagina." });
+      return;
+    }
+
+    setGrowthSaving(true);
+    try {
+      await fetchJson("/dashboard/api/growth/targets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(growthForm),
+      });
+      resetGrowthForm();
+      await loadGrowthRadar();
+      setToast({ type: "success", message: "Perfil/pagina adicionado ao radar de crescimento." });
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao salvar alvo de crescimento: ${error.message}` });
+    } finally {
+      setGrowthSaving(false);
+    }
+  }
+
+  async function updateGrowthTarget(target, updates) {
+    if (!target?.id) return;
+    try {
+      await fetchJson(`/dashboard/api/growth/targets/${target.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          platform: updates.platform || target.platform,
+          target_type: updates.target_type || target.target_type,
+          name: updates.name ?? target.name,
+          handle: updates.handle ?? target.handle,
+          url: updates.url || target.url,
+          niche: updates.niche ?? target.niche,
+          priority: updates.priority || target.priority,
+          status: updates.status || target.status,
+          notes: updates.notes ?? target.notes,
+          last_checked_at: updates.last_checked_at ?? target.last_checked_at,
+        }),
+      });
+      await loadGrowthRadar();
+      if (updates.status) {
+        setToast({ type: "success", message: `Status atualizado para ${updates.status}.` });
+      }
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao atualizar alvo: ${error.message}` });
+    }
+  }
+
+  async function removeGrowthTarget(targetId) {
+    if (!targetId) return;
+    try {
+      await fetchJson(`/dashboard/api/growth/targets/${targetId}`, { method: "DELETE" });
+      await loadGrowthRadar();
+      setToast({ type: "success", message: "Alvo removido do radar de crescimento." });
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao remover alvo: ${error.message}` });
     }
   }
 
@@ -1188,8 +1435,9 @@ function App() {
           cut_id: Number(item.cut_id),
           title: draft.title || item.title,
           description: draft.description || item.caption_draft || "",
-          privacy_status: draft.privacy_status || "private",
+          privacy_status: draft.privacy_status || "public",
           mode: item.mode || draft.mode || youtubeCutMode,
+          channel_profile_id: draft.channel_profile_id || youtubeSelectedChannelId || null,
         }),
       });
       const uploadedThumbnail = Boolean(data.thumbnail_result && !data.thumbnail_error);
@@ -1210,7 +1458,7 @@ function App() {
         });
         return { ...current, cuts };
       });
-      await loadYoutubeOauthStatus();
+      await loadYoutubeOauthStatus(youtubeSelectedChannelId);
     } catch (error) {
       setToast({ type: "error", message: `Falha ao publicar no YouTube: ${error.message}` });
     } finally {
@@ -3225,6 +3473,196 @@ function App() {
             </section>
           ) : null}
 
+          {activeSection === "crescimento" ? (
+            <>
+              <section className="hero" style={{ marginTop: 18 }}>
+                <div className="hero-head">
+                  <div className="hero-copy">
+                    <span className="hero-kicker">Crescimento seguro</span>
+                    <h2>Radar de seguidores e concorrentes.</h2>
+                    <p className="panel-subtitle">Area para mapear perfis e paginas de referencia, descobrir taticas seguras de crescimento e organizar a abordagem manual.</p>
+                  </div>
+                  <div className="hero-actions">
+                    <span className="status-pill is-info">Manual only</span>
+                    <span className="status-pill is-ok">Sem follow automatico</span>
+                    <button className="button" onClick={loadGrowthRadar} disabled={growthLoading}>
+                      {growthLoading ? "Atualizando..." : "Atualizar radar"}
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <section className="panel" style={{ marginTop: 18, marginBottom: 18 }}>
+                <div className="panel-head">
+                  <div>
+                    <h3 className="panel-title">Adicionar referencia</h3>
+                    <p className="panel-subtitle">Salve grupos, paginas e perfis para acompanhar manualmente o que traz alcance, comentarios e seguidores.</p>
+                  </div>
+                </div>
+                <div className="field-grid">
+                  <div className="field">
+                    <label>Plataforma</label>
+                    <select value={growthForm.platform} onChange={(e) => setGrowthForm((state) => ({ ...state, platform: e.target.value }))}>
+                      <option value="instagram">Instagram</option>
+                      <option value="facebook">Facebook</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Tipo</label>
+                    <select value={growthForm.target_type} onChange={(e) => setGrowthForm((state) => ({ ...state, target_type: e.target.value }))}>
+                      <option value="profile">Perfil</option>
+                      <option value="creator">Creator</option>
+                      <option value="page">Pagina</option>
+                      <option value="group">Grupo</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Prioridade</label>
+                    <select value={growthForm.priority} onChange={(e) => setGrowthForm((state) => ({ ...state, priority: e.target.value }))}>
+                      <option value="alta">Alta</option>
+                      <option value="media">Media</option>
+                      <option value="baixa">Baixa</option>
+                    </select>
+                  </div>
+                  <div className="field is-full">
+                    <label>Nome</label>
+                    <input type="text" value={growthForm.name} onChange={(e) => setGrowthForm((state) => ({ ...state, name: e.target.value }))} placeholder="@achadosdeangel ou nome da pagina/grupo" />
+                  </div>
+                  <div className="field">
+                    <label>Handle</label>
+                    <input type="text" value={growthForm.handle} onChange={(e) => setGrowthForm((state) => ({ ...state, handle: e.target.value }))} placeholder="achadosdeangel" />
+                  </div>
+                  <div className="field">
+                    <label>Nicho</label>
+                    <input type="text" value={growthForm.niche} onChange={(e) => setGrowthForm((state) => ({ ...state, niche: e.target.value }))} placeholder="achados, cupons, ofertas, compras" />
+                  </div>
+                  <div className="field is-full">
+                    <label>URL</label>
+                    <input type="text" value={growthForm.url} onChange={(e) => setGrowthForm((state) => ({ ...state, url: e.target.value }))} placeholder="https://www.instagram.com/... ou https://www.facebook.com/..." />
+                  </div>
+                  <div className="field is-full">
+                    <label>Observacoes</label>
+                    <textarea rows="4" value={growthForm.notes} onChange={(e) => setGrowthForm((state) => ({ ...state, notes: e.target.value }))} placeholder="O que voce quer observar: comentarios, formatos, collabs, CTA, frequencia, estilo visual..." />
+                  </div>
+                </div>
+                <div className="provider-actions" style={{ marginTop: 14 }}>
+                  <button className="button is-primary" type="button" onClick={handleGrowthTargetSave} disabled={growthSaving}>
+                    {growthSaving ? "Salvando..." : "Salvar referencia"}
+                  </button>
+                  <button className="button is-secondary" type="button" onClick={resetGrowthForm}>
+                    Limpar
+                  </button>
+                </div>
+                <div style={{ marginTop: 12 }}>
+                  <div className="inline-note is-warning">
+                    Esta area nao automatiza follow em massa nem leitura de seguidores de terceiros. O uso aqui e para pesquisa, acompanhamento e abordagem manual segura.
+                  </div>
+                </div>
+              </section>
+
+              <section className="panel" style={{ marginBottom: 18 }}>
+                <div className="panel-head">
+                  <div>
+                    <h3 className="panel-title">Checklist oficial de crescimento</h3>
+                    <p className="panel-subtitle">Acoes que fazem sentido implementar e acompanhar sem colocar a conta em risco.</p>
+                  </div>
+                </div>
+                <div className="offer-meta" style={{ marginBottom: 14 }}>
+                  <span className="meta-chip">total {fmtInt(growthRadar?.summary?.total || 0)}</span>
+                  <span className="meta-chip">instagram {fmtInt(growthRadar?.summary?.instagram || 0)}</span>
+                  <span className="meta-chip">facebook {fmtInt(growthRadar?.summary?.facebook || 0)}</span>
+                  <span className="meta-chip">alta prioridade {fmtInt(growthRadar?.summary?.high_priority || 0)}</span>
+                </div>
+                <div className="preview-grid">
+                  {(growthRadar?.guidance || []).map((item, index) => (
+                    <article className="surface" key={`growth-guidance-${index}`}>
+                      <div className="panel-head" style={{ marginBottom: 10 }}>
+                        <div>
+                          <h4>{item.title}</h4>
+                          <p>{item.summary}</p>
+                        </div>
+                        <span className="badge is-success">{item.platform}</span>
+                      </div>
+                      <div className="inline-note is-info">{item.action}</div>
+                      <div className="provider-actions" style={{ marginTop: 12 }}>
+                        {item.source_url ? <a className="tiny-button is-soft" href={item.source_url} target="_blank" rel="noreferrer">{item.source_label || "Fonte"}</a> : null}
+                        {item.verified ? <span className="meta-chip">oficial</span> : <span className="meta-chip">operacional</span>}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+                {(growthRadar?.guardrails || []).length ? (
+                  <div style={{ marginTop: 14 }}>
+                    {(growthRadar.guardrails || []).map((item, index) => (
+                      <div className="inline-note is-warning" key={`growth-guardrail-${index}`} style={{ marginTop: index ? 8 : 0 }}>
+                        {item}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="panel">
+                <div className="panel-head">
+                  <div>
+                    <h3 className="panel-title">Fila manual de acompanhamento</h3>
+                    <p className="panel-subtitle">Abra os perfis/paginas, estude o que funciona, comente manualmente e teste temas parecidos no seu conteudo.</p>
+                  </div>
+                </div>
+                {growthLoading ? (
+                  <div className="empty-state">Carregando radar de crescimento...</div>
+                ) : !(growthRadar?.targets || []).length ? (
+                  <div className="empty-state">Nenhuma referencia salva ainda. Adicione perfis do Instagram, paginas e grupos do Facebook para montar sua fila manual.</div>
+                ) : (
+                  <div className="preview-grid">
+                    {(growthRadar.targets || []).map((target) => (
+                      <article className="surface" key={`growth-target-${target.id}`}>
+                        <div className="panel-head" style={{ marginBottom: 10 }}>
+                          <div>
+                            <h4>{target.name}</h4>
+                            <p>{target.handle ? `@${target.handle}` : target.url}</p>
+                          </div>
+                          <span className="badge is-success">{target.platform}</span>
+                        </div>
+                        <div className="offer-meta" style={{ marginBottom: 12 }}>
+                          <span className="meta-chip">{target.target_type}</span>
+                          <span className="meta-chip">{target.priority}</span>
+                          <span className="meta-chip">{target.status}</span>
+                          {target.niche ? <span className="meta-chip">{target.niche}</span> : null}
+                        </div>
+                        {target.notes ? (
+                          <div className="inline-note is-info">{target.notes}</div>
+                        ) : (
+                          <div className="inline-note is-info">Sem observacoes ainda. Use este alvo para estudar CTA, comentarios, frequencia e formatos que geram alcance.</div>
+                        )}
+                        <div className="offer-meta" style={{ marginTop: 12 }}>
+                          <span className="meta-chip">criado {fmtDate(target.created_at)}</span>
+                          <span className="meta-chip">atualizado {fmtDate(target.updated_at)}</span>
+                          {target.last_checked_at ? <span className="meta-chip">checado {fmtDate(target.last_checked_at)}</span> : null}
+                        </div>
+                        <div className="provider-actions" style={{ marginTop: 12 }}>
+                          <a className="tiny-button is-soft" href={target.url} target="_blank" rel="noreferrer">Abrir</a>
+                          <button className="tiny-button is-soft" type="button" onClick={() => updateGrowthTarget(target, { status: "monitorando", last_checked_at: new Date().toISOString().slice(0, 19) })}>
+                            Monitorando
+                          </button>
+                          <button className="tiny-button is-soft" type="button" onClick={() => updateGrowthTarget(target, { status: "pronto_para_testar", last_checked_at: new Date().toISOString().slice(0, 19) })}>
+                            Pronto para testar
+                          </button>
+                          <button className="tiny-button is-soft" type="button" onClick={() => updateGrowthTarget(target, { status: "arquivado", last_checked_at: new Date().toISOString().slice(0, 19) })}>
+                            Arquivar
+                          </button>
+                          <button className="tiny-button is-soft" type="button" onClick={() => removeGrowthTarget(target.id)}>
+                            Remover
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+            </>
+          ) : null}
+
           {activeSection === "youtube_cortes" ? (
             <>
               <section className="hero" style={{ marginTop: 18 }}>
@@ -3242,6 +3680,159 @@ function App() {
               </section>
 
               <section className="panel" style={{ marginTop: 18, marginBottom: 18 }}>
+                <div className="panel-head">
+                  <div>
+                    <h3 className="panel-title">Perfis de canal</h3>
+                    <p className="panel-subtitle">Cadastre varios canais, conecte cada um com seu proprio OAuth e escolha qual perfil sera usado nos cortes, radar e uploads.</p>
+                  </div>
+                  <div className="provider-actions">
+                    <button className="button is-secondary" type="button" onClick={loadYoutubeChannels} disabled={youtubeChannelsLoading}>
+                      {youtubeChannelsLoading ? "Atualizando..." : "Atualizar canais"}
+                    </button>
+                    <button className="button is-secondary" type="button" onClick={() => resetYoutubeChannelForm()}>
+                      Novo perfil
+                    </button>
+                  </div>
+                </div>
+                <div className="field-grid">
+                  <div className="field">
+                    <label>Perfil ativo no fluxo</label>
+                    <select value={youtubeSelectedChannelId || ""} onChange={(e) => setYoutubeSelectedChannelId(Number(e.target.value) || null)}>
+                      <option value="">Selecione</option>
+                      {youtubeChannelProfiles.map((profile) => (
+                        <option key={`yt-channel-option-${profile.id}`} value={profile.id}>
+                          {profile.name}{profile.is_default ? " • padrao" : ""}{profile.is_active ? "" : " • inativo"}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Nome do perfil</label>
+                    <input type="text" value={youtubeChannelForm.name} onChange={(e) => setYoutubeChannelForm((current) => ({ ...current, name: e.target.value }))} placeholder="Ex.: Zero Cortes Guerra" />
+                  </div>
+                  <div className="field">
+                    <label>Handle interno</label>
+                    <input type="text" value={youtubeChannelForm.handle} onChange={(e) => setYoutubeChannelForm((current) => ({ ...current, handle: e.target.value }))} placeholder="@zerocortes" />
+                  </div>
+                  <div className="field">
+                    <label>Client ID</label>
+                    <input type="text" value={youtubeChannelForm.client_id} onChange={(e) => setYoutubeChannelForm((current) => ({ ...current, client_id: e.target.value }))} placeholder="Se vazio, usa o padrao do .env" />
+                  </div>
+                  <div className="field">
+                    <label>Client secret</label>
+                    <input type="password" value={youtubeChannelForm.client_secret} onChange={(e) => setYoutubeChannelForm((current) => ({ ...current, client_secret: e.target.value }))} placeholder={youtubeChannelEditingId ? "Deixe vazio para manter o atual" : "Opcional se usar o padrao do .env"} />
+                  </div>
+                  <div className="field">
+                    <label>Redirect URI</label>
+                    <input type="text" value={youtubeChannelForm.redirect_uri} onChange={(e) => setYoutubeChannelForm((current) => ({ ...current, redirect_uri: e.target.value }))} placeholder="https://seu-dominio/integrations/youtube/oauth/callback" />
+                  </div>
+                  <div className="field" style={{ gridColumn: "1 / -1" }}>
+                    <label>Palavras para evitar</label>
+                    <textarea rows="2" value={youtubeChannelForm.avoid_terms} onChange={(e) => setYoutubeChannelForm((current) => ({ ...current, avoid_terms: e.target.value }))} placeholder="Uma por linha ou separadas por virgula. Ex.: tragedia, morte, assunto tecnico demais" />
+                  </div>
+                  <div className="field" style={{ gridColumn: "1 / -1" }}>
+                    <label>Palavras para priorizar</label>
+                    <textarea rows="2" value={youtubeChannelForm.preferred_terms} onChange={(e) => setYoutubeChannelForm((current) => ({ ...current, preferred_terms: e.target.value }))} placeholder="Ex.: polemica, bastidores, reacao, provocacao, arbitragem" />
+                  </div>
+                  <div className="field" style={{ gridColumn: "1 / -1" }}>
+                    <label>Tom viral do canal</label>
+                    <textarea rows="2" value={youtubeChannelForm.viral_tone} onChange={(e) => setYoutubeChannelForm((current) => ({ ...current, viral_tone: e.target.value }))} placeholder="Ex.: risadas, zoacao, brincadeira, sentimento, provocacao, deboche leve" />
+                  </div>
+                  <div className="field" style={{ gridColumn: "1 / -1" }}>
+                    <label>Notas</label>
+                    <textarea rows="3" value={youtubeChannelForm.notes} onChange={(e) => setYoutubeChannelForm((current) => ({ ...current, notes: e.target.value }))} placeholder="Nicho, linguagem e observacoes desse canal." />
+                  </div>
+                </div>
+                <div className="offer-meta" style={{ marginTop: 12 }}>
+                  <label className="tiny-button is-soft" style={{ cursor: "pointer" }}>
+                    <input type="checkbox" checked={Boolean(youtubeChannelForm.is_default)} onChange={(e) => setYoutubeChannelForm((current) => ({ ...current, is_default: e.target.checked }))} />
+                    Perfil padrao
+                  </label>
+                  <label className="tiny-button is-soft" style={{ cursor: "pointer" }}>
+                    <input type="checkbox" checked={Boolean(youtubeChannelForm.is_active)} onChange={(e) => setYoutubeChannelForm((current) => ({ ...current, is_active: e.target.checked }))} />
+                    Perfil ativo
+                  </label>
+                </div>
+                <div className="provider-actions" style={{ marginTop: 16 }}>
+                  <button className="button is-primary" type="button" onClick={handleYoutubeChannelSave} disabled={youtubeChannelSaving}>
+                    {youtubeChannelSaving ? "Salvando..." : youtubeChannelEditingId ? "Salvar perfil" : "Criar perfil"}
+                  </button>
+                  {youtubeChannelEditingId ? (
+                    <button className="button is-secondary" type="button" onClick={() => resetYoutubeChannelForm()}>
+                      Cancelar edicao
+                    </button>
+                  ) : null}
+                </div>
+                {!youtubeChannelProfiles.length ? (
+                  <div className="empty-state" style={{ marginTop: 16 }}>Nenhum perfil de canal cadastrado ainda.</div>
+                ) : (
+                  <div className="preview-grid" style={{ marginTop: 16 }}>
+                    {youtubeChannelProfiles.map((profile) => (
+                      <article className="surface" key={`yt-profile-${profile.id}`}>
+                        <div className="panel-head" style={{ marginBottom: 10 }}>
+                          <div>
+                            <h4>{profile.name}</h4>
+                            <p>{profile.channel_title || profile.handle || "Canal ainda nao autenticado"}</p>
+                          </div>
+                          <span className={`badge ${profile.is_active ? "is-success" : "is-warning"}`}>{profile.is_active ? "ativo" : "inativo"}</span>
+                        </div>
+                        <div className="offer-meta">
+                          {profile.is_default ? <span className="meta-chip">padrao</span> : null}
+                          {profile.channel_custom_url ? <span className="meta-chip">{profile.channel_custom_url}</span> : null}
+                          <span className="meta-chip">id {profile.id}</span>
+                        </div>
+                        {profile.preferred_terms ? (
+                          <div className="inline-note is-info" style={{ marginTop: 12 }}>
+                            <strong>Priorizar:</strong> {profile.preferred_terms}
+                          </div>
+                        ) : null}
+                        {profile.avoid_terms ? (
+                          <div className="inline-note is-info" style={{ marginTop: 8 }}>
+                            <strong>Evitar:</strong> {profile.avoid_terms}
+                          </div>
+                        ) : null}
+                        {profile.viral_tone ? (
+                          <div className="inline-note is-info" style={{ marginTop: 8 }}>
+                            <strong>Tom viral:</strong> {profile.viral_tone}
+                          </div>
+                        ) : null}
+                        <div className="provider-actions" style={{ marginTop: 12 }}>
+                          <button className="tiny-button is-soft" type="button" onClick={() => setYoutubeSelectedChannelId(Number(profile.id))}>
+                            Usar neste fluxo
+                          </button>
+                          <button
+                            className="tiny-button is-soft"
+                            type="button"
+                            onClick={() => {
+                              setYoutubeChannelEditingId(Number(profile.id));
+                              setYoutubeChannelForm({
+                                name: profile.name || "",
+                                handle: profile.handle || "",
+                                notes: profile.notes || "",
+                                avoid_terms: profile.avoid_terms || "",
+                                preferred_terms: profile.preferred_terms || "",
+                                viral_tone: profile.viral_tone || "",
+                                client_id: profile.client_id || "",
+                                client_secret: "",
+                                redirect_uri: profile.redirect_uri || "",
+                                is_default: Boolean(profile.is_default),
+                                is_active: Boolean(profile.is_active),
+                              });
+                            }}
+                          >
+                            Editar
+                          </button>
+                          <button className="tiny-button is-soft" type="button" onClick={() => handleYoutubeChannelDelete(profile.id)}>
+                            Remover
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="panel" style={{ marginBottom: 18 }}>
                 <div className="panel-head">
                   <div>
                     <h3 className="panel-title">Analisar video</h3>
@@ -3296,13 +3887,16 @@ function App() {
                 <div className="panel-head">
                   <div>
                     <h3 className="panel-title">Fase 3: conexao com YouTube</h3>
-                    <p className="panel-subtitle">OAuth Google, status do canal e publicacao dos cortes gerados.</p>
+                    <p className="panel-subtitle">OAuth Google por perfil, status do canal escolhido e publicacao dos cortes gerados.</p>
                   </div>
                   <div className="provider-actions">
-                    <button className="button is-secondary" onClick={loadYoutubeOauthStatus} disabled={youtubeOauthLoading}>
+                    <button className="button is-secondary" onClick={() => loadYoutubeOauthStatus(youtubeSelectedChannelId)} disabled={youtubeOauthLoading}>
                       {youtubeOauthLoading ? "Atualizando..." : "Atualizar status"}
                     </button>
-                    <button className="button is-primary" onClick={handleYoutubeConnect}>
+                    <button className="button is-secondary" onClick={handleLoadYoutubeTrendIdeas} disabled={youtubeTrendIdeasLoading || !youtubeOauthStatus?.authenticated || !youtubeSelectedChannelId}>
+                      {youtubeTrendIdeasLoading ? "Buscando temas..." : "Inscricoes 48h para corte"}
+                    </button>
+                    <button className="button is-primary" onClick={handleYoutubeConnect} disabled={!youtubeSelectedChannelId}>
                       Conectar YouTube
                     </button>
                   </div>
@@ -3310,12 +3904,13 @@ function App() {
                 <div className="status-grid">
                   <article className={`status-card ${youtubeOauthStatus?.authenticated ? "is-success" : youtubeOauthStatus?.error ? "is-error" : ""}`}>
                     <div className="status-card-head">
-                      <h4>Conta YouTube</h4>
+                      <h4>Conta YouTube do perfil</h4>
                       <span className={`badge ${youtubeOauthStatus?.authenticated ? "is-success" : "is-warning"}`}>{youtubeOauthStatus?.authenticated ? "Conectado" : "Pendente"}</span>
                     </div>
-                    <p>Client ID: {snapshot?.settings?.youtube?.client_id ? "configurado" : "ausente"}</p>
-                    <p>Client secret: {snapshot?.settings?.youtube?.client_secret_configured ? "configurado" : "ausente"}</p>
-                    <p>Redirect URI: {snapshot?.settings?.youtube?.redirect_uri || "nao definido"}</p>
+                    <p>Perfil: {youtubeOauthStatus?.profile?.name || "nenhum selecionado"}</p>
+                    <p>Client ID: {youtubeOauthStatus?.client_id_configured ? "configurado" : "ausente"}</p>
+                    <p>Client secret: {youtubeOauthStatus?.client_secret_configured ? "configurado" : "ausente"}</p>
+                    <p>Redirect URI: {youtubeOauthStatus?.redirect_uri || "nao definido"}</p>
                     <p>Cookies browser: {snapshot?.settings?.youtube?.cookies_from_browser || "nao definido"}</p>
                     <p>Cookies file: {snapshot?.settings?.youtube?.cookies_file || "nao definido"}</p>
                     <p>Refresh token: {youtubeOauthStatus?.refresh_token_configured ? "ok" : "pendente"}</p>
@@ -3324,6 +3919,84 @@ function App() {
                     {youtubeOauthStatus?.error ? <div className="inline-note is-info" style={{ marginTop: 12 }}>{youtubeOauthStatus.error}</div> : null}
                   </article>
                 </div>
+              </section>
+
+              <section className="panel" style={{ marginBottom: 18 }}>
+                <div className="panel-head">
+                  <div>
+                    <h3 className="panel-title">Radar de videos para cortar</h3>
+                    <p className="panel-subtitle">Olha os canais em que voce ja e inscrito, filtra videos das ultimas 48 horas e prioriza podcasts sobre guerra e politica com melhor potencial de corte.</p>
+                  </div>
+                  <div className="provider-actions">
+                    <button className="button is-secondary" type="button" onClick={handleLoadYoutubeTrendIdeas} disabled={youtubeTrendIdeasLoading || !youtubeOauthStatus?.authenticated || !youtubeSelectedChannelId}>
+                      {youtubeTrendIdeasLoading ? "Buscando..." : "Atualizar lista"}
+                    </button>
+                  </div>
+                </div>
+                {!youtubeOauthStatus?.authenticated ? (
+                  <div className="empty-state">Selecione um perfil e conecte o canal do YouTube primeiro para ler suas inscricoes e buscar videos das ultimas 48 horas para corte.</div>
+                ) : !youtubeTrendIdeas?.ideas?.length ? (
+                  <div className="empty-state">Clique em "Inscricoes 48h para corte" para montar a lista dos melhores videos base vindos dos canais que voce ja segue.</div>
+                ) : (
+                  <>
+                    <div className="offer-meta" style={{ marginBottom: 14 }}>
+                      <span className="meta-chip">{youtubeTrendIdeas.target_profile?.name || youtubeTrendIdeas.channel?.title || "Canal conectado"}</span>
+                      {youtubeTrendIdeas.channel?.custom_url ? <span className="meta-chip">{youtubeTrendIdeas.channel.custom_url}</span> : null}
+                      <span className="meta-chip">{Number(youtubeTrendIdeas.ideas?.length || 0)} tema(s)</span>
+                      <span className="meta-chip">{Number(youtubeTrendIdeas.recent_uploads?.length || 0)} upload(s) recentes lidos</span>
+                    </div>
+                    <div className="preview-grid">
+                      {(youtubeTrendIdeas.ideas || []).map((idea, ideaIndex) => (
+                        <article className="surface" key={`youtube-trend-${idea.seed_video_id || ideaIndex}`}>
+                          <div className="panel-head" style={{ marginBottom: 12 }}>
+                            <div>
+                              <h4>{truncateText(idea.seed_title || `Canal ${ideaIndex + 1}`, 88)}</h4>
+                              <p>Canal inscrito com uploads recentes alinhados a podcast, guerra ou politica.</p>
+                            </div>
+                            <span className="badge is-success">canal {ideaIndex + 1}</span>
+                          </div>
+                          <div className="offer-meta" style={{ marginBottom: 12 }}>
+                            {idea.query ? <span className="meta-chip">{idea.query}</span> : null}
+                            <span className="meta-chip">ultimas 48h</span>
+                            {idea.seed_url ? <a className="tiny-button is-soft" href={idea.seed_url} target="_blank" rel="noreferrer">Abrir canal</a> : null}
+                          </div>
+                          <div style={{ display: "grid", gap: 10 }}>
+                            {(idea.videos || []).map((video, videoIndex) => (
+                              <div key={`trend-video-${ideaIndex}-${video.video_id || videoIndex}`} className="surface" style={{ padding: 12, display: "grid", gap: 8 }}>
+                                <strong>{video.title || "Video sugerido"}</strong>
+                                <div className="social-item-subtitle">
+                                  {video.channel_title || "Canal"}
+                                  {video.view_count ? ` | ${fmtInt(video.view_count)} views` : ""}
+                                </div>
+                                <div className="offer-meta">
+                                  {video.cut_score ? <span className="meta-chip">Potencial {video.cut_score}/100</span> : null}
+                                  {video.duration_label ? <span className="meta-chip">{video.duration_label}</span> : null}
+                                  {video.published_at ? <span className="meta-chip">{fmtDate(video.published_at)}</span> : null}
+                                  <a className="tiny-button is-soft" href={video.url} target="_blank" rel="noreferrer">Abrir link</a>
+                                  <button className="tiny-button is-soft" type="button" onClick={() => setYoutubeCutUrl(video.url || "")}>
+                                    Usar no corte
+                                  </button>
+                                  <button className="tiny-button is-soft" type="button" onClick={() => handleCopyText(video.url || "", "Link do video copiado.")}>
+                                    Copiar link
+                                  </button>
+                                </div>
+                                {(video.cut_reasons || []).length ? (
+                                  <div style={{ display: "grid", gap: 6 }}>
+                                    {(video.cut_reasons || []).map((reason, reasonIndex) => (
+                                      <div className="inline-note is-info" key={`trend-reason-${ideaIndex}-${videoIndex}-${reasonIndex}`}>
+                                        {reason}
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  </>
+                )}
               </section>
 
               {!youtubeCutAnalysis ? (
@@ -3356,11 +4029,34 @@ function App() {
                         <p><strong>Título:</strong> {youtubeCutAnalysis.video?.title || "-"}</p>
                         <p><strong>Canal:</strong> {youtubeCutAnalysis.video?.author_name || "-"}</p>
                         <p><strong>Etapa atual:</strong> briefing editorial</p>
+                        {youtubeCutAnalysis.strategy?.profile ? <p><strong>Perfil aplicado:</strong> {youtubeCutAnalysis.strategy.profile}</p> : null}
                         <div className="offer-meta" style={{ marginTop: 12 }}>
                           <a className="tiny-button is-soft" href={youtubeCutAnalysis.video?.url} target="_blank" rel="noreferrer">Abrir vídeo</a>
                           {youtubeCutAnalysis.roadmap_path ? <span className="meta-chip">{youtubeCutAnalysis.roadmap_path}</span> : null}
                           {youtubeCutAnalysis.oembed_error ? <span className="meta-chip">metadados com fallback</span> : <span className="meta-chip">metadados OK</span>}
                         </div>
+                        {youtubeCutAnalysis.strategy ? (
+                          <div className="panel" style={{ marginTop: 14, padding: 16, borderRadius: 18 }}>
+                            <div className="panel-head" style={{ marginBottom: 10 }}>
+                              <div>
+                                <h4>Pacote editorial</h4>
+                                <p className="panel-subtitle">Base fixa para melhorar descoberta, clique e retenção.</p>
+                              </div>
+                            </div>
+                            <p><strong>Posicionamento:</strong> {youtubeCutAnalysis.strategy.positioning}</p>
+                            <p><strong>Fórmula de título:</strong> {youtubeCutAnalysis.strategy.title_formula}</p>
+                            <div className="offer-meta" style={{ marginTop: 10 }}>
+                              {(youtubeCutMode === "long" ? youtubeCutAnalysis.strategy.long_opening_checklist : youtubeCutAnalysis.strategy.short_opening_checklist || []).map((item, index) => (
+                                <span className="meta-chip" key={`yt-strategy-${index}`}>{item}</span>
+                              ))}
+                            </div>
+                            {youtubeCutAnalysis.strategy.subtitle_style ? (
+                              <div className="inline-note is-info" style={{ marginTop: 12 }}>
+                                Legenda padrao: {youtubeCutAnalysis.strategy.subtitle_style.base_color} com borda {youtubeCutAnalysis.strategy.subtitle_style.outline}, destaque {youtubeCutAnalysis.strategy.subtitle_style.active_color} e comportamento "{youtubeCutAnalysis.strategy.subtitle_style.behavior}".
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
                         <div style={{ marginTop: 14 }}>
                           {(youtubeCutAnalysis.notes || []).map((note, index) => (
                             <div className="inline-note is-info" key={`youtube-note-${index}`} style={{ marginTop: index ? 8 : 0 }}>
@@ -3392,15 +4088,35 @@ function App() {
                           <div className="offer-meta" style={{ marginBottom: 12 }}>
                             <span className="meta-chip">{item.duration_label}</span>
                             <span className="meta-chip">{item.status}</span>
+                            {(item.topic_tags || []).map((tag) => <span className="meta-chip" key={`${item.angle}-${tag}`}>{tag}</span>)}
                           </div>
                           <div className="field">
                             <label>Gancho</label>
                             <textarea rows="2" value={item.hook || ""} readOnly />
                           </div>
                           <div className="field" style={{ marginTop: 12 }}>
+                            <label>Texto do primeiro frame</label>
+                            <input type="text" value={item.first_frame_text || ""} readOnly />
+                          </div>
+                          {(item.title_variants || []).length ? (
+                            <div className="field" style={{ marginTop: 12 }}>
+                              <label>Variações de título</label>
+                              <textarea rows="4" value={(item.title_variants || []).join("\n")} readOnly />
+                            </div>
+                          ) : null}
+                          <div className="field" style={{ marginTop: 12 }}>
                             <label>Legenda sugerida</label>
                             <textarea rows="5" value={item.caption_draft || ""} readOnly />
                           </div>
+                          {(item.packaging_notes || []).length ? (
+                            <div style={{ marginTop: 12 }}>
+                              {(item.packaging_notes || []).map((note, noteIndex) => (
+                                <div className="inline-note is-info" key={`packaging-${index}-${noteIndex}`} style={{ marginTop: noteIndex ? 8 : 0 }}>
+                                  {note}
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
                           <div className="inline-note is-info" style={{ marginTop: 12 }}>
                             {item.reason}
                           </div>
@@ -3435,13 +4151,30 @@ function App() {
                           <label>Texto base</label>
                           <textarea rows="10" value={youtubeCutsPhase2.transcript?.text || ""} readOnly />
                         </div>
+                        {youtubeCutsPhase2.strategy ? (
+                          <div className="panel" style={{ marginTop: 14, padding: 16, borderRadius: 18 }}>
+                            <div className="panel-head" style={{ marginBottom: 12 }}>
+                              <div>
+                                <h4>Estrategia aplicada na renderizacao</h4>
+                                <p className="panel-subtitle">{youtubeCutsPhase2.strategy.profile || "Perfil editorial"}</p>
+                              </div>
+                            </div>
+                            <p><strong>Posicionamento:</strong> {youtubeCutsPhase2.strategy.positioning}</p>
+                            <p><strong>Formula de titulo:</strong> {youtubeCutsPhase2.strategy.title_formula}</p>
+                            {youtubeCutsPhase2.strategy.subtitle_style ? (
+                              <div className="inline-note is-info" style={{ marginTop: 12 }}>
+                                Legenda renderizada em {youtubeCutsPhase2.strategy.subtitle_style.base_color} com borda {youtubeCutsPhase2.strategy.subtitle_style.outline}; palavra ativa fica {youtubeCutsPhase2.strategy.subtitle_style.active_color}.
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
                       </section>
 
                       <section className="panel">
                         <div className="panel-head">
                           <div>
                             <h3 className="panel-title">Cortes gerados</h3>
-                            <p className="panel-subtitle">{youtubeCutsPhase2?.mode === "long" ? "Os videos abaixo saem como cortes longos em horizontal para publicar como video normal." : "Os videos abaixo ja saem em vertical com legenda queimada."}</p>
+                            <p className="panel-subtitle">{youtubeCutsPhase2?.mode === "long" ? "Os videos abaixo saem como cortes longos em horizontal com abertura forte e thumbnail mais limpa." : "Os videos abaixo ja saem em vertical com abertura de impacto e legenda dinamica."}</p>
                           </div>
                         </div>
                         <div className="preview-grid">
@@ -3456,8 +4189,6 @@ function App() {
                                       </span>
                                     </div>
                                   ) : null}
-                                  <h4>{item.title}</h4>
-                                  <p>{item.hook}</p>
                                 </div>
                                 <span className="badge is-success">score {item.score}</span>
                               </div>
@@ -3481,6 +4212,9 @@ function App() {
                                 <span className="meta-chip">{item.end_label}</span>
                                 <span className="meta-chip">{item.duration_label}</span>
                                 <span className="meta-chip">{item.status}</span>
+                                {item.mode === "short" ? <span className="meta-chip">{item.series_mode === "series" ? "serie" : "single"}</span> : null}
+                                {item.series_label ? <span className="meta-chip">{item.series_label}</span> : null}
+                                {(item.topic_tags || []).map((tag) => <span className="meta-chip" key={`${item.cut_id}-${tag}`}>{tag}</span>)}
                                 <a className="tiny-button is-soft" href={item.video_asset_url} target="_blank" rel="noreferrer">Abrir vídeo</a>
                                 {item.subtitle_asset_url ? <a className="tiny-button is-soft" href={item.subtitle_asset_url} target="_blank" rel="noreferrer">Legenda</a> : null}
                                 <a className="tiny-button is-soft" href={item.download_url} download>Baixar vídeo</a>
@@ -3496,35 +4230,55 @@ function App() {
                                 <textarea rows="5" value={item.transcript_excerpt || ""} readOnly />
                               </div>
                               <div className="field" style={{ marginTop: 12 }}>
-                                <label>Legenda sugerida</label>
+                                <label>Texto do primeiro frame</label>
+                                <input type="text" value={item.first_frame_text || ""} readOnly />
+                              </div>
+                              {item.opening_score ? (
+                                <div className="offer-meta" style={{ marginTop: 12 }}>
+                                  <span className="meta-chip">Abertura {item.opening_score}</span>
+                                </div>
+                              ) : null}
+                              <div className="field" style={{ marginTop: 12 }}>
+                                <label>Descricao sugerida</label>
                                 <textarea rows="5" value={item.caption_draft || ""} readOnly />
                               </div>
+                              {(item.packaging_notes || []).length ? (
+                                <div style={{ marginTop: 12 }}>
+                                  {(item.packaging_notes || []).map((note, noteIndex) => (
+                                    <div className="inline-note is-info" key={`cut-note-${item.cut_id}-${noteIndex}`} style={{ marginTop: noteIndex ? 8 : 0 }}>
+                                      {note}
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
                               {item.mode === "long" && (item.publish_draft?.chapters || []).length ? (
                                 <div className="field" style={{ marginTop: 12 }}>
                                   <label>Capitulos automáticos</label>
                                   <textarea rows="5" value={(item.publish_draft.chapters || []).join("\n")} readOnly />
                                 </div>
                               ) : null}
-                              {item.mode === "long" && item.publish_draft?.scorecard ? (
+                              {(item.publish_draft?.scorecard || (item.publish_draft?.title_variants || []).length) ? (
                                 <div className="panel" style={{ marginTop: 14, padding: 16, borderRadius: 18 }}>
                                   <div className="panel-head" style={{ marginBottom: 12 }}>
                                     <div>
-                                      <h4>Score editorial</h4>
-                                      <p className="panel-subtitle">Leitura rapida de potencial para clique, retencao e tema.</p>
+                                      <h4>{item.mode === "long" ? "Score editorial" : "Empacotamento editorial"}</h4>
+                                      <p className="panel-subtitle">{item.mode === "long" ? "Leitura rapida de potencial para clique, retencao e tema." : "Variacoes de titulo para testar embalagens mais fortes."}</p>
                                     </div>
-                                    <span className="meta-chip">overall {item.publish_draft.scorecard.overall || 0}</span>
+                                    {item.publish_draft?.scorecard ? <span className="meta-chip">overall {item.publish_draft.scorecard.overall || 0}</span> : null}
                                   </div>
-                                  <div className="offer-meta">
-                                    <span className="meta-chip">CTR {item.publish_draft.scorecard.ctr || 0}</span>
-                                    <span className="meta-chip">Retencao {item.publish_draft.scorecard.retention || 0}</span>
-                                    <span className="meta-chip">Tema {item.publish_draft.scorecard.topic || 0}</span>
-                                  </div>
+                                  {item.publish_draft?.scorecard ? (
+                                    <div className="offer-meta">
+                                      <span className="meta-chip">CTR {item.publish_draft.scorecard.ctr || 0}</span>
+                                      <span className="meta-chip">Retencao {item.publish_draft.scorecard.retention || 0}</span>
+                                      <span className="meta-chip">{item.mode === "long" ? `Tema ${item.publish_draft.scorecard.topic || 0}` : `Contexto ${item.publish_draft.scorecard.context || 0}`}</span>
+                                    </div>
+                                  ) : null}
                                   {(item.publish_draft.title_variants || []).length ? (
-                                    <div style={{ marginTop: 14, display: "grid", gap: 8 }}>
-                                      {(item.publish_draft.title_variants || []).map((variant, variantIndex) => (
-                                        <div key={`variant-${item.cut_id}-${variantIndex}`} className="surface" style={{ padding: 12, display: "grid", gap: 8 }}>
-                                          <strong>Variacao {variantIndex + 1}</strong>
-                                          <div>{variant}</div>
+                                  <div style={{ marginTop: 14, display: "grid", gap: 8 }}>
+                                    {(item.publish_draft.title_variants || []).map((variant, variantIndex) => (
+                                      <div key={`variant-${item.cut_id}-${variantIndex}`} className="surface" style={{ padding: 12, display: "grid", gap: 8 }}>
+                                        <strong>Variacao {variantIndex + 1}</strong>
+                                        <div>{variant}</div>
                                           <div className="provider-actions">
                                             <button className="tiny-button is-soft" type="button" onClick={() => updateYoutubeCutDraft(item.cut_id, "title", variant)}>
                                               Usar este titulo
@@ -3537,42 +4291,72 @@ function App() {
                                       ))}
                                     </div>
                                   ) : null}
+                                  {item.mode === "long" && (item.publish_draft.thumbnail_text_variants || []).length ? (
+                                    <div style={{ marginTop: 14, display: "grid", gap: 8 }}>
+                                      {(item.publish_draft.thumbnail_text_variants || []).map((variant, variantIndex) => (
+                                        <div key={`thumb-variant-${item.cut_id}-${variantIndex}`} className="surface" style={{ padding: 12, display: "grid", gap: 8 }}>
+                                          <strong>Texto da thumb {variantIndex + 1}</strong>
+                                          <div>{variant}</div>
+                                          <button className="tiny-button is-soft" type="button" onClick={() => handleCopyText(variant, `Texto da thumb ${variantIndex + 1} copiado.`)}>
+                                            Copiar texto
+                                          </button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : null}
                                 </div>
                               ) : null}
                               <div className="panel" style={{ marginTop: 14, padding: 16, borderRadius: 18 }}>
                                 <div className="panel-head" style={{ marginBottom: 12 }}>
                                   <div>
                                     <h4>{item.mode === "long" ? "Fase 4: publicacao do video" : "Fase 4: publicacao do Short"}</h4>
-                                    <p className="panel-subtitle">{item.mode === "long" ? "Descricao enriquecida para corte longo com foco em retencao e descoberta do canal." : "Descricao enriquecida com os 5 ultimos produtos postados nas redes."}</p>
+                                    <p className="panel-subtitle">{item.mode === "long" ? "Descricao e thumbnail alinhadas com analise, crise e impacto no Brasil." : "Descricao e titulo preparados para Shorts de economia e geopolítica."}</p>
                                   </div>
-                                  <span className="meta-chip">{item.publish_draft?.privacy_status || "private"}</span>
+                                  <span className="meta-chip">{item.publish_draft?.privacy_status || "public"}</span>
                                 </div>
+                                <div className="offer-meta" style={{ marginBottom: 12 }}>
+                                  {item.mode === "short" ? <span className="meta-chip">{item.publish_draft?.series_mode === "series" ? "serie" : "single"}</span> : null}
+                                  {item.publish_draft?.series_label ? <span className="meta-chip">{item.publish_draft.series_label}</span> : null}
+                                  {(item.publish_draft?.topic_tags || []).map((tag) => <span className="meta-chip" key={`draft-tag-${item.cut_id}-${tag}`}>{tag}</span>)}
+                                </div>
+                                {item.publish_draft?.first_frame_text ? (
+                                  <div className="field" style={{ marginBottom: 12 }}>
+                                    <label>Hook visual usado no video</label>
+                                    <input type="text" value={item.publish_draft.first_frame_text || ""} readOnly />
+                                  </div>
+                                ) : null}
                                 <div className="field">
                                   <label>Titulo do YouTube</label>
                                   <input type="text" value={item.publish_draft?.title || ""} onChange={(e) => updateYoutubeCutDraft(item.cut_id, "title", e.target.value)} />
                                 </div>
                                 <div className="field" style={{ marginTop: 12 }}>
                                   <label>Privacidade</label>
-                                  <select value={item.publish_draft?.privacy_status || "private"} onChange={(e) => updateYoutubeCutDraft(item.cut_id, "privacy_status", e.target.value)}>
-                                    <option value="private">Private</option>
-                                    <option value="unlisted">Unlisted</option>
+                                  <select value={item.publish_draft?.privacy_status || "public"} onChange={(e) => updateYoutubeCutDraft(item.cut_id, "privacy_status", e.target.value)}>
                                     <option value="public">Public</option>
+                                    <option value="unlisted">Unlisted</option>
+                                    <option value="private">Private</option>
                                   </select>
                                 </div>
                                 <div className="field" style={{ marginTop: 12 }}>
                                   <label>Descricao enriquecida</label>
                                   <textarea rows="9" value={item.publish_draft?.description || ""} onChange={(e) => updateYoutubeCutDraft(item.cut_id, "description", e.target.value)} />
                                 </div>
-                                {(item.publish_draft?.recent_offers || []).length ? (
+                                {(item.publish_draft?.packaging_notes || []).length ? (
                                   <div style={{ marginTop: 12 }}>
-                                    <label style={{ display: "block", fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Ofertas puxadas para a descricao</label>
-                                    <div className="offer-meta">
-                                      {(item.publish_draft?.recent_offers || []).map((offer) => (
-                                        <a key={`yt-offer-${item.cut_id}-${offer.id}`} className="meta-chip" href={offer.offer_url} target="_blank" rel="noreferrer">
-                                          {offer.titulo} | {offer.price_label}
-                                        </a>
-                                      ))}
-                                    </div>
+                                    {(item.publish_draft.packaging_notes || []).map((note, noteIndex) => (
+                                      <div className="inline-note is-info" key={`draft-note-${item.cut_id}-${noteIndex}`} style={{ marginTop: noteIndex ? 8 : 0 }}>
+                                        {note}
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : null}
+                                {(item.publish_draft?.distribution_notes || []).length ? (
+                                  <div style={{ marginTop: 12 }}>
+                                    {(item.publish_draft.distribution_notes || []).map((note, noteIndex) => (
+                                      <div className="inline-note is-info" key={`distribution-note-${item.cut_id}-${noteIndex}`} style={{ marginTop: noteIndex ? 8 : 0 }}>
+                                        {note}
+                                      </div>
+                                    ))}
                                   </div>
                                 ) : null}
                                 <div className="provider-actions" style={{ marginTop: 12 }}>

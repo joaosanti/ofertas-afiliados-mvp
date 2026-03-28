@@ -21,6 +21,7 @@ PROVIDER_LABELS = {
 
 def _meli_affiliate_meta(url: str) -> dict[str, Any]:
     parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
     query = parse_qs(parsed.query, keep_blank_values=True)
     fragment = parse_qs(parsed.fragment, keep_blank_values=True)
     combined = {**query, **fragment}
@@ -31,30 +32,47 @@ def _meli_affiliate_meta(url: str) -> dict[str, Any]:
     matt_tool = (combined.get("matt_tool") or [None])[0]
     source = (combined.get("source") or [None])[0]
     reco_client = (combined.get("reco_client") or [None])[0]
+    tracking_id = (combined.get("tracking_id") or [None])[0]
+    reco_id = (combined.get("reco_id") or [None])[0]
+    matt_tracing_id = (combined.get("matt_tracing_id") or [None])[0]
     is_social = "/social/" in (parsed.path or "").lower()
+    is_short = host == "meli.la"
+    affiliate_profile_marker = any(
+        "affiliate" in str(value or "").lower()
+        for value in (source, polycard_client, reco_client)
+    )
+    recommendation_marker = bool(
+        wid
+        and (
+            sid
+            or tracking_id
+            or reco_id
+            or matt_tracing_id
+            or affiliate_profile_marker
+        )
+    )
 
-    official = bool(
+    strong = bool(
         matt_tool
         or is_social
-        or wid
-        or (wid and sid == "affiliates")
-        or (wid and polycard_client == "affiliates")
-        or (wid and sid == "recos" and source == "affiliate-profile")
-        or (wid and source == "affiliate-profile")
-        or (wid and reco_client == "home_affiliate-profile")
-        or (wid and isinstance(polycard_client, str) and "affiliate-profile" in polycard_client)
+        or is_short
+        or recommendation_marker
+        or affiliate_profile_marker
     )
-    code = matt_tool or wid
+    detected = bool(strong)
+    code = matt_tool or wid or tracking_id
 
     warning = None
-    if not official:
+    if not detected:
         warning = (
-            "Link do Mercado Livre sem marcador oficial de afiliado. "
-            "Gere o link na Central/Barra de Afiliados antes de importar."
+            "Link do Mercado Livre sem marcador forte de afiliado. "
+            "Use o social/matt_tool ou o shortlink oficial gerado na Central."
         )
 
     return {
-        "official": official,
+        "official": strong,
+        "detected": detected,
+        "status": "official" if strong else "missing",
         "code": code,
         "warning": warning,
     }
@@ -186,8 +204,9 @@ def _extract_ml_offer_metadata(html_text: str, price: Any, old_price: Any) -> di
         pix_price = _normalize_price(price)
     other_price = _normalize_price(_extract_first(plain, [r"R\$\s*([\d\.,]+)\s*em outros meios"])) or None
     installments = _clean_snippet(_extract_first(plain, [
-        r"((?:em|por)\s+\d+x\s+de\s*R\$\s*[\d\.,]+(?:\s+sem juros)?)",
-        r"(\d+x\s+de\s+R\$\s*[\d\.,]+(?:\s+sem juros)?)",
+        r"((?:em|por)\s+\d+x(?:\s+de)?\s*R\$\s*[\d\.,]+(?:\s+sem juros)?)",
+        r"(\d+x(?:\s+de)?\s*R\$\s*[\d\.,]+(?:\s+sem juros)?)",
+        r"(\d+x\s*R\$\s*[\d\.,]+(?:\s+sem juros)?)",
     ]))
     shipping = _clean_snippet(_extract_first(plain, [
         r"(Chegara gratis[^\.]{0,80})",
@@ -522,6 +541,13 @@ def _extract_ml_social_embedded_offer(html_text: str, affiliate_url: str) -> dic
         )
     )
     description = _fetch_ml_product_description(final_affiliate_url)
+    commerce_metadata = _extract_ml_offer_metadata(
+        html_text,
+        float(current_price_match.group(1)),
+        float(previous_price_match.group(1)) if previous_price_match else None,
+    )
+
+    social_source_url = affiliate_url if _is_ml_social_link(affiliate_url) else ""
 
     return {
         "provider": "mercadolivre",
@@ -530,19 +556,21 @@ def _extract_ml_social_embedded_offer(html_text: str, affiliate_url: str) -> dic
         "description": description,
         "price": float(current_price_match.group(1)),
         "old_price": float(previous_price_match.group(1)) if previous_price_match else None,
-        "url": final_affiliate_url,
+        "url": social_source_url or final_affiliate_url,
         "canonical_url": final_affiliate_url,
         "image": image_url,
         "category": infer_category_label(title, description or title, final_affiliate_url, final_affiliate_url, default="ofertas"),
         "tags": "mercadolivre,manual,social",
         "featured": 0,
-        "affiliate_detected": bool(meta["official"]),
+        "affiliate_detected": bool(meta["detected"]),
         "affiliate_code": meta["code"],
-        "affiliate_status": "official" if meta["official"] else "missing",
-        "affiliate_warning": "Produto resolvido diretamente do HTML do perfil social do Mercado Livre.",
-        "import_allowed": bool(meta["official"]),
+        "affiliate_status": str(meta["status"]),
+        "affiliate_warning": "Produto resolvido diretamente do HTML do perfil social do Mercado Livre." if meta["official"] else meta["warning"],
+        "import_allowed": bool(meta["detected"]),
         "item_id": item_id,
         "product_id": trigger_product_id,
+        "social_url": social_source_url or None,
+        **commerce_metadata,
     }
 
 
@@ -588,6 +616,8 @@ def _build_ml_offer_from_api(item_id: str, affiliate_url: str, fallback_html: st
         commerce_metadata["shipping"] = "Frete gr?tis"
     if not commerce_metadata.get("discount_percent"):
         commerce_metadata["discount_percent"] = _discount_percent(price, old_price)
+    social_source_url = affiliate_url if _is_ml_social_link(affiliate_url) else ""
+
     return {
         "provider": "mercadolivre",
         "store": "Mercado Livre",
@@ -595,19 +625,20 @@ def _build_ml_offer_from_api(item_id: str, affiliate_url: str, fallback_html: st
         "description": description,
         "price": price,
         "old_price": old_price,
-        "url": affiliate_url,
-        "canonical_url": affiliate_url,
+        "url": social_source_url or affiliate_url,
+        "canonical_url": canonical_hint,
         "image": image,
-        "category": infer_category_label(title, description or title, affiliate_url, canonical_hint, default="ofertas"),
+        "category": infer_category_label(title, description or title, social_source_url or affiliate_url, canonical_hint, default="ofertas"),
         "tags": "mercadolivre,manual,social",
         "featured": 0,
-        "affiliate_detected": bool(meta["official"]),
+        "affiliate_detected": bool(meta["detected"]),
         "affiliate_code": meta["code"],
-        "affiliate_status": "official" if meta["official"] else "missing",
+        "affiliate_status": str(meta["status"]),
         "affiliate_warning": "Dados do produto resolvidos pela API do Mercado Livre a partir do link oficial." if meta["official"] else meta["warning"],
-        "import_allowed": bool(meta["official"]),
+        "import_allowed": bool(meta["detected"]),
         "item_id": item_id,
         "product_id": str(payload.get("catalog_product_id") or "").strip() or _extract_ml_product_id_from_url(canonical_hint),
+        "social_url": social_source_url or None,
         **commerce_metadata,
     }
 
@@ -616,13 +647,17 @@ def _resolve_ml_social_offer(link: str) -> dict[str, Any]:
     social_url, social_html = _fetch_best_html_for_provider(link, "mercadolivre")
     embedded_offer = _extract_ml_social_embedded_offer(social_html, link)
     if embedded_offer:
+        embedded_offer["social_url"] = social_url
         embedded_offer["url"] = social_url
+        embedded_offer["canonical_url"] = embedded_offer.get("canonical_url") or embedded_offer.get("url") or social_url
         return embedded_offer
     trigger_item_id = _extract_ml_trigger_item_id_from_html(social_html)
     if trigger_item_id:
         try:
             item = _build_ml_offer_from_api(trigger_item_id, link, social_html)
+            item["social_url"] = social_url
             item["url"] = social_url
+            item["canonical_url"] = item.get("canonical_url") or item.get("url") or social_url
             return item
         except Exception:
             pass
@@ -635,10 +670,11 @@ def _resolve_ml_social_offer(link: str) -> dict[str, Any]:
         html_text = ""
         try:
             final_url, html_text = _fetch_best_html_for_provider(product_link, "mercadolivre")
-            affiliate_source = product_link if _meli_affiliate_meta(product_link).get("official") else link
+            affiliate_source = product_link if _meli_affiliate_meta(product_link).get("detected") else link
             item = _extract_generic_offer("mercadolivre", affiliate_source, final_url, html_text)
+            item["social_url"] = social_url
+            item["canonical_url"] = final_url or product_link or item.get("canonical_url") or item.get("url") or social_url
             item["url"] = social_url
-            item["canonical_url"] = final_url or product_link or social_url
             item["item_id"] = item.get("item_id") or _extract_ml_item_id_from_url(product_link) or _extract_ml_item_id_from_url(final_url)
             item["product_id"] = item.get("product_id") or _extract_ml_product_id_from_url(final_url) or _extract_ml_product_id_from_url(product_link)
             if social_url != link:
@@ -674,15 +710,15 @@ def _build_ml_fallback_offer(link: str) -> dict[str, Any]:
         "category": infer_category_label(title, title, link, link, default="ofertas"),
         "tags": "mercadolivre,manual,fallback",
         "featured": 0,
-        "affiliate_detected": bool(meta["official"]),
+        "affiliate_detected": bool(meta["detected"]),
         "affiliate_code": meta["code"],
-        "affiliate_status": "official" if meta["official"] else "missing",
+        "affiliate_status": str(meta["status"]),
         "affiliate_warning": (
             "Link oficial detectado, mas o Mercado Livre bloqueou a leitura automatica. Revise os dados antes de importar."
             if meta["official"]
             else meta["warning"]
         ),
-        "import_allowed": bool(meta["official"]),
+        "import_allowed": bool(meta["detected"]),
         "item_id": meta["code"] if str(meta["code"] or "").upper().startswith("MLB") else None,
         "product_id": _extract_ml_product_id_from_url(link),
     }
@@ -757,7 +793,7 @@ def _detect_affiliate(url: str) -> tuple[bool, str | None]:
         )
     if "mercadolivre" in host or "mercadolibre" in host:
         meta = _meli_affiliate_meta(url)
-        return (bool(meta["official"]), meta["code"])
+        return (bool(meta["detected"]), meta["code"])
     if "amazon." in host or "amzn.to" in host:
         if "amzn.to" in host:
             return (True, None)
@@ -923,11 +959,11 @@ def _extract_generic_offer(provider: str, source_url: str, final_url: str, html_
     affiliate_status = "ok" if affiliate_detected else "missing"
     if provider == "mercadolivre":
         meta = _meli_affiliate_meta(source_url)
-        affiliate_detected = bool(meta["official"])
+        affiliate_detected = bool(meta["detected"])
         affiliate_code = meta["code"]
         affiliate_warning = meta["warning"]
         import_allowed = affiliate_detected
-        affiliate_status = "official" if affiliate_detected else "missing"
+        affiliate_status = str(meta["status"])
 
     return {
         "provider": provider,
@@ -1028,10 +1064,7 @@ def preview_manual_affiliate_links(links: list[str]) -> list[dict[str, Any]]:
         if provider == "mercadolivre" and urlparse(link).netloc.lower() == "meli.la":
             try:
                 final_url, _ = _fetch_best_html_for_provider(link, "mercadolivre")
-                if _is_ml_social_link(final_url):
-                    items.append(_resolve_ml_social_offer(final_url))
-                    continue
-                link = final_url
+                link = final_url or link
             except Exception:
                 pass
 
@@ -1039,7 +1072,13 @@ def preview_manual_affiliate_links(links: list[str]) -> list[dict[str, Any]]:
             try:
                 items.append(_resolve_ml_social_offer(link))
             except Exception:
-                if _meli_affiliate_meta(link)["official"]:
+                try:
+                    final_url, html_text = _fetch_best_html_for_provider(link, "mercadolivre")
+                    items.append(_extract_generic_offer("mercadolivre", final_url or link, final_url, html_text))
+                    continue
+                except Exception:
+                    pass
+                if _meli_affiliate_meta(link)["detected"]:
                     items.append(_build_ml_fallback_offer(link))
                     continue
                 raise
@@ -1057,7 +1096,7 @@ def preview_manual_affiliate_links(links: list[str]) -> list[dict[str, Any]]:
                 else:
                     raise
         except Exception:
-            if provider == "mercadolivre" and _meli_affiliate_meta(link)["official"]:
+            if provider == "mercadolivre" and _meli_affiliate_meta(link)["detected"]:
                 try:
                     resolved_item_id = _extract_ml_item_id_from_url(link)
                     if resolved_item_id:
@@ -1065,7 +1104,7 @@ def preview_manual_affiliate_links(links: list[str]) -> list[dict[str, Any]]:
                         continue
                 except Exception:
                     pass
-            if provider == "mercadolivre" and _meli_affiliate_meta(link)["official"]:
+            if provider == "mercadolivre" and _meli_affiliate_meta(link)["detected"]:
                 items.append(_build_ml_fallback_offer(link))
                 continue
             if provider == "amazon":

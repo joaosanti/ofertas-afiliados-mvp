@@ -1,3 +1,4 @@
+import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -8,7 +9,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import paramiko
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.exc import OperationalError
 from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
@@ -20,6 +21,7 @@ from app.collectors.shopee import fetch_shopee_offers, preview_shopee_affiliate_
 from app.collectors.tiktok import fetch_tiktok_offers
 from app.database import SessionLocal
 from app.integrations.youtube_oauth import (
+    build_channel_trend_ideas,
     build_youtube_auth_url,
     exchange_youtube_code,
     fetch_youtube_channel,
@@ -29,8 +31,12 @@ from app.integrations.youtube_oauth import (
 )
 from app.integrations.mercadolivre_oauth import build_auth_url, exchange_code, refresh_token
 from app.services.dashboard_data import (
+    create_growth_target,
+    delete_growth_target,
     ensure_dashboard_tables,
     fetch_dashboard_snapshot,
+    fetch_growth_radar,
+    update_growth_target,
     record_execution_error,
     record_execution_start,
     record_execution_success,
@@ -40,7 +46,7 @@ from app.services.automation_scheduler import AutomationScheduler
 from app.services.manual_file_import import preview_amazon_txt_file, preview_mercadolivre_txt_file, preview_shopee_csv_file
 from app.services.manual_link_import import preview_manual_affiliate_links
 from app.services.manual_page_import import preview_amazon_saved_html, preview_page_url
-from app.services.normalize import build_slug, normalize_offer
+from app.services.normalize import _has_meli_affiliate_marker, build_slug, normalize_offer
 from app.services.publish import publish_offer
 from app.services.store_maintenance import (
     preview_mercadolivre_existing_offer_relinks,
@@ -58,6 +64,16 @@ from app.services.sftp_deploy import (
     prune_remote_generated_story_assets,
     sftp_settings_snapshot,
 )
+from app.services.youtube_channels import (
+    bootstrap_legacy_env_youtube_channel,
+    create_youtube_channel_profile,
+    delete_youtube_channel_profile,
+    fetch_youtube_channel_profiles,
+    get_default_youtube_channel_profile,
+    get_youtube_channel_profile,
+    get_youtube_channel_profile_by_state,
+    update_youtube_channel_profile,
+)
 from app.services.social_meta import (
     build_meta_post_previews,
     create_instagram_media_container,
@@ -72,6 +88,7 @@ from app.services.social_meta import (
     publish_facebook_post,
     publish_facebook_reel,
     publish_facebook_story_photo,
+    publish_facebook_story_video,
     publish_instagram_container,
     wait_for_instagram_container_ready,
 )
@@ -94,10 +111,10 @@ ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 scheduler: AutomationScheduler | None = None
 
 AUTO_SOCIAL_SUPPORTED_MODES: dict[str, tuple[str, ...]] = {
-    "facebook": ("feed", "reel"),
-    "instagram": ("feed", "reel"),
-    "both": ("feed", "reel", "feed_story"),
-    "facebook_instagram": ("feed", "reel", "feed_story"),
+    "facebook": ("feed", "reel", "feed_story_reel"),
+    "instagram": ("feed", "reel", "feed_story", "feed_story_reel"),
+    "both": ("feed", "reel", "feed_story", "feed_story_reel"),
+    "facebook_instagram": ("feed", "reel", "feed_story", "feed_story_reel"),
     "whatsapp": ("group",),
 }
 
@@ -296,6 +313,8 @@ class DashboardYoutubeCutsProcessPayload(BaseModel):
     limit: int = 5
     mode: str = "short"
     selection_strategy: str = "openai_heuristica"
+    channel_profile_id: int | None = None
+    burn_subtitles: bool = True
 
 
 class DashboardYoutubeCutPublishPayload(BaseModel):
@@ -303,8 +322,24 @@ class DashboardYoutubeCutPublishPayload(BaseModel):
     cut_id: int
     title: str | None = None
     description: str | None = None
-    privacy_status: str = "private"
+    privacy_status: str = "public"
+    publish_at: str | None = None
     mode: str = "short"
+    channel_profile_id: int | None = None
+
+
+class DashboardYoutubeChannelPayload(BaseModel):
+    name: str
+    handle: str | None = None
+    notes: str | None = None
+    avoid_terms: str | None = None
+    preferred_terms: str | None = None
+    viral_tone: str | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
+    redirect_uri: str | None = None
+    is_default: bool = False
+    is_active: bool = True
 
 
 class DashboardSettingsPayload(BaseModel):
@@ -385,6 +420,19 @@ class DashboardOfferUpdatePayload(BaseModel):
     expira_em: str | None = None
 
 
+class DashboardGrowthTargetPayload(BaseModel):
+    platform: str
+    target_type: str
+    name: str
+    handle: str | None = None
+    url: str
+    niche: str | None = None
+    priority: str = "media"
+    status: str = "novo"
+    notes: str | None = None
+    last_checked_at: str | None = None
+
+
 def _bool_env(name: str, default: bool = False) -> bool:
     value = (os.getenv(name) or "").strip().lower()
     if not value:
@@ -396,83 +444,316 @@ def _site_base_url() -> str:
     return (os.getenv("SITE_BASE_URL") or "https://zeropreco.com.br").rstrip("/")
 
 
-def _youtube_token_expired(skew_seconds: int = 120) -> bool:
-    raw = (os.getenv("YOUTUBE_TOKEN_EXPIRES_AT") or "").strip()
+def _normalize_growth_target_payload(payload: DashboardGrowthTargetPayload, *, partial: bool = False) -> dict[str, Any]:
+    allowed_platforms = {"facebook", "instagram"}
+    allowed_target_types = {"page", "group", "profile", "creator"}
+    allowed_priorities = {"alta", "media", "baixa"}
+    allowed_status = {"novo", "monitorando", "abordar_manual", "pronto_para_testar", "arquivado"}
+
+    normalized_platform = (payload.platform or "").strip().lower()
+    normalized_target_type = (payload.target_type or "").strip().lower()
+    normalized_priority = (payload.priority or "media").strip().lower()
+    normalized_status = (payload.status or "novo").strip().lower()
+    normalized_name = (payload.name or "").strip()
+    normalized_handle = (payload.handle or "").strip().lstrip("@")
+    normalized_url = (payload.url or "").strip()
+    normalized_niche = (payload.niche or "").strip()
+    normalized_notes = (payload.notes or "").strip()
+    normalized_last_checked = (payload.last_checked_at or "").strip().replace("T", " ")
+
+    if normalized_platform not in allowed_platforms:
+        raise ValueError("Plataforma de crescimento invalida. Use facebook ou instagram.")
+    if normalized_target_type not in allowed_target_types:
+        raise ValueError("Tipo de alvo invalido. Use page, group, profile ou creator.")
+    if normalized_priority not in allowed_priorities:
+        normalized_priority = "media"
+    if normalized_status not in allowed_status:
+        normalized_status = "novo"
+    if not partial and not normalized_name:
+        raise ValueError("Informe um nome para o alvo de crescimento.")
+    if not partial and not normalized_url.startswith(("http://", "https://")):
+        raise ValueError("Informe uma URL valida do Facebook ou Instagram.")
+
+    return {
+        "platform": normalized_platform,
+        "target_type": normalized_target_type,
+        "name": normalized_name[:180],
+        "handle": normalized_handle[:180] or None,
+        "url": normalized_url[:600],
+        "niche": normalized_niche[:140] or None,
+        "priority": normalized_priority,
+        "status": normalized_status,
+        "notes": normalized_notes[:4000] or None,
+        "last_checked_at": normalized_last_checked[:19] or None,
+    }
+
+
+def _youtube_channel_profile_payload(payload: DashboardYoutubeChannelPayload, *, current: dict[str, Any] | None = None) -> dict[str, Any]:
+    normalized_name = (payload.name or "").strip()
+    if not normalized_name:
+        raise ValueError("Informe um nome para o perfil do canal do YouTube.")
+    return {
+        "name": normalized_name[:180],
+        "handle": (payload.handle or "").strip().lstrip("@")[:180] or None,
+        "notes": (payload.notes or "").strip()[:4000] or None,
+        "avoid_terms": (payload.avoid_terms or "").strip()[:4000] or None,
+        "preferred_terms": (payload.preferred_terms or "").strip()[:4000] or None,
+        "viral_tone": (payload.viral_tone or "").strip()[:1200] or None,
+        "client_id": (payload.client_id or "").strip()[:255] or None,
+        "client_secret": ((payload.client_secret or "").strip() or (current or {}).get("client_secret") or None),
+        "redirect_uri": (payload.redirect_uri or "").strip()[:600] or None,
+        "is_default": bool(payload.is_default),
+        "is_active": bool(payload.is_active),
+    }
+
+
+def _youtube_channel_public_profile(profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not profile:
+        return None
+    return {
+        "id": int(profile.get("id") or 0),
+        "slug": profile.get("slug") or "",
+        "name": profile.get("name") or "",
+        "handle": profile.get("handle") or "",
+        "notes": profile.get("notes") or "",
+        "avoid_terms": profile.get("avoid_terms") or "",
+        "preferred_terms": profile.get("preferred_terms") or "",
+        "viral_tone": profile.get("viral_tone") or "",
+        "client_id": profile.get("client_id") or "",
+        "redirect_uri": profile.get("redirect_uri") or "",
+        "is_default": bool(profile.get("is_default")),
+        "is_active": bool(profile.get("is_active")),
+        "channel_id": profile.get("channel_id") or "",
+        "channel_title": profile.get("channel_title") or "",
+        "channel_custom_url": profile.get("channel_custom_url") or "",
+        "channel_thumbnail_url": profile.get("channel_thumbnail_url") or "",
+        "authenticated": bool(profile.get("refresh_token")),
+        "updated_at": profile.get("updated_at"),
+    }
+
+
+def _resolve_youtube_channel_profile(db, channel_profile_id: int | None = None, *, require_active: bool = True) -> dict[str, Any]:
+    bootstrap_legacy_env_youtube_channel(db)
+    profile = get_youtube_channel_profile(db, int(channel_profile_id)) if channel_profile_id else get_default_youtube_channel_profile(db)
+    if not profile:
+        raise ValueError("Nenhum perfil de canal do YouTube foi configurado ainda.")
+    if require_active and not profile.get("is_active"):
+        raise ValueError("O perfil de canal do YouTube selecionado esta desativado.")
+    return profile
+
+
+def _resolve_youtube_channel_profile_by_name(db, profile_name: str, *, require_active: bool = True) -> dict[str, Any]:
+    bootstrap_legacy_env_youtube_channel(db)
+    desired = str(profile_name or "").strip().lower()
+    if not desired:
+        raise ValueError("Nome do perfil de canal do YouTube nao informado.")
+    for profile in fetch_youtube_channel_profiles(db):
+        candidates = [
+            str(profile.get("name") or "").strip().lower(),
+            str(profile.get("handle") or "").strip().lower(),
+            str(profile.get("channel_title") or "").strip().lower(),
+            str(profile.get("slug") or "").strip().lower(),
+        ]
+        if desired in candidates:
+            if require_active and not profile.get("is_active"):
+                raise ValueError("O perfil de canal do YouTube selecionado esta desativado.")
+            return profile
+    raise ValueError(f"Perfil de canal do YouTube nao encontrado: {profile_name}")
+
+
+def _youtube_profile_token_expired(profile: dict[str, Any], skew_seconds: int = 120) -> bool:
+    raw = profile.get("token_expires_at")
     if not raw:
         return True
     try:
         expires_at = datetime.fromtimestamp(int(raw), tz=timezone.utc)
-    except ValueError:
+    except Exception:
         return True
     return expires_at <= datetime.now(timezone.utc) + timedelta(seconds=skew_seconds)
 
 
-def _youtube_token_updates(tokens: dict[str, Any], *, keep_existing_refresh: bool = True) -> dict[str, str]:
-    updates: dict[str, str] = {}
+def _youtube_profile_token_updates(tokens: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
     access_token = str(tokens.get("access_token") or "").strip()
-    refresh_token = str(tokens.get("refresh_token") or "").strip()
+    refresh_token_value = str(tokens.get("refresh_token") or "").strip()
     expires_in = int(tokens.get("expires_in") or 0)
     if access_token:
-        updates["YOUTUBE_ACCESS_TOKEN"] = access_token
-    if refresh_token:
-        updates["YOUTUBE_REFRESH_TOKEN"] = refresh_token
-    elif not keep_existing_refresh:
-        updates["YOUTUBE_REFRESH_TOKEN"] = ""
+        updates["access_token"] = access_token
+    if refresh_token_value:
+        updates["refresh_token"] = refresh_token_value
+    elif current.get("refresh_token"):
+        updates["refresh_token"] = current.get("refresh_token")
     if expires_in > 0:
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
-        updates["YOUTUBE_TOKEN_EXPIRES_AT"] = str(int(expires_at.timestamp()))
+        updates["token_expires_at"] = int(expires_at.timestamp())
     return updates
 
 
-def _youtube_auth_snapshot(refresh: bool = False) -> dict[str, Any]:
-    snapshot = {
-        "client_id_configured": bool((os.getenv("YOUTUBE_CLIENT_ID") or "").strip()),
-        "client_secret_configured": bool((os.getenv("YOUTUBE_CLIENT_SECRET") or "").strip()),
-        "redirect_uri": (os.getenv("YOUTUBE_REDIRECT_URI") or "").strip(),
-        "access_token_configured": bool((os.getenv("YOUTUBE_ACCESS_TOKEN") or "").strip()),
-        "refresh_token_configured": bool((os.getenv("YOUTUBE_REFRESH_TOKEN") or "").strip()),
-        "token_expired": _youtube_token_expired(),
-        "channel": None,
-        "authenticated": False,
-        "error": "",
-    }
-    access_token = (os.getenv("YOUTUBE_ACCESS_TOKEN") or "").strip()
-    refresh_token_value = (os.getenv("YOUTUBE_REFRESH_TOKEN") or "").strip()
+def _youtube_refresh_requires_reauth(error: Exception | str) -> bool:
+    detail = str(error or "").lower()
+    return "invalid_grant" in detail or "expired or revoked" in detail
 
-    if refresh and refresh_token_value and (not access_token or snapshot["token_expired"]):
-        tokens = refresh_youtube_token(refresh_token_value)
-        updates = _youtube_token_updates(tokens)
-        if updates:
-            _write_env_updates(updates)
-        access_token = (os.getenv("YOUTUBE_ACCESS_TOKEN") or "").strip()
-        snapshot["access_token_configured"] = bool(access_token)
-        snapshot["refresh_token_configured"] = bool((os.getenv("YOUTUBE_REFRESH_TOKEN") or "").strip())
-        snapshot["token_expired"] = _youtube_token_expired()
 
-    if access_token and not snapshot["token_expired"]:
+def _youtube_reauth_message(profile: dict[str, Any] | None = None) -> str:
+    profile_name = str((profile or {}).get("name") or "").strip()
+    profile_label = f" para o perfil '{profile_name}'" if profile_name else ""
+    return (
+        f"A autenticacao do YouTube{profile_label} expirou ou foi revogada no Google. "
+        "Reconecte o canal em /manager e rode novamente."
+    )
+
+
+def _youtube_mark_profile_reauth_required(db, profile: dict[str, Any]) -> dict[str, Any]:
+    return update_youtube_channel_profile(
+        db,
+        int(profile["id"]),
+        {
+            "access_token": None,
+            "refresh_token": None,
+            "token_expires_at": None,
+            "oauth_state": None,
+        },
+    )
+
+
+def _youtube_auth_snapshot(channel_profile_id: int | None = None, *, refresh: bool = False) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        profiles = fetch_youtube_channel_profiles(db)
+        selected = _resolve_youtube_channel_profile(db, channel_profile_id, require_active=False) if profiles else None
+        snapshot = {
+            "profiles": [
+                {
+                    "id": int(item["id"]),
+                    "name": item["name"],
+                    "handle": item.get("handle") or item.get("channel_custom_url") or "",
+                    "is_default": bool(item.get("is_default")),
+                    "is_active": bool(item.get("is_active")),
+                    "authenticated": bool(item.get("refresh_token")) and not _youtube_profile_token_expired(item),
+                    "channel_title": item.get("channel_title") or "",
+                    "channel_custom_url": item.get("channel_custom_url") or "",
+                }
+                for item in profiles
+            ],
+            "selected_profile_id": int(selected["id"]) if selected else None,
+            "profile": None,
+            "client_id_configured": False,
+            "client_secret_configured": False,
+            "redirect_uri": "",
+            "access_token_configured": False,
+            "refresh_token_configured": False,
+            "token_expired": True,
+            "channel": None,
+            "authenticated": False,
+            "reauth_required": False,
+            "error": "",
+        }
+        if not selected:
+            return snapshot
+
+        if refresh and selected.get("refresh_token") and (not selected.get("access_token") or _youtube_profile_token_expired(selected)):
+            try:
+                tokens = refresh_youtube_token(
+                    str(selected.get("refresh_token") or ""),
+                    client_id=str(selected.get("client_id") or ""),
+                    client_secret=str(selected.get("client_secret") or ""),
+                )
+            except ValueError as exc:
+                if _youtube_refresh_requires_reauth(exc):
+                    selected = _youtube_mark_profile_reauth_required(db, selected)
+                    snapshot["reauth_required"] = True
+                    snapshot["error"] = _youtube_reauth_message(selected)
+                else:
+                    raise
+            else:
+                update_youtube_channel_profile(db, int(selected["id"]), _youtube_profile_token_updates(tokens, selected))
+                selected = _resolve_youtube_channel_profile(db, int(selected["id"]), require_active=False)
+
+        snapshot["profile"] = {
+            "id": int(selected["id"]),
+            "name": selected["name"],
+            "handle": selected.get("handle") or "",
+            "notes": selected.get("notes") or "",
+            "is_default": bool(selected.get("is_default")),
+            "is_active": bool(selected.get("is_active")),
+            "channel_id": selected.get("channel_id") or "",
+            "channel_title": selected.get("channel_title") or "",
+            "channel_custom_url": selected.get("channel_custom_url") or "",
+        }
+        snapshot["client_id_configured"] = bool(selected.get("client_id"))
+        snapshot["client_secret_configured"] = bool(selected.get("client_secret"))
+        snapshot["redirect_uri"] = selected.get("redirect_uri") or ""
+        snapshot["access_token_configured"] = bool(selected.get("access_token"))
+        snapshot["refresh_token_configured"] = bool(selected.get("refresh_token"))
+        snapshot["token_expired"] = _youtube_profile_token_expired(selected)
+
+        access_token = str(selected.get("access_token") or "").strip()
+        if access_token and not snapshot["token_expired"] and not snapshot["reauth_required"]:
+            try:
+                channel = fetch_youtube_channel(access_token)
+                snapshot["channel"] = channel
+                snapshot["authenticated"] = True
+                if (
+                    channel.get("id") != selected.get("channel_id")
+                    or channel.get("title") != selected.get("channel_title")
+                    or channel.get("custom_url") != selected.get("channel_custom_url")
+                ):
+                    thumbnails = channel.get("thumbnails") or {}
+                    thumbnail_url = (
+                        (thumbnails.get("high") or {}).get("url")
+                        or (thumbnails.get("medium") or {}).get("url")
+                        or (thumbnails.get("default") or {}).get("url")
+                        or ""
+                    )
+                    update_youtube_channel_profile(
+                        db,
+                        int(selected["id"]),
+                        {
+                            "channel_id": channel.get("id") or None,
+                            "channel_title": channel.get("title") or None,
+                            "channel_custom_url": channel.get("custom_url") or None,
+                            "channel_thumbnail_url": thumbnail_url or None,
+                        },
+                    )
+                    selected = _resolve_youtube_channel_profile(db, int(selected["id"]), require_active=False)
+                    snapshot["profile"]["channel_id"] = selected.get("channel_id") or ""
+                    snapshot["profile"]["channel_title"] = selected.get("channel_title") or ""
+                    snapshot["profile"]["channel_custom_url"] = selected.get("channel_custom_url") or ""
+            except Exception as exc:  # noqa: BLE001
+                snapshot["error"] = str(exc)
+        return snapshot
+    finally:
+        db.close()
+
+
+def _youtube_access_token_ready(channel_profile_id: int | None = None) -> tuple[str, dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        profile = _resolve_youtube_channel_profile(db, channel_profile_id)
+        access_token = str(profile.get("access_token") or "").strip()
+        if access_token and not _youtube_profile_token_expired(profile):
+            return access_token, profile
+        refresh_token_value = str(profile.get("refresh_token") or "").strip()
+        if not refresh_token_value:
+            raise ValueError("YouTube nao autenticado para esse perfil. Conecte a conta do canal antes de publicar.")
         try:
-            snapshot["channel"] = fetch_youtube_channel(access_token)
-            snapshot["authenticated"] = True
-        except Exception as exc:  # noqa: BLE001
-            snapshot["error"] = str(exc)
-    return snapshot
-
-
-def _youtube_access_token_ready() -> str:
-    refresh_token_value = (os.getenv("YOUTUBE_REFRESH_TOKEN") or "").strip()
-    access_token = (os.getenv("YOUTUBE_ACCESS_TOKEN") or "").strip()
-    if access_token and not _youtube_token_expired():
-        return access_token
-    if not refresh_token_value:
-        raise ValueError("YouTube nao autenticado. Conecte a conta antes de publicar.")
-    tokens = refresh_youtube_token(refresh_token_value)
-    updates = _youtube_token_updates(tokens)
-    if updates:
-        _write_env_updates(updates)
-    refreshed = (os.getenv("YOUTUBE_ACCESS_TOKEN") or "").strip()
-    if not refreshed:
-        raise ValueError("Nao foi possivel renovar o token do YouTube.")
-    return refreshed
+            tokens = refresh_youtube_token(
+                refresh_token_value,
+                client_id=str(profile.get("client_id") or ""),
+                client_secret=str(profile.get("client_secret") or ""),
+            )
+        except ValueError as exc:
+            if _youtube_refresh_requires_reauth(exc):
+                _youtube_mark_profile_reauth_required(db, profile)
+                raise ValueError(_youtube_reauth_message(profile)) from exc
+            raise
+        updated = update_youtube_channel_profile(db, int(profile["id"]), _youtube_profile_token_updates(tokens, profile))
+        refreshed = str(updated.get("access_token") or "").strip()
+        if not refreshed:
+            raise ValueError("Nao foi possivel renovar o token do YouTube para esse perfil.")
+        return refreshed, updated
+    finally:
+        db.close()
 
 
 def _recent_site_social_offer_ids(db, limit: int = 20) -> list[int]:
@@ -692,6 +973,23 @@ def _parse_decimal(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _price_is_zero_or_less(value: Any) -> bool:
+    return _parse_decimal(value, default=0.0) <= 0
+
+
+def _purge_zero_price_offers(db) -> int:
+    ids = [
+        int(row[0])
+        for row in db.execute(text("SELECT id FROM ofertas WHERE COALESCE(preco, 0) <= 0")).all()
+    ]
+    if not ids:
+        return 0
+
+    db.execute(text("DELETE FROM cliques WHERE oferta_id IN :ids").bindparams(bindparam("ids", expanding=True)), {"ids": ids})
+    db.execute(text("DELETE FROM ofertas WHERE id IN :ids").bindparams(bindparam("ids", expanding=True)), {"ids": ids})
+    return len(ids)
+
+
 def _normalize_offer_slug(db, slug: str | None, title: str, ignore_id: int = 0) -> str:
     base = build_slug((slug or "").strip() or title)
     candidate = base
@@ -806,8 +1104,13 @@ def _manager_login_html(error: str | None = None) -> str:
 def _env_settings_snapshot() -> dict:
     auto_social_platform, auto_social_mode = _normalize_auto_social_action(
         os.getenv("AUTO_SOCIAL_PLATFORM") or "facebook",
-        os.getenv("AUTO_SOCIAL_MODE") or "feed",
+        os.getenv("AUTO_SOCIAL_MODE") or "feed_story_reel",
     )
+    db = SessionLocal()
+    try:
+        youtube_profiles = fetch_youtube_channel_profiles(db)
+    finally:
+        db.close()
     return {
         "manager_username": _manager_credentials()[0],
         "meta_access_token_configured": bool((os.getenv("META_ACCESS_TOKEN") or "").strip()),
@@ -834,6 +1137,18 @@ def _env_settings_snapshot() -> dict:
             "refresh_token_configured": bool((os.getenv("YOUTUBE_REFRESH_TOKEN") or "").strip()),
             "cookies_from_browser": os.getenv("YTDLP_COOKIES_FROM_BROWSER") or "",
             "cookies_file": os.getenv("YTDLP_COOKIES_FILE") or "",
+            "channels": [
+                {
+                    "id": int(item["id"]),
+                    "name": item["name"],
+                    "handle": item.get("handle") or "",
+                    "is_default": bool(item.get("is_default")),
+                    "is_active": bool(item.get("is_active")),
+                    "channel_title": item.get("channel_title") or "",
+                    "channel_custom_url": item.get("channel_custom_url") or "",
+                }
+                for item in youtube_profiles
+            ],
         },
     }
 
@@ -879,15 +1194,21 @@ def _import_provider(db, store: str, offers: list[dict]) -> dict:
     processed = 0
     created = 0
     updated = 0
+    skipped = 0
     for raw in offers:
+        if store.strip().lower() == "mercado livre" and not _has_meli_affiliate_marker(str(raw.get("url") or "")):
+            skipped += 1
+            continue
         normalized = normalize_offer(raw, store, raw.get("affiliate_tag"))
         action = publish_offer(db, normalized)
         processed += 1
         if action == "created":
             created += 1
-        else:
+        elif action == "updated":
             updated += 1
-    return {"processed": processed, "created": created, "updated": updated}
+        else:
+            skipped += 1
+    return {"processed": processed, "created": created, "updated": updated, "skipped": skipped}
 
 
 def _raise_meta_http_error(exc: httpx.HTTPStatusError) -> HTTPException:
@@ -995,6 +1316,7 @@ def execute_import_run(providers: list[str] | None = None) -> dict:
                     "processed": import_summary["processed"],
                     "created": import_summary["created"],
                     "updated": import_summary["updated"],
+                    "skipped": import_summary.get("skipped", 0),
                     "imported": import_summary["processed"],
                     "offers_found": len(offers),
                 }
@@ -1080,8 +1402,8 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
             db,
             limit=limit,
             offer_ids=selected_offer_ids or None,
-            include_story_assets=((platform == "instagram" and mode in {"story", "feed_story"}) or (platform in {"both", "facebook_instagram"} and mode == "feed_story")),
-            include_square_card_assets=(platform in {"facebook", "instagram", "both", "facebook_instagram"} and mode in {"feed", "story", "feed_story"}),
+            include_story_assets=((platform == "instagram" and mode in {"story", "feed_story", "feed_story_reel"}) or (platform in {"both", "facebook_instagram", "facebook"} and mode in {"feed_story", "feed_story_reel"})),
+            include_square_card_assets=(platform in {"facebook", "instagram", "both", "facebook_instagram"} and mode in {"feed", "story", "feed_story", "feed_story_reel"}),
         )
         if not previews:
             raise ValueError("Nao ha ofertas elegiveis para publicar.")
@@ -1098,15 +1420,21 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                 "imagem_url": item["image_url"],
                 "url_afiliado": item.get("cta_url"),
                 "cupom": item.get("coupon"),
+                "parcelas_texto": item.get("installments"),
+                "preco_pix": item.get("pix_price"),
+                "frete_texto": item.get("shipping"),
+                "avaliacao_nota": item.get("rating"),
+                "avaliacao_total": item.get("rating_count"),
+                "promocao_texto": item.get("promotion_text"),
             }
             reel_source = "generated_art"
             reel_asset_error = None
             source_video_url = str(item.get("reel_payload", {}).get("source_video_url") or "").strip() or None
 
-            if item.get("store") == "Shopee" and source_video_url:
+            if source_video_url:
                 try:
                     reel_asset = download_source_video_asset(offer, source_video_url)
-                    reel_source = "shopee_source_video"
+                    reel_source = "offer_source_video"
                     return reel_asset, reel_source, source_video_url, reel_asset_error
                 except Exception as source_exc:  # noqa: BLE001
                     reel_asset_error = str(source_exc)
@@ -1114,15 +1442,160 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
             reel_asset = generate_reel_asset(offer)
             return reel_asset, reel_source, source_video_url, reel_asset_error
 
+        source_video_asset_cache: dict[int, tuple[dict[str, Any] | None, str | None, str | None]] = {}
+        story_video_asset_cache: dict[int, tuple[dict[str, Any] | None, str | None, str | None]] = {}
+
+        def prepare_source_video_asset(item: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
+            offer_id = int(item.get("offer_id") or 0)
+            if offer_id in source_video_asset_cache:
+                return source_video_asset_cache[offer_id]
+
+            offer = {
+                "id": item["offer_id"],
+                "slug": item["slug"],
+                "titulo": item["title"],
+                "preco": item["price"],
+                "preco_antigo": item.get("old_price"),
+                "loja": item["store"],
+                "categoria": item["category"],
+                "imagem_url": item["image_url"],
+                "url_afiliado": item.get("cta_url"),
+                "cupom": item.get("coupon"),
+            }
+            source_video_url = str(item.get("reel_payload", {}).get("source_video_url") or "").strip() or None
+            if not source_video_url:
+                source_video_asset_cache[offer_id] = (None, None, None)
+                return source_video_asset_cache[offer_id]
+
+            try:
+                asset = download_source_video_asset(offer, source_video_url)
+                source_video_asset_cache[offer_id] = (asset, source_video_url, None)
+            except Exception as source_exc:  # noqa: BLE001
+                source_video_asset_cache[offer_id] = (None, source_video_url, str(source_exc))
+            return source_video_asset_cache[offer_id]
+
+        def prepare_story_video_asset(item: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
+            offer_id = int(item.get("offer_id") or 0)
+            if offer_id in story_video_asset_cache:
+                return story_video_asset_cache[offer_id]
+
+            offer = {
+                "id": item["offer_id"],
+                "slug": item["slug"],
+                "titulo": item["title"],
+                "preco": item["price"],
+                "preco_antigo": item.get("old_price"),
+                "loja": item["store"],
+                "categoria": item["category"],
+                "imagem_url": item["image_url"],
+                "url_afiliado": item.get("cta_url"),
+                "cupom": item.get("coupon"),
+                "parcelas_texto": item.get("installments"),
+                "preco_pix": item.get("pix_price"),
+                "frete_texto": item.get("shipping"),
+                "avaliacao_nota": item.get("rating"),
+                "avaliacao_total": item.get("rating_count"),
+                "promocao_texto": item.get("promotion_text"),
+            }
+            source_asset, source_video_url, source_video_error = prepare_source_video_asset(item)
+            if not source_asset or not source_video_url:
+                story_video_asset_cache[offer_id] = (None, source_video_url, source_video_error)
+                return story_video_asset_cache[offer_id]
+            story_video_asset_cache[offer_id] = (source_asset, source_video_url, source_video_error)
+            return story_video_asset_cache[offer_id]
+
+        def publish_facebook_story_with_fallback(item: dict[str, Any], combined_item: dict[str, Any]) -> bool:
+            story_video_asset, source_video_url, source_video_error = prepare_story_video_asset(item)
+            if source_video_error:
+                combined_item["facebook_story_video_error"] = source_video_error
+                if source_video_url:
+                    combined_item["facebook_story_source_video_url"] = source_video_url
+
+            if story_video_asset:
+                try:
+                    published_video_story = publish_facebook_story_video(story_video_asset["file_path"])
+                    combined_item["facebook_story_result"] = published_video_story["result"]
+                    combined_item["facebook_story_video_id"] = published_video_story["video_id"]
+                    combined_item["facebook_story_source"] = "source_video"
+                    return True
+                except Exception as exc:  # noqa: BLE001
+                    combined_item["facebook_story_video_error"] = str(exc)
+
+            try:
+                story_filename = item["story_payload"]["image_url"].rstrip("/").split("/")[-1]
+                deploy_result = deploy_stories_via_sftp(only_files=[story_filename])
+                facebook_story = publish_facebook_story_photo(item["story_payload"]["image_url"])
+                combined_item["facebook_story_deploy"] = deploy_result
+                combined_item["facebook_story_result"] = facebook_story["result"]
+                combined_item["facebook_story_source"] = "image"
+                return True
+            except Exception as exc:  # noqa: BLE001
+                errors.append(
+                    {
+                        "offer_id": item["offer_id"],
+                        "title": item["title"],
+                        "platform": "facebook_story",
+                        "error": _http_error_detail(exc),
+                    }
+                )
+                return False
+
+        def publish_instagram_story_with_fallback(item: dict[str, Any], combined_item: dict[str, Any]) -> bool:
+            story_video_asset, source_video_url, source_video_error = prepare_story_video_asset(item)
+            if source_video_error:
+                combined_item["instagram_story_video_error"] = source_video_error
+                if source_video_url:
+                    combined_item["instagram_story_source_video_url"] = source_video_url
+
+            if story_video_asset:
+                try:
+                    deploy_stories_via_sftp(only_files=[story_video_asset["filename"]])
+                    created_story = create_instagram_story_container(video_url=story_video_asset["public_url"])
+                    published_story = publish_instagram_container(created_story["result"]["id"])
+                    combined_item["story_creation_id"] = created_story["result"]["id"]
+                    combined_item["story_result"] = published_story["result"]
+                    combined_item["story_source"] = "source_video"
+                    return True
+                except Exception as exc:  # noqa: BLE001
+                    combined_item["instagram_story_video_error"] = _http_error_detail(exc)
+
+            try:
+                story_filename = item["story_payload"]["image_url"].rstrip("/").split("/")[-1]
+                deploy_result = deploy_stories_via_sftp(only_files=[story_filename])
+                created_story = create_instagram_story_container(image_url=item["story_payload"]["image_url"])
+                published_story = publish_instagram_container(created_story["result"]["id"])
+                combined_item["story_deploy"] = deploy_result
+                combined_item["story_creation_id"] = created_story["result"]["id"]
+                combined_item["story_result"] = published_story["result"]
+                combined_item["story_source"] = "image"
+                return True
+            except Exception as exc:  # noqa: BLE001
+                errors.append(
+                    {
+                        "offer_id": item["offer_id"],
+                        "title": item["title"],
+                        "platform": "instagram_story",
+                        "error": _http_error_detail(exc),
+                    }
+                )
+                return False
+
         items = []
         errors = []
         warnings = []
         instagram_posts_required = 0
         if platform == "instagram":
-            instagram_posts_required = len(previews) * (2 if mode == "feed_story" else 1)
+            if mode == "feed_story":
+                instagram_posts_required = len(previews) * 2
+            elif mode == "feed_story_reel":
+                instagram_posts_required = len(previews) * 3
+            else:
+                instagram_posts_required = len(previews)
         elif platform in {"both", "facebook_instagram"}:
             if mode == "feed_story":
                 instagram_posts_required = len(previews) * 2
+            elif mode == "feed_story_reel":
+                instagram_posts_required = len(previews) * 3
             elif mode in {"feed", "reel"}:
                 instagram_posts_required = len(previews)
 
@@ -1137,7 +1610,64 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
         instagram_skip_for_combined = bool(instagram_capacity_error and platform in {"both", "facebook_instagram"})
         if instagram_skip_for_combined:
             warnings.append({"platform": "instagram", "warning": instagram_capacity_error})
-        if platform in {"both", "facebook_instagram"} and mode == "feed":
+        if platform == "facebook" and mode == "feed_story_reel":
+            for item in previews:
+                combined_item = {
+                    "offer_id": item["offer_id"],
+                    "slug": item["slug"],
+                    "title": item["title"],
+                }
+                success_for_item = False
+
+                try:
+                    image_filename = (item.get("facebook_payload", {}).get("image_filename") or "").strip()
+                    if image_filename:
+                        deploy_stories_via_sftp(only_files=[image_filename])
+                    facebook_result = publish_facebook_photo(
+                        image_url=item["facebook_payload"]["image_url"],
+                        caption=item["facebook_payload"]["message"],
+                    )
+                    combined_item["facebook_result"] = facebook_result["result"]
+                    success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "facebook_feed",
+                            "error": str(exc),
+                        }
+                    )
+
+                if publish_facebook_story_with_fallback(item, combined_item):
+                    success_for_item = True
+
+                try:
+                    reel_asset, reel_source, source_video_url, reel_asset_error = prepare_reel_asset(item)
+                    published = publish_facebook_reel(
+                        video_path=reel_asset["file_path"],
+                        description=item["reel_payload"]["caption"],
+                    )
+                    combined_item["reel_file"] = reel_asset["filename"]
+                    combined_item["reel_source"] = reel_source
+                    combined_item["source_video_url"] = source_video_url or None
+                    combined_item["source_video_error"] = reel_asset_error
+                    combined_item["video_id"] = published["video_id"]
+                    combined_item["publish_result"] = published["result"]
+                    success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "facebook_reel",
+                            "error": str(exc),
+                        }
+                    )
+
+                if success_for_item:
+                    items.append(combined_item)
+        elif platform in {"both", "facebook_instagram"} and mode == "feed":
             for item in previews:
                 combined_item = {
                     "offer_id": item["offer_id"],
@@ -1259,23 +1789,16 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                         }
                     )
 
-                try:
-                    story_filename = item["story_payload"]["image_url"].rstrip("/").split("/")[-1]
-                    deploy_result = deploy_stories_via_sftp(only_files=[story_filename])
-                    facebook_story = publish_facebook_story_photo(item["story_payload"]["image_url"])
-                    combined_item["story_deploy"] = deploy_result
-                    combined_item["facebook_story_result"] = facebook_story["result"]
+                if publish_facebook_story_with_fallback(item, combined_item):
                     facebook_story_ok = True
+                try:
                     if instagram_skip_for_combined:
                         combined_item["instagram_story_skipped_reason"] = instagram_capacity_error
                         raise StopIteration
                     if instagram_capacity_error:
                         raise ValueError(instagram_capacity_error)
-                    created_story = create_instagram_story_container(item["story_payload"]["image_url"])
-                    published_story = publish_instagram_container(created_story["result"]["id"])
-                    combined_item["story_creation_id"] = created_story["result"]["id"]
-                    combined_item["story_result"] = published_story["result"]
-                    instagram_story_ok = True
+                    if publish_instagram_story_with_fallback(item, combined_item):
+                        instagram_story_ok = True
                 except StopIteration:
                     pass
                 except Exception as exc:  # noqa: BLE001
@@ -1289,6 +1812,160 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     )
 
                 if facebook_ok or facebook_story_ok or instagram_feed_ok or instagram_story_ok:
+                    items.append(combined_item)
+        elif platform in {"both", "facebook_instagram"} and mode == "feed_story_reel":
+            for item in previews:
+                combined_item = {
+                    "offer_id": item["offer_id"],
+                    "slug": item["slug"],
+                    "title": item["title"],
+                }
+                facebook_ok = False
+                facebook_story_ok = False
+                facebook_reel_ok = False
+                instagram_feed_ok = False
+                instagram_story_ok = False
+                instagram_reel_ok = False
+
+                try:
+                    image_filename = (item.get("facebook_payload", {}).get("image_filename") or "").strip()
+                    if image_filename:
+                        deploy_stories_via_sftp(only_files=[image_filename])
+                    facebook_result = publish_facebook_photo(
+                        image_url=item["facebook_payload"]["image_url"],
+                        caption=item["facebook_payload"]["message"],
+                    )
+                    combined_item["facebook_result"] = facebook_result["result"]
+                    facebook_ok = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "facebook",
+                            "error": str(exc),
+                        }
+                    )
+
+                if publish_facebook_story_with_fallback(item, combined_item):
+                    facebook_story_ok = True
+
+                try:
+                    reel_asset, reel_source, source_video_url, reel_asset_error = prepare_reel_asset(item)
+                    combined_item["reel_file"] = reel_asset["filename"]
+                    combined_item["reel_source"] = reel_source
+                    combined_item["source_video_url"] = source_video_url
+                    combined_item["source_video_error"] = reel_asset_error
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "reel_asset",
+                            "error": str(exc),
+                        }
+                    )
+                    reel_asset = None
+
+                if reel_asset:
+                    try:
+                        published = publish_facebook_reel(
+                            video_path=reel_asset["file_path"],
+                            description=item["reel_payload"]["caption"],
+                        )
+                        combined_item["video_id"] = published["video_id"]
+                        combined_item["facebook_reel_result"] = published["result"]
+                        facebook_reel_ok = True
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(
+                            {
+                                "offer_id": item["offer_id"],
+                                "title": item["title"],
+                                "platform": "facebook_reel",
+                                "error": str(exc),
+                            }
+                        )
+
+                try:
+                    if instagram_skip_for_combined:
+                        combined_item["instagram_feed_skipped_reason"] = instagram_capacity_error
+                        raise StopIteration
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
+                    feed_filename = (item.get("instagram_payload", {}).get("image_filename") or "").strip()
+                    if feed_filename:
+                        deploy_stories_via_sftp(only_files=[feed_filename])
+                    created_feed = create_instagram_media_container(
+                        image_url=item["instagram_payload"]["image_url"],
+                        caption=item["instagram_payload"]["caption"],
+                    )
+                    published_feed = publish_instagram_container(created_feed["result"]["id"])
+                    combined_item["feed_creation_id"] = created_feed["result"]["id"]
+                    combined_item["feed_result"] = published_feed["result"]
+                    instagram_feed_ok = True
+                except StopIteration:
+                    pass
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_feed",
+                            "error": _http_error_detail(exc),
+                        }
+                    )
+
+                try:
+                    if instagram_skip_for_combined:
+                        combined_item["instagram_story_skipped_reason"] = instagram_capacity_error
+                        raise StopIteration
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
+                    if publish_instagram_story_with_fallback(item, combined_item):
+                        instagram_story_ok = True
+                except StopIteration:
+                    pass
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_story",
+                            "error": _http_error_detail(exc),
+                        }
+                    )
+
+                if reel_asset:
+                    try:
+                        if instagram_skip_for_combined:
+                            combined_item["instagram_reel_skipped_reason"] = instagram_capacity_error
+                            raise StopIteration
+                        if instagram_capacity_error:
+                            raise ValueError(instagram_capacity_error)
+                        deploy_stories_via_sftp(only_files=[reel_asset["filename"]])
+                        created_reel = create_instagram_reel_container(
+                            video_url=reel_asset["public_url"],
+                            caption=item["reel_payload"]["caption"],
+                        )
+                        status_payload = wait_for_instagram_container_ready(created_reel["result"]["id"])
+                        published_reel = publish_instagram_container(created_reel["result"]["id"])
+                        combined_item["instagram_reel_creation_id"] = created_reel["result"]["id"]
+                        combined_item["instagram_reel_status"] = status_payload["result"]
+                        combined_item["instagram_result"] = published_reel["result"]
+                        instagram_reel_ok = True
+                    except StopIteration:
+                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(
+                            {
+                                "offer_id": item["offer_id"],
+                                "title": item["title"],
+                                "platform": "instagram_reel",
+                                "error": _http_error_detail(exc),
+                            }
+                        )
+
+                if facebook_ok or facebook_story_ok or facebook_reel_ok or instagram_feed_ok or instagram_story_ok or instagram_reel_ok:
                     items.append(combined_item)
         elif platform == "facebook" and mode == "reel":
             for item in previews:
@@ -1452,20 +2129,13 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                 try:
                     if instagram_capacity_error:
                         raise ValueError(instagram_capacity_error)
-                    story_filename = item["story_payload"]["image_url"].rstrip("/").split("/")[-1]
-                    deploy_result = deploy_stories_via_sftp(only_files=[story_filename])
-                    created = create_instagram_story_container(item["story_payload"]["image_url"])
-                    published = publish_instagram_container(created["result"]["id"])
-                    items.append(
-                        {
-                            "offer_id": item["offer_id"],
-                            "slug": item["slug"],
-                            "title": item["title"],
-                            "story_deploy": deploy_result,
-                            "creation_id": created["result"]["id"],
-                            "publish_result": published["result"],
-                        }
-                    )
+                    combined_item = {
+                        "offer_id": item["offer_id"],
+                        "slug": item["slug"],
+                        "title": item["title"],
+                    }
+                    if publish_instagram_story_with_fallback(item, combined_item):
+                        items.append(combined_item)
                 except Exception as exc:  # noqa: BLE001
                     errors.append({"offer_id": item["offer_id"], "title": item["title"], "error": _http_error_detail(exc)})
         elif platform == "instagram" and mode == "feed_story":
@@ -1504,20 +2174,93 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                 try:
                     if instagram_capacity_error:
                         raise ValueError(instagram_capacity_error)
-                    story_filename = item["story_payload"]["image_url"].rstrip("/").split("/")[-1]
-                    deploy_result = deploy_stories_via_sftp(only_files=[story_filename])
-                    created_story = create_instagram_story_container(item["story_payload"]["image_url"])
-                    published_story = publish_instagram_container(created_story["result"]["id"])
-                    combined_item["story_deploy"] = deploy_result
-                    combined_item["story_creation_id"] = created_story["result"]["id"]
-                    combined_item["story_result"] = published_story["result"]
-                    success_for_item = True
+                    if publish_instagram_story_with_fallback(item, combined_item):
+                        success_for_item = True
                 except Exception as exc:  # noqa: BLE001
                     errors.append(
                         {
                             "offer_id": item["offer_id"],
                             "title": item["title"],
                             "platform": "instagram_story",
+                            "error": _http_error_detail(exc),
+                        }
+                    )
+
+                if success_for_item:
+                    items.append(combined_item)
+        elif platform == "instagram" and mode == "feed_story_reel":
+            for item in previews:
+                combined_item = {
+                    "offer_id": item["offer_id"],
+                    "slug": item["slug"],
+                    "title": item["title"],
+                }
+                success_for_item = False
+
+                try:
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
+                    feed_filename = (item.get("instagram_payload", {}).get("image_filename") or "").strip()
+                    if feed_filename:
+                        deploy_stories_via_sftp(only_files=[feed_filename])
+                    created_feed = create_instagram_media_container(
+                        image_url=item["instagram_payload"]["image_url"],
+                        caption=item["instagram_payload"]["caption"],
+                    )
+                    published_feed = publish_instagram_container(created_feed["result"]["id"])
+                    combined_item["feed_creation_id"] = created_feed["result"]["id"]
+                    combined_item["feed_result"] = published_feed["result"]
+                    success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_feed",
+                            "error": _http_error_detail(exc),
+                        }
+                    )
+
+                try:
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
+                    if publish_instagram_story_with_fallback(item, combined_item):
+                        success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_story",
+                            "error": _http_error_detail(exc),
+                        }
+                    )
+
+                try:
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
+                    reel_asset, reel_source, source_video_url, reel_asset_error = prepare_reel_asset(item)
+                    deploy_stories_via_sftp(only_files=[reel_asset["filename"]])
+                    created_reel = create_instagram_reel_container(
+                        video_url=reel_asset["public_url"],
+                        caption=item["reel_payload"]["caption"],
+                    )
+                    status_payload = wait_for_instagram_container_ready(created_reel["result"]["id"])
+                    published_reel = publish_instagram_container(created_reel["result"]["id"])
+                    combined_item["reel_file"] = reel_asset["filename"]
+                    combined_item["reel_source"] = reel_source
+                    combined_item["source_video_url"] = source_video_url
+                    combined_item["source_video_error"] = reel_asset_error
+                    combined_item["instagram_reel_creation_id"] = created_reel["result"]["id"]
+                    combined_item["instagram_reel_status"] = status_payload["result"]
+                    combined_item["instagram_result"] = published_reel["result"]
+                    success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_reel",
                             "error": _http_error_detail(exc),
                         }
                     )
@@ -1875,11 +2618,388 @@ def dashboard_api_mercadolivre_relink_existing_preview(payload: DashboardMercado
         db.close()
 
 
+def execute_youtube_cuts_analyze(url: str) -> dict[str, Any]:
+    return analyze_youtube_video_for_cuts(url)
+
+
+def execute_youtube_cuts_process(
+    url: str,
+    *,
+    limit: int = 5,
+    mode: str = "short",
+    selection_strategy: str = "openai_heuristica",
+    channel_profile_id: int | None = None,
+    burn_subtitles: bool = True,
+) -> dict[str, Any]:
+    normalized_mode = (mode or "short").strip().lower()
+    max_limit = 3 if normalized_mode == "long" else 8
+    normalized_limit = max(1, min(int(limit or 5), max_limit))
+    profile = None
+    if channel_profile_id is not None:
+        db = SessionLocal()
+        try:
+            profile = _resolve_youtube_channel_profile(db, channel_profile_id)
+        finally:
+            db.close()
+    else:
+        db = SessionLocal()
+        try:
+            profile = get_default_youtube_channel_profile(db)
+        finally:
+            db.close()
+
+    result = process_youtube_video_for_cuts(
+        url,
+        limit=normalized_limit,
+        mode=normalized_mode,
+        selection_strategy=selection_strategy,
+        channel_profile_id=channel_profile_id or (profile or {}).get("id"),
+        channel_profile_name=(profile or {}).get("name"),
+        channel_preferences=profile or None,
+        burn_subtitles=burn_subtitles,
+    )
+    result["youtube_auth"] = _youtube_auth_snapshot(channel_profile_id or (profile or {}).get("id"), refresh=False)
+    for item in result.get("cuts") or []:
+        draft = build_youtube_cut_publish_draft(result["job_id"], int(item.get("cut_id") or 0))
+        draft["channel_profile_id"] = (profile or {}).get("id")
+        draft["channel_profile_name"] = (profile or {}).get("name") or ""
+        item["publish_draft"] = draft
+    return result
+
+
+def execute_youtube_cut_publish(
+    *,
+    job_id: str,
+    cut_id: int,
+    title: str | None = None,
+    description: str | None = None,
+    privacy_status: str = "public",
+    publish_at: str | None = None,
+    mode: str = "short",
+    channel_profile_id: int | None = None,
+) -> dict[str, Any]:
+    draft = build_youtube_cut_publish_draft(job_id, cut_id, privacy_status=privacy_status)
+    normalized_title = (title or draft["title"]).strip()
+    normalized_description = (description or draft["description"]).strip()
+    normalized_privacy = (privacy_status or draft["privacy_status"]).strip().lower()
+    normalized_publish_at = (publish_at or "").strip()
+    normalized_mode = (mode or draft.get("mode") or "short").strip().lower()
+    access_token, profile = _youtube_access_token_ready(channel_profile_id or draft.get("channel_profile_id"))
+    video_path = youtube_cut_video_path(job_id, cut_id)
+    published = upload_youtube_short(
+        access_token,
+        video_path,
+        title=normalized_title,
+        description=normalized_description,
+        privacy_status=normalized_privacy,
+        publish_at=normalized_publish_at or None,
+    )
+    video_id = str(published.get("id") or "").strip()
+    thumbnail_result = None
+    thumbnail_error = ""
+    thumbnail_filename = str(draft.get("thumbnail_filename") or "").strip()
+    if normalized_mode == "long" and video_id and thumbnail_filename:
+        try:
+            thumbnail_path = youtube_cuts_asset_path(job_id, thumbnail_filename)
+            thumbnail_result = upload_youtube_thumbnail(access_token, video_id, thumbnail_path)
+        except Exception as exc:  # noqa: BLE001
+            thumbnail_error = str(exc)
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "cut_id": int(cut_id),
+        "mode": normalized_mode,
+        "channel_profile_id": int(profile["id"]),
+        "channel_profile_name": profile["name"],
+        "privacy_status": normalized_privacy,
+        "publish_at": str(published.get("publishAt") or normalized_publish_at or ""),
+        "youtube_video_id": video_id,
+        "youtube_url": f"https://www.youtube.com/watch?v={video_id}" if video_id else "",
+        "thumbnail_result": thumbnail_result,
+        "thumbnail_error": thumbnail_error,
+        "result": published,
+    }
+
+
+def execute_youtube_trends_themes(
+    *,
+    recent_limit: int = 4,
+    videos_per_topic: int = 4,
+    channel_profile_id: int | None = None,
+) -> dict[str, Any]:
+    access_token, profile = _youtube_access_token_ready(channel_profile_id)
+    result = build_channel_trend_ideas(
+        access_token,
+        recent_limit=max(1, min(int(recent_limit or 4), 16)),
+        videos_per_topic=max(1, min(int(videos_per_topic or 4), 10)),
+        channel_profile_name=str(profile.get("name") or ""),
+        channel_preferences=profile,
+    )
+    result["target_profile"] = {
+        "id": int(profile["id"]),
+        "name": profile["name"],
+        "handle": profile.get("handle") or "",
+        "channel_title": profile.get("channel_title") or "",
+        "channel_custom_url": profile.get("channel_custom_url") or "",
+    }
+    return result
+
+
+def _youtube_auto_cut_recent_source_ids(db, *, channel_profile_id: int, lookback_days: int = 14) -> set[str]:
+    rows = db.execute(
+        text(
+            """
+            SELECT payload_json, result_json
+            FROM automacao_execucoes
+            WHERE tipo = 'youtube_auto_cut'
+              AND status = 'success'
+              AND criado_em >= (NOW() - INTERVAL :lookback_days DAY)
+            ORDER BY criado_em DESC, id DESC
+            LIMIT 120
+            """
+        ),
+        {"lookback_days": max(1, int(lookback_days or 14))},
+    ).mappings().all()
+
+    used_ids: set[str] = set()
+    for row in rows:
+        for column in ("result_json", "payload_json"):
+            payload = row.get(column)
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = None
+            if not isinstance(payload, dict):
+                continue
+            payload_profile_id = int(
+                payload.get("channel_profile_id")
+                or ((payload.get("target_profile") or {}).get("id") if isinstance(payload.get("target_profile"), dict) else 0)
+                or 0
+            )
+            if payload_profile_id != int(channel_profile_id):
+                continue
+            source_video_id = str(
+                payload.get("source_video_id")
+                or ((payload.get("selected_source") or {}).get("video_id") if isinstance(payload.get("selected_source"), dict) else "")
+                or ""
+            ).strip()
+            if source_video_id:
+                used_ids.add(source_video_id)
+    return used_ids
+
+
+def _best_generated_youtube_cut(cuts: list[dict[str, Any]]) -> dict[str, Any]:
+    available = [item for item in cuts if isinstance(item, dict)]
+    if not available:
+        raise ValueError("Nenhum corte foi gerado para publicar automaticamente.")
+    return max(
+        available,
+        key=lambda item: (
+            int(((item.get("scorecard") or {}).get("overall")) or item.get("score") or 0),
+            float(item.get("duration_seconds") or 0),
+        ),
+    )
+
+
+def execute_youtube_auto_cut_publish(
+    *,
+    channel_profile_id: int | None = None,
+    channel_profile_name: str | None = None,
+    recent_limit: int = 8,
+    videos_per_topic: int = 5,
+    cut_limit: int = 5,
+    retry_candidates: int = 4,
+    lookback_days: int = 14,
+    selection_strategy: str = "openai_heuristica",
+) -> dict[str, Any]:
+    db = SessionLocal()
+    run_id = 0
+    execution_result: dict[str, Any] | None = None
+    try:
+        profile = (
+            _resolve_youtube_channel_profile(db, channel_profile_id)
+            if channel_profile_id
+            else _resolve_youtube_channel_profile_by_name(db, channel_profile_name)
+            if channel_profile_name
+            else _resolve_youtube_channel_profile(db)
+        )
+        profile_id = int(profile["id"])
+        payload = {
+            "channel_profile_id": profile_id,
+            "channel_profile_name": profile.get("name") or "",
+            "recent_limit": int(recent_limit or 8),
+            "videos_per_topic": int(videos_per_topic or 5),
+            "cut_limit": int(cut_limit or 5),
+            "retry_candidates": int(retry_candidates or 4),
+            "lookback_days": int(lookback_days or 14),
+            "selection_strategy": selection_strategy,
+        }
+        run_id = record_execution_start(
+            db,
+            tipo="youtube_auto_cut",
+            provider="youtube",
+            canal=str(profile.get("name") or ""),
+            modo="short",
+            requested_count=1,
+            payload=payload,
+        )
+
+        trends = execute_youtube_trends_themes(
+            recent_limit=max(1, min(int(recent_limit or 8), 16)),
+            videos_per_topic=max(1, min(int(videos_per_topic or 5), 10)),
+            channel_profile_id=profile_id,
+        )
+        all_candidates = [item for item in (trends.get("recent_uploads") or []) if isinstance(item, dict) and str(item.get("url") or "").strip()]
+        if not all_candidates:
+            raise ValueError("O radar nao retornou videos candidatos para o corte automatico.")
+
+        recent_source_ids = _youtube_auto_cut_recent_source_ids(db, channel_profile_id=profile_id, lookback_days=lookback_days)
+        candidates = [item for item in all_candidates if str(item.get("video_id") or "").strip() not in recent_source_ids]
+        reused_source_fallback = False
+        if not candidates:
+            candidates = all_candidates
+            reused_source_fallback = True
+
+        attempts: list[dict[str, Any]] = []
+        max_attempts = max(1, min(int(retry_candidates or 4), len(candidates)))
+        for candidate in candidates[:max_attempts]:
+            source_video_id = str(candidate.get("video_id") or "").strip()
+            source_duration_seconds = int(candidate.get("duration_seconds") or 0)
+            requested_burn_subtitles = True
+            attempt_payload = {
+                "video_id": source_video_id,
+                "title": str(candidate.get("title") or ""),
+                "url": str(candidate.get("url") or ""),
+                "duration_seconds": source_duration_seconds,
+                "burn_subtitles_requested": requested_burn_subtitles,
+                "cut_score": int(candidate.get("cut_score") or 0),
+            }
+            try:
+                process_result = execute_youtube_cuts_process(
+                    str(candidate.get("url") or ""),
+                    limit=max(1, min(int(cut_limit or 5), 8)),
+                    mode="short",
+                    selection_strategy=selection_strategy,
+                    channel_profile_id=profile_id,
+                    burn_subtitles=requested_burn_subtitles,
+                )
+                selected_cut = _best_generated_youtube_cut(list(process_result.get("cuts") or []))
+                actual_burn_subtitles = bool(process_result.get("burn_subtitles"))
+                publish_result = execute_youtube_cut_publish(
+                    job_id=str(process_result.get("job_id") or ""),
+                    cut_id=int(selected_cut.get("cut_id") or 0),
+                    privacy_status="public",
+                    mode="short",
+                    channel_profile_id=profile_id,
+                )
+                execution_result = {
+                    "ok": True,
+                    "channel_profile_id": profile_id,
+                    "channel_profile_name": profile.get("name") or "",
+                    "used_recent_source_fallback": reused_source_fallback,
+                    "source_video_id": source_video_id,
+                    "selected_source": {
+                        **attempt_payload,
+                        "channel_title": str(candidate.get("channel_title") or ""),
+                        "published_at": str(candidate.get("published_at") or ""),
+                    },
+                    "selected_cut": {
+                        "cut_id": int(selected_cut.get("cut_id") or 0),
+                        "title": str(selected_cut.get("title") or ""),
+                        "hook": str(selected_cut.get("hook") or ""),
+                        "score": int(((selected_cut.get("scorecard") or {}).get("overall")) or selected_cut.get("score") or 0),
+                        "duration_seconds": float(selected_cut.get("duration_seconds") or 0),
+                        "duration_label": str(selected_cut.get("duration_label") or ""),
+                        "burn_subtitles": actual_burn_subtitles,
+                    },
+                    "job_id": str(process_result.get("job_id") or ""),
+                    "youtube_video_id": str(publish_result.get("youtube_video_id") or ""),
+                    "youtube_url": str(publish_result.get("youtube_url") or ""),
+                    "privacy_status": "public",
+                    "radar_profile": dict(trends.get("trend_profile") or {}),
+                    "subtitle_decision": process_result.get("subtitle_decision") or {},
+                    "attempts": attempts + [{"ok": True, **attempt_payload}],
+                }
+                record_execution_success(db, run_id, processed_count=1, result=execution_result)
+                return execution_result
+            except Exception as exc:  # noqa: BLE001
+                attempts.append({"ok": False, **attempt_payload, "error": str(exc)})
+
+        error_result = {
+            "ok": False,
+            "channel_profile_id": profile_id,
+            "channel_profile_name": profile.get("name") or "",
+            "used_recent_source_fallback": reused_source_fallback,
+            "radar_profile": dict(trends.get("trend_profile") or {}),
+            "attempts": attempts,
+        }
+        error_message = "Nao consegui gerar e publicar automaticamente um corte a partir dos videos do radar."
+        record_execution_error(db, run_id, error_message=error_message, result=error_result)
+        raise ValueError(error_message)
+    except Exception as exc:
+        if run_id and execution_result is None:
+            try:
+                record_execution_error(db, run_id, error_message=str(exc))
+            except Exception:
+                pass
+        raise
+    finally:
+        db.close()
+
+
+@app.get("/dashboard/api/growth/radar")
+def dashboard_api_growth_radar(_: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        return {"ok": True, **fetch_growth_radar(db)}
+    finally:
+        db.close()
+
+
+@app.post("/dashboard/api/growth/targets")
+def dashboard_api_growth_target_create(payload: DashboardGrowthTargetPayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        normalized = _normalize_growth_target_payload(payload)
+        target = create_growth_target(db, normalized)
+        return {"ok": True, "target": target}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.post("/dashboard/api/growth/targets/{target_id}")
+def dashboard_api_growth_target_update(target_id: int, payload: DashboardGrowthTargetPayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        normalized = _normalize_growth_target_payload(payload)
+        target = update_growth_target(db, target_id, normalized)
+        return {"ok": True, "target": target}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.delete("/dashboard/api/growth/targets/{target_id}")
+def dashboard_api_growth_target_delete(target_id: int, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        delete_growth_target(db, target_id)
+        return {"ok": True, "deleted_id": int(target_id)}
+    finally:
+        db.close()
+
+
 @app.get("/dashboard/api/offers")
 def dashboard_api_offers(q: str = "", limit: int = 10, page: int = 1, _: str = Depends(require_manager_auth)):
     db = SessionLocal()
     try:
         ensure_dashboard_tables(db)
+        if _purge_zero_price_offers(db):
+            db.commit()
         normalized_limit = min(max(int(limit or 10), 1), 50)
         normalized_page = max(int(page or 1), 1)
         query = (q or "").strip()
@@ -1978,6 +3098,8 @@ def dashboard_api_offer_update(offer_id: int, payload: DashboardOfferUpdatePaylo
         affiliate_url = (payload.url_afiliado or "").strip()
         if not title or not affiliate_url:
             raise HTTPException(status_code=400, detail="Titulo e URL afiliado sao obrigatorios.")
+        if _price_is_zero_or_less(payload.preco):
+            return {"ok": True, "ignored": True, "reason": "zero_price", "offer_id": offer_id}
 
         slug = _normalize_offer_slug(db, payload.slug, title, ignore_id=offer_id)
         old_price = _parse_decimal(payload.preco_antigo, default=0.0) if payload.preco_antigo not in (None, "") else None
@@ -2298,38 +3420,32 @@ def dashboard_api_manual_links_run(payload: DashboardManualLinksPayload, _: str 
                         "Gere o link na Central/Barra de Afiliados e refaca o preview."
                     ),
                 )
-            if store.lower() == "mercado livre" and float(item.price or 0) <= 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"O item '{item.title}' do Mercado Livre esta com preco zerado ou ausente. "
-                        "Revise o preco antes de importar."
-                    ),
-                )
-            raw = {
-                "title": item.title,
-                "description": item.description or "",
-                "price": float(item.price or 0),
-                "old_price": float(item.old_price) if item.old_price not in (None, "") else None,
-                "url": item.url or item.canonical_url,
-                "image": item.image or "",
-                "category": item.category or "ofertas",
-                "coupon": item.coupon or None,
-                "tags": item.tags or f"{(item.provider or 'manual').strip().lower()},manual",
-                "featured": int(item.featured or 0),
-                "affiliate_tag": item.affiliate_code or "",
-                "item_id": item.item_id or None,
-                "product_id": item.product_id or None,
-            }
+            raw = item.model_dump()
+            raw.update(
+                {
+                    "title": item.title,
+                    "description": item.description or "",
+                    "url": item.url or item.canonical_url or "",
+                    "canonical_url": item.canonical_url or item.url or "",
+                    "image": item.image or "",
+                    "category": item.category or "ofertas",
+                    "coupon": item.coupon or None,
+                    "tags": item.tags or f"{(item.provider or 'manual').strip().lower()},manual",
+                    "featured": int(item.featured or 0),
+                    "affiliate_tag": item.affiliate_code or "",
+                }
+            )
             processed_items.append(raw | {"store": store})
 
-        summary = {"processed": 0, "created": 0, "updated": 0}
+        summary = {"processed": 0, "created": 0, "updated": 0, "skipped": 0}
         imported: list[dict[str, Any]] = []
         for item in processed_items:
             normalized = normalize_offer(item, item["store"], item.get("affiliate_tag"))
             action = publish_offer(db, normalized)
             summary["processed"] += 1
             summary[action] += 1
+            if action == "skipped":
+                continue
             imported.append(
                 {
                     "title": item["title"],
@@ -2349,6 +3465,7 @@ def dashboard_api_manual_links_run(payload: DashboardManualLinksPayload, _: str 
             "processed": summary["processed"],
             "created": summary["created"],
             "updated": summary["updated"],
+            "skipped": summary["skipped"],
             "items": imported,
         }
     except HTTPException:
@@ -2382,15 +3499,35 @@ def dashboard_api_youtube_cuts_process(payload: DashboardYoutubeCutsProcessPaylo
         mode = (payload.mode or "short").strip().lower()
         max_limit = 3 if mode == "long" else 8
         limit = max(1, min(int(payload.limit or 5), max_limit))
+        profile = None
+        if payload.channel_profile_id is not None:
+            db = SessionLocal()
+            try:
+                profile = _resolve_youtube_channel_profile(db, payload.channel_profile_id)
+            finally:
+                db.close()
+        else:
+            db = SessionLocal()
+            try:
+                profile = get_default_youtube_channel_profile(db)
+            finally:
+                db.close()
         result = process_youtube_video_for_cuts(
             payload.url,
             limit=limit,
             mode=mode,
             selection_strategy=payload.selection_strategy,
+            channel_profile_id=payload.channel_profile_id or (profile or {}).get("id"),
+            channel_profile_name=(profile or {}).get("name"),
+            channel_preferences=profile or None,
+            burn_subtitles=payload.burn_subtitles,
         )
-        result["youtube_auth"] = _youtube_auth_snapshot(refresh=False)
+        result["youtube_auth"] = _youtube_auth_snapshot(payload.channel_profile_id or (profile or {}).get("id"), refresh=False)
         for item in result.get("cuts") or []:
-            item["publish_draft"] = build_youtube_cut_publish_draft(result["job_id"], int(item.get("cut_id") or 0))
+            draft = build_youtube_cut_publish_draft(result["job_id"], int(item.get("cut_id") or 0))
+            draft["channel_profile_id"] = (profile or {}).get("id")
+            draft["channel_profile_name"] = (profile or {}).get("name") or ""
+            item["publish_draft"] = draft
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2398,10 +3535,57 @@ def dashboard_api_youtube_cuts_process(payload: DashboardYoutubeCutsProcessPaylo
         raise HTTPException(status_code=502, detail=f"Falha ao consultar YouTube: {e}")
 
 
-@app.get("/dashboard/api/youtube/oauth/status")
-def dashboard_api_youtube_oauth_status(_: str = Depends(require_manager_auth)):
+@app.get("/dashboard/api/youtube/channels")
+def dashboard_api_youtube_channels(_: str = Depends(require_manager_auth)):
+    db = SessionLocal()
     try:
-        return {"ok": True, "youtube_auth": _youtube_auth_snapshot(refresh=True)}
+        profiles = fetch_youtube_channel_profiles(db)
+        return {"ok": True, "profiles": [_youtube_channel_public_profile(item) for item in profiles]}
+    finally:
+        db.close()
+
+
+@app.post("/dashboard/api/youtube/channels")
+def dashboard_api_youtube_channel_create(payload: DashboardYoutubeChannelPayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        profile = create_youtube_channel_profile(db, _youtube_channel_profile_payload(payload))
+        return {"ok": True, "profile": _youtube_channel_public_profile(profile)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.post("/dashboard/api/youtube/channels/{profile_id}")
+def dashboard_api_youtube_channel_update(profile_id: int, payload: DashboardYoutubeChannelPayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        current = get_youtube_channel_profile(db, profile_id)
+        profile = update_youtube_channel_profile(db, profile_id, _youtube_channel_profile_payload(payload, current=current))
+        return {"ok": True, "profile": _youtube_channel_public_profile(profile)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.delete("/dashboard/api/youtube/channels/{profile_id}")
+def dashboard_api_youtube_channel_delete(profile_id: int, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        deleted = delete_youtube_channel_profile(db, profile_id)
+        return {"ok": True, "deleted": _youtube_channel_public_profile(deleted)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.get("/dashboard/api/youtube/oauth/status")
+def dashboard_api_youtube_oauth_status(channel_profile_id: int | None = None, _: str = Depends(require_manager_auth)):
+    try:
+        return {"ok": True, "youtube_auth": _youtube_auth_snapshot(channel_profile_id, refresh=True)}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except httpx.HTTPError as e:
@@ -2409,13 +3593,56 @@ def dashboard_api_youtube_oauth_status(_: str = Depends(require_manager_auth)):
 
 
 @app.get("/dashboard/api/youtube/oauth/url")
-def dashboard_api_youtube_oauth_url(_: str = Depends(require_manager_auth)):
+def dashboard_api_youtube_oauth_url(channel_profile_id: int | None = None, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
     try:
+        profile = _resolve_youtube_channel_profile(db, channel_profile_id)
         state = secrets.token_hex(16)
-        _write_env_updates({"YOUTUBE_OAUTH_STATE": state})
-        return {"ok": True, **build_youtube_auth_url(state)}
+        update_youtube_channel_profile(db, int(profile["id"]), {"oauth_state": state})
+        return {
+            "ok": True,
+            "channel_profile_id": int(profile["id"]),
+            "channel_profile_name": profile["name"],
+            **build_youtube_auth_url(
+                state,
+                client_id=str(profile.get("client_id") or ""),
+                redirect_uri=str(profile.get("redirect_uri") or ""),
+            ),
+        }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.get("/dashboard/api/youtube/trends/themes")
+def dashboard_api_youtube_trends_themes(
+    recent_limit: int = 4,
+    videos_per_topic: int = 4,
+    channel_profile_id: int | None = None,
+    _: str = Depends(require_manager_auth),
+):
+    try:
+        access_token, profile = _youtube_access_token_ready(channel_profile_id)
+        result = build_channel_trend_ideas(
+            access_token,
+            recent_limit=max(1, min(int(recent_limit or 4), 16)),
+            videos_per_topic=max(1, min(int(videos_per_topic or 4), 10)),
+            channel_profile_name=str(profile.get("name") or ""),
+            channel_preferences=profile,
+        )
+        result["target_profile"] = {
+            "id": int(profile["id"]),
+            "name": profile["name"],
+            "handle": profile.get("handle") or "",
+            "channel_title": profile.get("channel_title") or "",
+            "channel_custom_url": profile.get("channel_custom_url") or "",
+        }
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Falha ao buscar videos em alta no YouTube: {e}")
 
 
 @app.post("/dashboard/api/youtube/cuts/publish")
@@ -2425,8 +3652,9 @@ def dashboard_api_youtube_cuts_publish(payload: DashboardYoutubeCutPublishPayloa
         title = (payload.title or draft["title"]).strip()
         description = (payload.description or draft["description"]).strip()
         privacy_status = (payload.privacy_status or draft["privacy_status"]).strip().lower()
+        publish_at = (payload.publish_at or "").strip()
         mode = (payload.mode or draft.get("mode") or "short").strip().lower()
-        access_token = _youtube_access_token_ready()
+        access_token, profile = _youtube_access_token_ready(payload.channel_profile_id or draft.get("channel_profile_id"))
         video_path = youtube_cut_video_path(payload.job_id, payload.cut_id)
         published = upload_youtube_short(
             access_token,
@@ -2434,6 +3662,7 @@ def dashboard_api_youtube_cuts_publish(payload: DashboardYoutubeCutPublishPayloa
             title=title,
             description=description,
             privacy_status=privacy_status,
+            publish_at=publish_at or None,
         )
         video_id = str(published.get("id") or "").strip()
         thumbnail_result = None
@@ -2450,7 +3679,10 @@ def dashboard_api_youtube_cuts_publish(payload: DashboardYoutubeCutPublishPayloa
             "job_id": payload.job_id,
             "cut_id": payload.cut_id,
             "mode": mode,
+            "channel_profile_id": int(profile["id"]),
+            "channel_profile_name": profile["name"],
             "privacy_status": privacy_status,
+            "publish_at": str(published.get("publishAt") or publish_at or ""),
             "youtube_video_id": video_id,
             "youtube_url": f"https://www.youtube.com/watch?v={video_id}" if video_id else "",
             "thumbnail_result": thumbnail_result,
@@ -2485,7 +3717,7 @@ def dashboard_api_automation_social_run_now(payload: DashboardJobRunPayload, _: 
     settings = _env_settings_snapshot()
     platform, mode = _normalize_auto_social_action(
         payload.platform or settings.get("auto_social_platform") or "facebook",
-        payload.mode or settings.get("auto_social_mode") or "feed",
+        payload.mode or settings.get("auto_social_mode") or "feed_story_reel",
     )
     limit = int(payload.limit or settings.get("auto_social_limit") or 1)
     result = execute_social_run(platform, mode, limit)
@@ -2785,21 +4017,40 @@ def youtube_oauth_callback(code: str | None = None, state: str | None = None, er
     if not code:
         return HTMLResponse("<html><body><h2>OAuth YouTube incompleto</h2><p>Code nao recebido no callback.</p></body></html>", status_code=400)
 
-    expected_state = (os.getenv("YOUTUBE_OAUTH_STATE") or "").strip()
-    if expected_state and state and expected_state != state:
-        return HTMLResponse("<html><body><h2>OAuth YouTube recusado</h2><p>State invalido no callback.</p></body></html>", status_code=400)
-
+    db = SessionLocal()
     try:
-        tokens = exchange_youtube_code(code)
-        updates = _youtube_token_updates(tokens, keep_existing_refresh=True)
-        updates["YOUTUBE_OAUTH_STATE"] = ""
-        _write_env_updates(updates)
-        channel = _youtube_auth_snapshot(refresh=False).get("channel") or {}
+        profile = get_youtube_channel_profile_by_state(db, state or "")
+        if not profile:
+            return HTMLResponse("<html><body><h2>OAuth YouTube recusado</h2><p>State invalido no callback.</p></body></html>", status_code=400)
+        tokens = exchange_youtube_code(
+            code,
+            client_id=str(profile.get("client_id") or ""),
+            client_secret=str(profile.get("client_secret") or ""),
+            redirect_uri=str(profile.get("redirect_uri") or ""),
+        )
+        updates = _youtube_profile_token_updates(tokens, profile)
+        updates["oauth_state"] = ""
+        access_token = str(updates.get("access_token") or profile.get("access_token") or "").strip()
+        if access_token:
+            channel = fetch_youtube_channel(access_token)
+            thumbnails = channel.get("thumbnails") or {}
+            updates["channel_id"] = channel.get("id") or None
+            updates["channel_title"] = channel.get("title") or None
+            updates["channel_custom_url"] = channel.get("custom_url") or None
+            updates["channel_thumbnail_url"] = (
+                (thumbnails.get("high") or {}).get("url")
+                or (thumbnails.get("medium") or {}).get("url")
+                or (thumbnails.get("default") or {}).get("url")
+                or None
+            )
+        update_youtube_channel_profile(db, int(profile["id"]), updates)
+        channel = _youtube_auth_snapshot(int(profile["id"]), refresh=False).get("channel") or {}
         channel_title = channel.get("title") or "canal conectado"
         return HTMLResponse(
             "<html><body>"
             "<h2>YouTube conectado</h2>"
-            f"<p>Conta autorizada com sucesso: {channel_title}</p>"
+            f"<p>Conta autorizada com sucesso para o perfil: {profile.get('name') or 'Canal'}</p>"
+            f"<p>Canal autenticado: {channel_title}</p>"
             "<p>Voce pode fechar esta aba e voltar ao manager.</p>"
             "</body></html>"
         )
@@ -2807,6 +4058,8 @@ def youtube_oauth_callback(code: str | None = None, state: str | None = None, er
         raise HTTPException(status_code=400, detail=str(e))
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Falha no callback do YouTube: {e}")
+    finally:
+        db.close()
 
 
 @app.get("/integrations/meli/callback")

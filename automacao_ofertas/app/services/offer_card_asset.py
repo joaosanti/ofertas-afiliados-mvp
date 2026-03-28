@@ -42,6 +42,33 @@ def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def normalize_installments_text(value: Any) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+
+    money_pattern = re.compile(r"R\$\s*(\d{1,3}(?:\.\d{3})*|\d+)(?!,\d{2})\b")
+    return money_pattern.sub(lambda match: f"R$ {match.group(1)},00", text)
+
+
+def clean_offer_highlight_text(value: Any, *, discount: int = 0, installments: str = "") -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+
+    if discount > 0:
+        text = re.sub(rf"^\s*{discount}\s*%\s*off\b[:\-\s]*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\s*\d+\s*x\s*R\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})?\b[:\-\s]*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\s*(parcelamento|parcela|parcelas)\s*[:\-]?\s*", "", text, flags=re.IGNORECASE)
+
+    normalized_installments = normalize_installments_text(installments)
+    if normalized_installments:
+        escaped_installments = re.escape(normalized_installments)
+        text = re.sub(rf"^\s*{escaped_installments}\b[:\-\s]*", "", text, flags=re.IGNORECASE)
+
+    return _clean_text(text).strip(" -|,.;")
+
+
 def _discount_percent(offer: dict[str, Any]) -> int:
     explicit = offer.get("desconto_percentual")
     if explicit not in (None, ""):
@@ -83,20 +110,12 @@ def _offer_layout_data(offer: dict[str, Any]) -> dict[str, Any]:
     discount = _discount_percent(offer)
     pix_price = offer.get("preco_pix")
     has_pix_price = pix_price not in (None, "", 0, 0.0)
-    installments = _clean_text(offer.get("parcelas_texto"))
+    installments = normalize_installments_text(offer.get("parcelas_texto"))
     shipping = _clean_text(offer.get("frete_texto"))
-    promo = _clean_text(offer.get("promocao_texto"))
+    promo = clean_offer_highlight_text(offer.get("promocao_texto"), discount=discount, installments=installments)
+    coupon = _clean_text(offer.get("cupom"))
     rating = _format_rating(offer.get("avaliacao_nota"))
     rating_count = _format_rating_count(offer.get("avaliacao_total"))
-
-    if has_old_price and discount > 0:
-        variant = "deal"
-    elif has_pix_price and installments:
-        variant = "payment"
-    elif shipping or rating:
-        variant = "trust"
-    else:
-        variant = "clean"
 
     badges: list[str] = []
     if shipping:
@@ -105,12 +124,17 @@ def _offer_layout_data(offer: dict[str, Any]) -> dict[str, Any]:
         badges.append(f"{rating} estrelas ({rating_count})")
     elif rating:
         badges.append(f"{rating} estrelas")
-    if promo:
-        badges.append(promo[:58].rstrip(" -|,.;") + ("..." if len(promo) > 58 else ""))
     badges = badges[:2]
 
+    highlight_text = ""
+    if coupon:
+        highlight_text = f"Cupom {coupon}"
+    elif promo:
+        highlight_text = promo[:64].rstrip(" -|,.;") + ("..." if len(promo) > 64 else "")
+    elif shipping:
+        highlight_text = shipping
+
     return {
-        "variant": variant,
         "discount": discount,
         "has_old_price": has_old_price,
         "old_price_text": _money(old_price) if has_old_price else "",
@@ -118,10 +142,12 @@ def _offer_layout_data(offer: dict[str, Any]) -> dict[str, Any]:
         "pix_price_text": _money(pix_price) if has_pix_price else "",
         "installments": installments,
         "shipping": shipping,
+        "coupon": coupon,
         "rating": rating,
         "rating_count": rating_count,
         "promo": promo,
         "badges": badges,
+        "highlight_text": highlight_text,
     }
 
 
@@ -165,6 +191,13 @@ def _load_font(size: int, bold: bool = False):
         if Path(candidate).exists():
             return ImageFont.truetype(candidate, size=size)
     return ImageFont.load_default()
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    value = _clean_text(text)
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)].rstrip(" -|,.;") + "..."
 
 
 def _contain_remote_product_image(url: str, size: tuple[int, int]) -> Image.Image | None:
@@ -227,8 +260,7 @@ def generate_offer_square_card_asset(offer: dict[str, Any], *, suffix: str = "ca
 
     brand_font = _load_font(42, bold=True)
     title_font = _load_font(36, bold=True)
-    meta_font = _load_font(22, bold=True)
-    price_label_font = _load_font(18, bold=True)
+    price_label_font = _load_font(20, bold=True)
     site_font = _load_font(28, bold=True)
 
     logo_drawn = False
@@ -257,73 +289,71 @@ def generate_offer_square_card_asset(offer: dict[str, Any], *, suffix: str = "ca
     layout = _offer_layout_data(offer)
     current_price_text = layout["current_price_text"]
     old_price_text = layout["old_price_text"]
-    pix_price_text = layout["pix_price_text"]
     discount = layout["discount"]
-    variant = layout["variant"]
 
-    hero_box = (606, 696, 992, 844)
-    draw.rounded_rectangle(hero_box, radius=36, fill="#40156f")
-    draw.rounded_rectangle((hero_box[0] + 12, hero_box[1] + 12, hero_box[2] - 12, hero_box[3] - 12), radius=30, fill="#542193")
+    hero_box = (566, 646, 992, 886)
+    draw.rounded_rectangle(hero_box, radius=40, fill="#3a116d")
+    draw.rounded_rectangle((hero_box[0] + 12, hero_box[1] + 12, hero_box[2] - 12, hero_box[3] - 12), radius=34, fill="#52208f")
 
-    badge_label_map = {
-        "deal": "De",
-        "payment": "No Pix",
-        "trust": "Oferta de hoje",
-        "clean": "A partir de",
-    }
-    main_label = badge_label_map.get(variant, "A partir de")
-    label_width = draw.textbbox((0, 0), main_label, font=price_label_font)[2]
-    current_font = _fit_font_for_width(draw, current_price_text, max_width=250, start_size=52, min_size=30, bold=True)
-    current_width = draw.textbbox((0, 0), current_price_text, font=current_font)[2]
+    label_pill = (hero_box[0] + 26, hero_box[1] + 24, hero_box[0] + 160, hero_box[1] + 62)
+    draw.rounded_rectangle(label_pill, radius=18, fill="#6a33b8")
+    top_label = "Oferta"
+    if layout["pix_price_text"]:
+        top_label = "No Pix"
+    draw.text((label_pill[0] + 18, label_pill[1] + 6), top_label, font=price_label_font, fill="#ffdf6c")
 
-    icon_left = hero_box[0] + 30
-    icon_top = hero_box[1] + 44
-    draw.ellipse((icon_left, icon_top, icon_left + 60, icon_top + 60), fill="#6d36be")
+    if discount > 0:
+        discount_text = f"{discount}% OFF"
+        discount_font = _fit_font_for_width(draw, discount_text, max_width=110, start_size=22, min_size=16, bold=True)
+        pill_box = (hero_box[2] - 152, hero_box[1] + 24, hero_box[2] - 26, hero_box[1] + 62)
+        draw.rounded_rectangle(pill_box, radius=18, fill="#ffcb19")
+        pill_text_width = draw.textbbox((0, 0), discount_text, font=discount_font)[2]
+        draw.text((pill_box[0] + ((pill_box[2] - pill_box[0] - pill_text_width) / 2), pill_box[1] + 6), discount_text, font=discount_font, fill="#40156f")
 
-    text_left = icon_left + 78
-    draw.text((text_left, hero_box[1] + 18), main_label, font=price_label_font, fill="#f7d84d")
-    draw.text((text_left, hero_box[1] + 44), current_price_text, font=current_font, fill="#ffcb19")
+    price_key_font = _load_font(24, bold=True)
+    price_old_font = _fit_font_for_width(draw, f"De {old_price_text}", max_width=330, start_size=28, min_size=20, bold=False)
+    price_current_font = _fit_font_for_width(draw, current_price_text, max_width=360, start_size=50, min_size=30, bold=True)
+    details_font = _fit_font_for_width(draw, layout["installments"] or (layout["pix_price_text"] and f"Pix: {layout['pix_price_text']}") or (layout["shipping"] or "Confira no site"), max_width=350, start_size=24, min_size=18, bold=False)
 
-    detail_y = hero_box[1] + 104
-    detail_font = _load_font(22, bold=True)
-    subdetail_font = _load_font(20, bold=False)
+    text_left = hero_box[0] + 34
+    line_y = hero_box[1] + 82
 
-    if variant == "deal":
-        old_font = _fit_font_for_width(draw, old_price_text, max_width=180, start_size=24, min_size=18, bold=False)
-        old_x = text_left
-        draw.text((old_x, detail_y), old_price_text, font=old_font, fill="#e2d7f7")
-        old_bbox = draw.textbbox((old_x, detail_y), old_price_text, font=old_font)
-        strike_y = (old_bbox[1] + old_bbox[3]) / 2
-        draw.line((old_bbox[0], strike_y, old_bbox[2], strike_y), fill="#ffb7b7", width=3)
-        if discount > 0:
-            discount_text = f"{discount}% OFF"
-            discount_font = _fit_font_for_width(draw, discount_text, max_width=120, start_size=24, min_size=18, bold=True)
-            pill_box = (hero_box[2] - 148, hero_box[1] + 96, hero_box[2] - 28, hero_box[1] + 132)
-            draw.rounded_rectangle(pill_box, radius=18, fill="#ffcb19")
-            pill_text_width = draw.textbbox((0, 0), discount_text, font=discount_font)[2]
-            draw.text((pill_box[0] + ((pill_box[2] - pill_box[0] - pill_text_width) / 2), pill_box[1] + 4), discount_text, font=discount_font, fill="#40156f")
-        draw.text((text_left, detail_y + 30), f"Por {current_price_text}", font=detail_font, fill="#ffffff")
-    elif variant == "payment":
-        draw.text((text_left, detail_y), pix_price_text, font=detail_font, fill="#ffffff")
-        installments = layout["installments"] or ""
-        if installments:
-            draw.text((text_left, detail_y + 30), installments[:28], font=subdetail_font, fill="#e2d7f7")
-    elif variant == "trust":
-        shipping = layout["shipping"] or ""
-        rating = layout["rating"]
-        rating_count = layout["rating_count"]
-        if shipping:
-            draw.text((text_left, detail_y), shipping[:28], font=detail_font, fill="#ffffff")
-        if rating and rating_count:
-            draw.text((text_left, detail_y + 30), f"{rating}/5 ({rating_count})", font=subdetail_font, fill="#e2d7f7")
-        elif rating:
-            draw.text((text_left, detail_y + 30), f"{rating}/5", font=subdetail_font, fill="#e2d7f7")
+    if layout["has_old_price"]:
+        old_line = f"De {old_price_text}"
+        draw.text((text_left, line_y), old_line, font=price_old_font, fill="#e8dbff")
+        old_bbox = draw.textbbox((text_left, line_y), old_line, font=price_old_font)
+        strike_y = int((old_bbox[1] + old_bbox[3]) / 2)
+        draw.line((old_bbox[0] + 34, strike_y, old_bbox[2], strike_y), fill="#ffb7b7", width=3)
+        line_y += 38
     else:
-        promo = layout["promo"] or ""
-        if promo:
-            draw.text((text_left, detail_y), promo[:28], font=subdetail_font, fill="#e2d7f7")
+        line_y += 10
 
-    chip_y = 848
+    current_line = current_price_text
+    draw.text((text_left, line_y), current_line, font=price_current_font, fill="#ffcb19")
+    line_y += 62
+
+    details_line = layout["installments"] or ""
+    if not details_line and layout["pix_price_text"]:
+        details_line = f"Pix: {layout['pix_price_text']}"
+    if not details_line:
+        details_line = layout["shipping"] or "Acesse no site para ver mais"
+    draw.text((text_left, line_y), _truncate_text(details_line, 30), font=details_font, fill="#efe6ff")
+
+    chip_y = 850
+    highlight_text = layout["highlight_text"]
+    if highlight_text:
+        highlight_max_width = max(260, hero_box[0] - 120)
+        chip_font = _fit_font_for_width(draw, highlight_text, max_width=highlight_max_width - 48, start_size=24, min_size=18, bold=True)
+        chip_text = _truncate_text(highlight_text, 40)
+        chip_bbox = draw.textbbox((0, 0), chip_text, font=chip_font)
+        chip_width = chip_bbox[2] - chip_bbox[0]
+        chip_box = (94, chip_y, min(hero_box[0] - 22, 94 + chip_width + 56), chip_y + 48)
+        chip_fill = "#eaf0ff" if not layout["coupon"] else "#fff2c2"
+        chip_text_fill = "#29426d" if not layout["coupon"] else "#734c00"
+        draw.rounded_rectangle(chip_box, radius=22, fill=chip_fill)
+        draw.text((chip_box[0] + 24, chip_box[1] + 8), chip_text, font=chip_font, fill=chip_text_fill)
+        chip_y += 56
+
     for chip in layout["badges"]:
         chip_text = chip
         chip_font = _fit_font_for_width(draw, chip_text, max_width=892, start_size=22, min_size=17, bold=True)

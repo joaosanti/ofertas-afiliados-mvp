@@ -6,13 +6,13 @@ $pdo = db();
 $flash = admin_flash_get();
 $socialPreviewPayload = $_SESSION['admin_social_preview'] ?? null;
 unset($_SESSION['admin_social_preview']);
+$pendingSocialJob = $_SESSION['admin_social_pending_job'] ?? null;
 $search = trim((string) ($_GET['q'] ?? ''));
 $store = trim((string) ($_GET['loja'] ?? ''));
 $limitDefault = 10;
 $limit = (int) ($_GET['limit'] ?? $limitDefault);
 $limit = max(1, min($limit, 30));
 $page = max(1, (int) ($_GET['page'] ?? 1));
-$resultPayload = null;
 
 function social_admin_query(array $overrides = []) {
   global $search, $store, $limit, $page;
@@ -30,13 +30,22 @@ function social_admin_query(array $overrides = []) {
   }));
 }
 
+function social_offer_video_url(array $offer): string {
+  $manualVideo = trim((string) tag_url_decode($offer['tags'] ?? '', 'offer_video_url:'));
+  if ($manualVideo !== '') {
+    return $manualVideo;
+  }
+  return trim((string) tag_url_decode($offer['tags'] ?? '', 'shopee_video_url:'));
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   admin_csrf_check_or_die();
   $action = (string) ($_POST['acao'] ?? '');
+  $redirectQuery = social_admin_query(['page' => 1]);
 
   if ($action === 'publish_selected') {
     $platform = trim((string) ($_POST['platform'] ?? 'facebook'));
-    $mode = trim((string) ($_POST['mode'] ?? 'feed'));
+    $mode = trim((string) ($_POST['mode'] ?? 'feed_story_reel'));
     $offerIds = array_values(array_unique(array_filter(array_map('intval', (array) ($_POST['offer_ids'] ?? [])))));
 
     if (!$offerIds) {
@@ -50,33 +59,57 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       $args[] = '--offer-id';
       $args[] = (string) $offerId;
     }
-    $resultPayload = admin_run_python_job($args);
+    $_SESSION['admin_social_preview'] = null;
+    $jobStart = admin_start_python_job_async($args, [
+      'kind' => 'social_publish_selected',
+      'target_tab' => 'social',
+    ]);
+    if (!empty($jobStart['ok'])) {
+      $_SESSION['admin_social_pending_job'] = [
+        'job_id' => (string) ($jobStart['job_id'] ?? ''),
+        'kind' => 'social_publish_selected',
+        'platform' => $platform,
+        'mode' => $mode,
+        'redirect_url' => '/admin/social.php?' . $redirectQuery,
+      ];
+      admin_flash_set('success', 'Publicacao iniciada. Acompanhe o progresso nesta tela.');
+    } else {
+      admin_flash_set('error', (string) ($jobStart['error'] ?? 'Falha ao iniciar o job social.'));
+    }
   } elseif ($action === 'publish_auto') {
     $platform = trim((string) ($_POST['platform'] ?? 'both'));
-    $mode = trim((string) ($_POST['mode'] ?? 'feed_story'));
+    $mode = trim((string) ($_POST['mode'] ?? 'feed_story_reel'));
     $autoLimit = max(1, min((int) ($_POST['auto_limit'] ?? 1), 10));
-    $resultPayload = admin_run_python_job(['social', '--platform', $platform, '--mode', $mode, '--limit', (string) $autoLimit]);
-  }
-
-  if ($resultPayload !== null) {
     $_SESSION['admin_social_preview'] = null;
-    if (!empty($resultPayload['ok'])) {
-      $resultData = is_array($resultPayload['result'] ?? null) ? $resultPayload['result'] : null;
-      if ($resultData && ($resultData['platform'] ?? '') === 'whatsapp') {
-        $_SESSION['admin_social_preview'] = $resultData;
-      }
-      admin_flash_set('success', 'Job enviado para o Python. Confira o resultado no historico abaixo.');
+    $jobStart = admin_start_python_job_async(['social', '--platform', $platform, '--mode', $mode, '--limit', (string) $autoLimit], [
+      'kind' => 'social_publish_auto',
+      'target_tab' => 'social',
+    ]);
+    if (!empty($jobStart['ok'])) {
+      $_SESSION['admin_social_pending_job'] = [
+        'job_id' => (string) ($jobStart['job_id'] ?? ''),
+        'kind' => 'social_publish_auto',
+        'platform' => $platform,
+        'mode' => $mode,
+        'redirect_url' => '/admin/social.php?' . $redirectQuery,
+      ];
+      admin_flash_set('success', 'Job social iniciado. Acompanhe o progresso nesta tela.');
     } else {
-      admin_flash_set('error', (string) ($resultPayload['error'] ?? 'Falha ao executar o job Python.'));
+      admin_flash_set('error', (string) ($jobStart['error'] ?? 'Falha ao iniciar o job social.'));
     }
-
-    header('Location: /admin/social.php?' . social_admin_query(['page' => 1]));
-    exit;
   }
+
+  header('Location: /admin/social.php?' . $redirectQuery);
+  exit;
 }
 
 $offersPayload = admin_fetch_social_candidates($pdo, $search, $store, $limit, $page);
 $offers = (array) ($offersPayload['items'] ?? []);
+foreach ($offers as &$offer) {
+  $offer['video_url'] = social_offer_video_url((array) $offer);
+  $offer['has_video'] = $offer['video_url'] !== '';
+}
+unset($offer);
 $offersTotal = (int) ($offersPayload['total'] ?? 0);
 $page = (int) ($offersPayload['page'] ?? $page);
 $totalPages = (int) ($offersPayload['pages'] ?? 1);
@@ -103,7 +136,8 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
   <link rel="stylesheet" href="/assets/css/admin.css?v=<?= urlencode($adminCssVersion) ?>">
 </head>
 <body class="admin-page">
-<header>
+<?php admin_render_header('social'); ?>
+<template data-legacy-admin-header>
   <div class="container admin-header">
     <div class="admin-brand">
       <a class="admin-brand-link" href="/admin/ofertas.php">
@@ -131,7 +165,7 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
       <a class="badge" href="/admin/logout.php">Sair</a>
     </div>
   </div>
-</header>
+</template>
 
 <main class="container admin-shell">
   <?php if ($flash): ?>
@@ -150,6 +184,37 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
       </div>
     </div>
   </section>
+
+  <?php if (is_array($pendingSocialJob) && !empty($pendingSocialJob['job_id'])): ?>
+    <?php
+      $pendingPlatform = (string) ($pendingSocialJob['platform'] ?? 'both');
+      $pendingMode = (string) ($pendingSocialJob['mode'] ?? 'feed_story_reel');
+      $progressTitle = 'Publicando nas redes sociais';
+      if ($pendingPlatform === 'instagram') {
+        $progressTitle = 'Publicando no Instagram';
+      } elseif ($pendingPlatform === 'facebook') {
+        $progressTitle = 'Publicando no Facebook';
+      } elseif ($pendingPlatform === 'whatsapp') {
+        $progressTitle = 'Preparando WhatsApp';
+      }
+    ?>
+    <section class="admin-panel admin-progress-card" id="social-progress-card" data-job-id="<?= h((string) $pendingSocialJob['job_id']) ?>" data-status-url="/admin/social_job_status.php?job_id=<?= urlencode((string) $pendingSocialJob['job_id']) ?>">
+      <div class="admin-panel-head">
+        <div>
+          <h2 class="admin-section-title"><?= h($progressTitle) ?></h2>
+          <p id="social-progress-label">Preparando o processamento no servidor.</p>
+        </div>
+        <div class="admin-meta-row">
+          <span class="admin-meta-chip admin-meta-chip-soft" id="social-progress-time">0s</span>
+          <span class="admin-meta-chip admin-meta-chip-soft"><?= h($pendingPlatform) ?>/<?= h($pendingMode) ?></span>
+        </div>
+      </div>
+      <div class="admin-progress-bar" aria-hidden="true">
+        <div class="admin-progress-bar-fill" id="social-progress-fill" style="width: 10%;"></div>
+      </div>
+      <p class="admin-card-subtitle">No celular, a tela pode ficar aberta enquanto o painel atualiza automaticamente o andamento da publicacao.</p>
+    </section>
+  <?php endif; ?>
 
   <section class="admin-panel">
     <div class="admin-panel-head">
@@ -176,7 +241,8 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
           <select id="mode_auto" name="mode">
             <option value="feed">Feed</option>
             <option value="reel">Reel</option>
-            <option value="feed_story" selected>Feed + Story</option>
+            <option value="feed_story">Feed + Story</option>
+            <option value="feed_story_reel" selected>Feed + Story + Reel</option>
             <option value="story">Story</option>
             <option value="web">WhatsApp Web Local</option>
           </select>
@@ -222,18 +288,15 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
           <label for="limit">Limite</label>
           <input id="limit" type="number" name="limit" value="<?= (int) $limit ?>" min="1" max="30">
         </div>
-        <div class="admin-field">
-          <label for="page">Pagina</label>
-          <input id="page" type="number" name="page" value="<?= (int) $page ?>" min="1" max="<?= max(1, $totalPages) ?>">
-        </div>
         <div class="admin-field admin-field-submit">
           <label>&nbsp;</label>
           <button class="btn-link primary" type="submit">Filtrar</button>
         </div>
       </div>
+      <input type="hidden" name="page" value="1">
     </form>
 
-    <form method="post">
+    <form method="post" id="social-manual-form">
       <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
       <input type="hidden" name="acao" value="publish_selected">
       <div class="admin-field-grid admin-field-grid-compact" style="margin-top:18px;">
@@ -251,7 +314,8 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
           <select id="mode_manual" name="mode">
             <option value="feed">Feed</option>
             <option value="reel">Reel</option>
-            <option value="feed_story" selected>Feed + Story</option>
+            <option value="feed_story">Feed + Story</option>
+            <option value="feed_story_reel" selected>Feed + Story + Reel</option>
             <option value="story">Story</option>
             <option value="web">WhatsApp Web Local</option>
           </select>
@@ -317,13 +381,14 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
         <div class="admin-empty" style="margin-top:18px;">Nenhuma oferta elegível para publicação com estes filtros.</div>
       <?php else: ?>
         <div class="admin-meta-row" style="margin-top:18px;">
-          <span class="admin-meta-chip"><?= (int) $offersTotal ?> ofertas elegiveis</span>
-          <span class="admin-meta-chip">pagina <?= (int) $page ?> de <?= (int) $totalPages ?></span>
+          <span class="admin-meta-chip"><?= (int) $offersTotal ?> ofertas eleg&iacute;veis</span>
+          <span class="admin-meta-chip">P&aacute;gina <?= (int) $page ?> de <?= (int) $totalPages ?></span>
           <span class="admin-meta-chip" id="social-selected-count">0 selecionadas</span>
+          <button class="btn-link" type="button" id="social-clear-selection">Desmarcar selecionadas</button>
         </div>
         <div class="admin-offers-grid" style="margin-top:18px;">
           <?php foreach ($offers as $offer): ?>
-            <article class="admin-offer-card">
+            <article class="admin-offer-card" data-social-offer-card="<?= !empty($offer['has_video']) ? '1' : '0' ?>">
               <div class="admin-offer-layout">
                 <div>
                   <img class="admin-offer-thumb" src="<?= h($offer['imagem_url']) ?>" alt="<?= h($offer['titulo']) ?>">
@@ -346,6 +411,10 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                     <?php if (!empty($offer['cupom'])): ?>
                       <span class="admin-meta-chip">cupom <?= h($offer['cupom']) ?></span>
                     <?php endif; ?>
+                    <?php if (!empty($offer['has_video'])): ?>
+                      <span class="admin-status warn">Vídeo cadastrado</span>
+                      <span class="admin-status ok" data-social-video-badge>Vai usar vídeo</span>
+                    <?php endif; ?>
                     <span class="admin-status ok">Afiliado OK</span>
                   </div>
                 </div>
@@ -358,7 +427,9 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                   </div>
                   <div class="admin-side-card">
                     <strong>Link afiliado</strong>
-                    <div class="admin-url-box"><?= h($offer['url_afiliado']) ?></div>
+                    <div class="admin-card-actions" style="margin-top:10px;">
+                      <a class="btn-link" href="<?= h($offer['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Link afiliado</a>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -368,7 +439,7 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
         <?php if ($totalPages > 1): ?>
           <div class="admin-meta-row" style="margin-top:18px; gap:10px; flex-wrap:wrap;">
             <?php if ($page > 1): ?>
-              <a class="btn-link" href="/admin/social.php?<?= h(social_admin_query(['page' => $page - 1])) ?>">Pagina anterior</a>
+              <a class="btn-link" href="/admin/social.php?<?= h(social_admin_query(['page' => $page - 1])) ?>">P&aacute;gina anterior</a>
             <?php endif; ?>
             <?php for ($pageNumber = max(1, $page - 2); $pageNumber <= min($totalPages, $page + 2); $pageNumber++): ?>
               <a class="btn-link <?= $pageNumber === $page ? 'primary' : '' ?>" href="/admin/social.php?<?= h(social_admin_query(['page' => $pageNumber])) ?>">
@@ -376,7 +447,7 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
               </a>
             <?php endfor; ?>
             <?php if ($page < $totalPages): ?>
-              <a class="btn-link" href="/admin/social.php?<?= h(social_admin_query(['page' => $page + 1])) ?>">Proxima pagina</a>
+              <a class="btn-link" href="/admin/social.php?<?= h(social_admin_query(['page' => $page + 1])) ?>">Pr&oacute;xima p&aacute;gina</a>
             <?php endif; ?>
           </div>
         <?php endif; ?>
@@ -444,10 +515,66 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
   })();
 
   (function () {
+    var progressCard = document.getElementById('social-progress-card');
+    if (!progressCard) {
+      return;
+    }
+
+    var statusUrl = progressCard.getAttribute('data-status-url');
+    var fill = document.getElementById('social-progress-fill');
+    var label = document.getElementById('social-progress-label');
+    var elapsed = document.getElementById('social-progress-time');
+    var finished = false;
+
+    function formatElapsed(seconds) {
+      var total = Math.max(0, Number(seconds) || 0);
+      if (total < 60) {
+        return total + 's';
+      }
+      var minutes = Math.floor(total / 60);
+      var rest = total % 60;
+      return minutes + 'm ' + rest + 's';
+    }
+
+    async function pollStatus() {
+      if (finished || !statusUrl) {
+        return;
+      }
+      try {
+        var response = await fetch(statusUrl, { credentials: 'same-origin', cache: 'no-store' });
+        var payload = await response.json();
+        if (!payload || !payload.ok) {
+          window.setTimeout(pollStatus, 2500);
+          return;
+        }
+        if (fill) {
+          fill.style.width = Math.max(8, Math.min(100, Number(payload.progress_percent) || 10)) + '%';
+        }
+        if (label && payload.progress_label) {
+          label.textContent = payload.progress_label;
+        }
+        if (elapsed) {
+          elapsed.textContent = formatElapsed(payload.elapsed_seconds);
+        }
+        if (payload.status === 'success' || payload.status === 'error') {
+          finished = true;
+          window.location.href = payload.redirect_url || '/admin/social.php';
+          return;
+        }
+      } catch (error) {
+      }
+      window.setTimeout(pollStatus, 2500);
+    }
+
+    window.setTimeout(pollStatus, 1200);
+  })();
+
+  (function () {
     var storageKey = 'admin-social-selected-offers';
-    var form = document.querySelector('form[method="post"]');
+    var form = document.getElementById('social-manual-form');
     var checkboxes = document.querySelectorAll('[data-social-offer-checkbox]');
     var selectedCount = document.getElementById('social-selected-count');
+    var clearButton = document.getElementById('social-clear-selection');
     if (!form || !checkboxes.length) {
       return;
     }
@@ -488,6 +615,16 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
       });
     });
     updateSelectedCount(selected);
+
+    if (clearButton) {
+      clearButton.addEventListener('click', function () {
+        saveSelected([]);
+        checkboxes.forEach(function (checkbox) {
+          checkbox.checked = false;
+        });
+        updateSelectedCount([]);
+      });
+    }
 
     form.addEventListener('submit', function () {
       form.querySelectorAll('input[data-social-selected-hidden]').forEach(function (input) {
@@ -610,22 +747,57 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
       submit.textContent = isWhatsappWeb ? 'Preparar' : 'Publicar selecionadas';
     }
 
+    function manualModeUsesVideo() {
+      if (platform.value === 'whatsapp' || mode.value === 'web') {
+        return false;
+      }
+      return ['story', 'reel', 'feed_story', 'feed_story_reel'].indexOf(mode.value) !== -1;
+    }
+
+    function syncVideoBadges() {
+      var useVideo = manualModeUsesVideo();
+      document.querySelectorAll('[data-social-offer-card="1"] [data-social-video-badge]').forEach(function (badge) {
+        badge.hidden = !useVideo;
+      });
+    }
+
     function syncManualMode() {
       if (platform.value === 'whatsapp') {
         mode.value = 'web';
       } else if (mode.value === 'web') {
-        mode.value = 'feed_story';
+        mode.value = 'feed_story_reel';
       }
     }
 
     platform.addEventListener('change', function () {
       syncManualMode();
       syncManualSubmitLabel();
+      syncVideoBadges();
     });
     platform.addEventListener('change', syncManualSubmitLabel);
     mode.addEventListener('change', syncManualSubmitLabel);
+    mode.addEventListener('change', syncVideoBadges);
     syncManualMode();
     syncManualSubmitLabel();
+    syncVideoBadges();
+  })();
+
+  (function () {
+    var forms = document.querySelectorAll('#social-manual-form, .admin-filter-form');
+    forms.forEach(function (form) {
+      form.addEventListener('submit', function () {
+        var submitter = form.querySelector('button[type="submit"]');
+        if (!submitter) {
+          return;
+        }
+        submitter.disabled = true;
+        if (submitter.id === 'social-manual-submit') {
+          submitter.textContent = 'Iniciando...';
+        } else {
+          submitter.textContent = 'Processando...';
+        }
+      });
+    });
   })();
 </script>
 </body>

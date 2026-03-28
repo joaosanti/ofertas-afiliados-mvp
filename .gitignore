@@ -99,3 +99,6 @@ coverage/
 *.db
 *.bak
 *.tmp
+tmp/
+tmp_browser_profiles/
+tmp_*

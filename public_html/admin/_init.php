@@ -16,12 +16,63 @@ function admin_user_id() {
   return isset($_SESSION['admin_user_id']) ? (int) $_SESSION['admin_user_id'] : 0;
 }
 
+function admin_schema_bootstrap_marker_path() {
+  return __DIR__ . '/.admin_schema_bootstrap.json';
+}
+
+function admin_schema_bootstrap_version() {
+  return '20260324_1';
+}
+
+function admin_schema_bootstrap_should_skip() {
+  $path = admin_schema_bootstrap_marker_path();
+  if (!is_file($path)) {
+    return false;
+  }
+
+  $raw = @file_get_contents($path);
+  if (!is_string($raw) || trim($raw) === '') {
+    return false;
+  }
+
+  $decoded = json_decode($raw, true);
+  if (!is_array($decoded)) {
+    return false;
+  }
+
+  if ((string) ($decoded['version'] ?? '') !== admin_schema_bootstrap_version()) {
+    return false;
+  }
+
+  $checkedAt = strtotime((string) ($decoded['checked_at'] ?? ''));
+  if (!$checkedAt) {
+    return false;
+  }
+
+  $ttl = ((string) ($decoded['status'] ?? '') === 'success') ? 86400 * 30 : 900;
+  return (time() - $checkedAt) < $ttl;
+}
+
+function admin_schema_bootstrap_mark($status, $error = '') {
+  $payload = [
+    'version' => admin_schema_bootstrap_version(),
+    'status' => (string) $status,
+    'checked_at' => gmdate('c'),
+    'error' => trim((string) $error),
+  ];
+  @file_put_contents(admin_schema_bootstrap_marker_path(), json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+}
+
 function admin_bootstrap_schema() {
   static $done = false;
   if ($done) {
     return;
   }
   $done = true;
+
+  if (admin_schema_bootstrap_should_skip()) {
+    return;
+  }
 
   try {
     $pdo = db();
@@ -113,7 +164,11 @@ function admin_bootstrap_schema() {
       ");
       $stmt->execute([(int) $owner['id'], (string) $owner['login_name']]);
     }
+
+    admin_purge_zero_price_offers($pdo);
+    admin_schema_bootstrap_mark('success');
   } catch (Throwable $e) {
+    admin_schema_bootstrap_mark('error', $e->getMessage());
     // Mantem o admin funcional mesmo se a migracao falhar temporariamente.
   }
 }
@@ -169,6 +224,107 @@ function admin_require_login() {
   }
 }
 
+function admin_primary_nav_items() {
+  return [
+    ['id' => 'ofertas', 'label' => 'Ofertas', 'href' => '/admin/ofertas.php'],
+    ['id' => 'nova_oferta', 'label' => '+ Nova oferta', 'href' => '/admin/oferta_editar.php'],
+    ['id' => 'importar', 'label' => 'Importar', 'href' => '/admin/importar.php'],
+    ['id' => 'social', 'label' => 'Social', 'href' => '/admin/social.php'],
+    ['id' => 'youtube_cortes', 'label' => 'YouTube cortes', 'href' => '/admin/youtube_cortes.php'],
+    ['id' => 'site', 'label' => 'Ver site', 'href' => '/'],
+    ['id' => 'logout', 'label' => 'Sair', 'href' => '/admin/logout.php'],
+  ];
+}
+
+function admin_offer_subnav_items() {
+  return [
+    ['id' => 'catalogo', 'label' => 'Catalogo', 'href' => '/admin/ofertas.php'],
+    ['id' => 'clicks', 'label' => 'Cliques detalhados', 'href' => '/admin/ofertas_cliques.php'],
+  ];
+}
+
+function admin_render_offer_subnav($current = 'catalogo') {
+  $current = trim((string) $current);
+  ?>
+  <nav class="admin-subnav" aria-label="Submenu Ofertas">
+    <?php foreach (admin_offer_subnav_items() as $item): ?>
+      <?php $itemId = (string) ($item['id'] ?? ''); ?>
+      <a class="admin-subnav-link <?= $itemId === $current ? 'is-active' : '' ?>" href="<?= h((string) ($item['href'] ?? '#')) ?>">
+        <?= h((string) ($item['label'] ?? '')) ?>
+      </a>
+    <?php endforeach; ?>
+  </nav>
+  <?php
+}
+
+function admin_click_log_file() {
+  return rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'zeropreco-site-logs' . DIRECTORY_SEPARATOR . 'outbound-clicks.jsonl';
+}
+
+function admin_read_click_log_entries($limit = 200) {
+  $path = admin_click_log_file();
+  if (!is_file($path)) {
+    return [];
+  }
+
+  $lines = @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+  if (!is_array($lines) || !$lines) {
+    return [];
+  }
+
+  $entries = [];
+  for ($index = count($lines) - 1; $index >= 0; $index--) {
+    $decoded = json_decode((string) $lines[$index], true);
+    if (!is_array($decoded)) {
+      continue;
+    }
+    $entries[] = $decoded;
+    if (count($entries) >= max(1, (int) $limit)) {
+      break;
+    }
+  }
+
+  return $entries;
+}
+
+function admin_render_header($current = '') {
+  $current = trim((string) $current);
+  ?>
+  <header>
+    <div class="container admin-header">
+      <div class="admin-brand">
+        <a class="admin-brand-link" href="/admin/ofertas.php">
+          <div class="admin-brand-mark">
+            <img src="/assets/img/logo-zp.png" alt="Zero Preco">
+          </div>
+        </a>
+        <div class="admin-brand-copy">
+          <strong>Zero Pre&ccedil;o Admin</strong>
+          <span>Cat&aacute;logo, afiliados e curadoria em um painel mais visual.</span>
+        </div>
+      </div>
+      <button
+        class="btn admin-menu-toggle"
+        type="button"
+        aria-expanded="false"
+        aria-controls="admin-header-actions"
+        data-admin-menu-toggle
+      >
+        Menu
+      </button>
+      <div class="admin-header-actions" id="admin-header-actions" data-admin-menu>
+        <?php foreach (admin_primary_nav_items() as $item): ?>
+          <?php $itemId = (string) ($item['id'] ?? ''); ?>
+          <a class="<?= $itemId === $current ? 'badge is-primary' : 'badge' ?>" href="<?= h((string) ($item['href'] ?? '#')) ?>">
+            <?= h((string) ($item['label'] ?? '')) ?>
+          </a>
+        <?php endforeach; ?>
+      </div>
+    </div>
+  </header>
+  <?php
+}
+
 function admin_csrf_token() {
   if (empty($_SESSION['admin_csrf'])) {
     $_SESSION['admin_csrf'] = bin2hex(random_bytes(16));
@@ -220,6 +376,23 @@ function admin_parse_decimal($value) {
   return (float) $normalized;
 }
 
+function admin_offer_price_is_zero_or_less($value) {
+  return admin_parse_decimal($value) <= 0;
+}
+
+function admin_purge_zero_price_offers(PDO $pdo) {
+  $ids = $pdo->query("SELECT id FROM ofertas WHERE COALESCE(preco, 0) <= 0")->fetchAll(PDO::FETCH_COLUMN);
+  if (!$ids) {
+    return 0;
+  }
+
+  $ids = array_map('intval', $ids);
+  $placeholders = implode(',', array_fill(0, count($ids), '?'));
+  $pdo->prepare("DELETE FROM cliques WHERE oferta_id IN ($placeholders)")->execute($ids);
+  $pdo->prepare("DELETE FROM ofertas WHERE id IN ($placeholders)")->execute($ids);
+  return count($ids);
+}
+
 function admin_normalize_slug($slug, $fallbackTitle) {
   $base = trim((string) $slug);
   if ($base === '') {
@@ -257,16 +430,57 @@ function admin_unique_slug(PDO $pdo, $slug, $ignoreId = 0) {
   }
 }
 
+function admin_meli_affiliate_audit($url) {
+  $value = trim((string) $url);
+  $hasWid = str_contains($value, 'wid=');
+  $hasSid = str_contains($value, 'sid=affiliates');
+  $hasSidRecos = str_contains($value, 'sid=recos');
+  $hasPolycard = str_contains($value, 'polycard_client=affiliates');
+  $hasAffiliateProfile = str_contains($value, 'affiliate-profile');
+  $hasSourceAffiliateProfile = str_contains($value, 'source=affiliate-profile');
+  $hasRecoAffiliateProfile = str_contains($value, 'reco_client=home_affiliate-profile');
+  $hasMatt = str_contains($value, 'matt_tool=');
+  $hasSocial = str_contains($value, '/social/');
+  $hasTrackingId = str_contains($value, 'tracking_id=');
+  $hasMattEvent = str_contains($value, 'matt_event_ts=');
+  $hasMattTracing = str_contains($value, 'matt_tracing_id=');
+  $hasAffiliateProfileFlow = $hasSourceAffiliateProfile && $hasRecoAffiliateProfile;
+  $hasAffiliateProfileTrace = $hasTrackingId || $hasMattEvent || $hasMattTracing;
+
+  if ($hasSocial) {
+    return ['severity' => 'ok', 'status' => 'social', 'label' => 'OK strict', 'reason' => 'Link social/oficial do Mercado Livre.'];
+  }
+  if ($hasMatt) {
+    return ['severity' => 'ok', 'status' => 'matt_tool', 'label' => 'OK strict', 'reason' => 'Link com rastreio matt_tool do afiliado.'];
+  }
+  if ($hasWid && $hasSidRecos && $hasAffiliateProfile) {
+    return ['severity' => 'suspect', 'status' => 'wid_recos_affiliate_profile', 'label' => 'Suspeito', 'reason' => 'Link veio do fluxo affiliate-profile com wid e sid=recos, mas o confiavel para o projeto continua sendo social/matt_tool.'];
+  }
+  if ($hasAffiliateProfileFlow && $hasAffiliateProfileTrace) {
+    return ['severity' => 'suspect', 'status' => 'affiliate_profile_reco', 'label' => 'Suspeito', 'reason' => 'URL final do produto com sinais de affiliate-profile, mas sem marcador forte no proprio link.'];
+  }
+  if ($hasWid && $hasAffiliateProfile) {
+    return ['severity' => 'suspect', 'status' => 'wid_affiliate_profile', 'label' => 'Suspeito', 'reason' => 'Tem wid e sinais de affiliate-profile, mas sem marcador forte de social/matt_tool.'];
+  }
+  if ($hasWid && $hasPolycard) {
+    return ['severity' => 'suspect', 'status' => 'wid_polycard', 'label' => 'Suspeito', 'reason' => 'Tem wid e polycard, mas ainda pode ter sido montado fora da ferramenta oficial.'];
+  }
+  if ($hasWid && $hasSid) {
+    return ['severity' => 'suspect', 'status' => 'wid_sid', 'label' => 'Suspeito', 'reason' => 'Tem wid e sid=affiliates, mas ainda pode ter sido montado fora da ferramenta oficial.'];
+  }
+  if ($hasWid) {
+    return ['severity' => 'broken', 'status' => 'wid_suspeito', 'label' => 'Errado', 'reason' => 'Tem wid, mas faltam marcadores oficiais ou sinais suficientes do fluxo de afiliado.'];
+  }
+  return ['severity' => 'broken', 'status' => 'sem_wid', 'label' => 'Errado', 'reason' => 'Link comum do produto sem marcador visivel de afiliado do Mercado Livre.'];
+}
+
 function admin_is_meli_affiliate_url($url) {
-  $value = (string) $url;
-  return ((str_contains($value, 'wid=') && str_contains($value, 'sid=affiliates'))
-      || (str_contains($value, 'wid=') && str_contains($value, 'polycard_client=affiliates')))
-    || (str_contains($value, 'wid=') && str_contains($value, 'sid=recos') && str_contains($value, 'affiliate-profile'))
-    || (str_contains($value, 'wid=') && str_contains($value, 'source=affiliate-profile'))
-    || (str_contains($value, 'wid=') && str_contains($value, 'reco_client=home_affiliate-profile'))
-    || (str_contains($value, 'wid=') && str_contains($value, 'polycard_client=') && str_contains($value, 'affiliate-profile'))
-    || str_contains($value, '/social/')
-    || str_contains($value, 'matt_tool=');
+  $audit = admin_meli_affiliate_audit($url);
+  return ((string) ($audit['severity'] ?? '')) === 'ok';
+}
+
+function admin_affiliate_is_acceptable($audit) {
+  return ((string) ($audit['severity'] ?? '')) === 'ok';
 }
 
 function admin_affiliate_audit($store, $url) {
@@ -283,36 +497,7 @@ function admin_affiliate_audit($store, $url) {
   }
 
   if ($storeValue === 'mercado livre') {
-    $hasWid = str_contains($value, 'wid=');
-    $hasSid = str_contains($value, 'sid=affiliates');
-    $hasSidRecos = str_contains($value, 'sid=recos');
-    $hasPolycard = str_contains($value, 'polycard_client=affiliates');
-    $hasAffiliateProfile = str_contains($value, 'affiliate-profile');
-    $hasMatt = str_contains($value, 'matt_tool=');
-    $hasSocial = str_contains($value, '/social/');
-
-    if ($hasSocial) {
-      return ['severity' => 'ok', 'status' => 'social', 'label' => 'OK', 'reason' => 'Link social/oficial do Mercado Livre.'];
-    }
-    if ($hasMatt) {
-      return ['severity' => 'ok', 'status' => 'matt_tool', 'label' => 'OK', 'reason' => 'Link com rastreio matt_tool do afiliado.'];
-    }
-    if ($hasWid && $hasSidRecos && $hasAffiliateProfile) {
-      return ['severity' => 'ok', 'status' => 'wid_recos_affiliate_profile', 'label' => 'OK', 'reason' => 'Link vindo do affiliate-profile do Mercado Livre.'];
-    }
-    if ($hasWid && $hasPolycard) {
-      return ['severity' => 'suspect', 'status' => 'wid_polycard', 'label' => 'Suspeito', 'reason' => 'Tem wid e polycard, mas ainda pode ter sido montado fora da ferramenta oficial.'];
-    }
-    if ($hasWid && $hasSid) {
-      return ['severity' => 'suspect', 'status' => 'wid_sid', 'label' => 'Suspeito', 'reason' => 'Tem wid e sid=affiliates, mas ainda pode ter sido montado fora da ferramenta oficial.'];
-    }
-    if ($hasWid && $hasAffiliateProfile) {
-      return ['severity' => 'suspect', 'status' => 'wid_affiliate_profile', 'label' => 'Suspeito', 'reason' => 'Tem wid e sinais de affiliate-profile, mas sem todos os marcadores fortes.'];
-    }
-    if ($hasWid) {
-      return ['severity' => 'broken', 'status' => 'wid_suspeito', 'label' => 'Errado', 'reason' => 'Tem wid, mas faltam marcadores oficiais de afiliado.'];
-    }
-    return ['severity' => 'broken', 'status' => 'sem_wid', 'label' => 'Errado', 'reason' => 'Link comum do produto sem marcador de afiliado do Mercado Livre.'];
+    return admin_meli_affiliate_audit($value);
   }
 
   if ($storeValue === 'shopee') {
@@ -414,6 +599,212 @@ function admin_python_job_enabled() {
     && AUTOMACAO_PYTHON_SCRIPT !== '';
 }
 
+function admin_automation_root_path() {
+  if (!defined('AUTOMACAO_PYTHON_SCRIPT') || AUTOMACAO_PYTHON_SCRIPT === '') {
+    return null;
+  }
+  $root = dirname((string) AUTOMACAO_PYTHON_SCRIPT);
+  return is_dir($root) ? $root : null;
+}
+
+function admin_youtube_cuts_retention_seconds() {
+  return 12 * 60 * 60;
+}
+
+function admin_youtube_cuts_runtime_dir() {
+  $automationRoot = admin_automation_root_path();
+  if (!$automationRoot) {
+    return null;
+  }
+
+  $runtimeDir = $automationRoot . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'youtube_cuts';
+  return is_dir($runtimeDir) ? $runtimeDir : null;
+}
+
+function admin_delete_tree($path) {
+  if (!is_dir($path)) {
+    return is_file($path) ? @unlink($path) : true;
+  }
+
+  $items = @scandir($path);
+  if (!is_array($items)) {
+    return @rmdir($path);
+  }
+
+  foreach ($items as $item) {
+    if ($item === '.' || $item === '..') {
+      continue;
+    }
+    $child = $path . DIRECTORY_SEPARATOR . $item;
+    if (is_dir($child) && !is_link($child)) {
+      admin_delete_tree($child);
+      continue;
+    }
+    @unlink($child);
+  }
+
+  return @rmdir($path);
+}
+
+function admin_youtube_cuts_job_created_ts($jobDir) {
+  $manifestPath = $jobDir . DIRECTORY_SEPARATOR . 'manifest.json';
+  if (is_file($manifestPath)) {
+    $mtime = @filemtime($manifestPath);
+    if ($mtime) {
+      return (int) $mtime;
+    }
+  }
+
+  $jobName = basename($jobDir);
+  if (preg_match('/-(\d{14})$/', $jobName, $matches)) {
+    $dt = DateTime::createFromFormat('YmdHis', $matches[1], new DateTimeZone('UTC'));
+    if ($dt instanceof DateTime) {
+      return $dt->getTimestamp();
+    }
+  }
+
+  $dirMtime = @filemtime($jobDir);
+  return $dirMtime ? (int) $dirMtime : time();
+}
+
+function admin_youtube_cuts_cleanup_expired() {
+  $runtimeDir = admin_youtube_cuts_runtime_dir();
+  if (!$runtimeDir) {
+    return 0;
+  }
+
+  $removed = 0;
+  $now = time();
+  $ttl = admin_youtube_cuts_retention_seconds();
+  $items = @scandir($runtimeDir);
+  if (!is_array($items)) {
+    return 0;
+  }
+
+  foreach ($items as $item) {
+    if ($item === '.' || $item === '..') {
+      continue;
+    }
+    $jobDir = $runtimeDir . DIRECTORY_SEPARATOR . $item;
+    if (!is_dir($jobDir)) {
+      continue;
+    }
+    $createdTs = admin_youtube_cuts_job_created_ts($jobDir);
+    if (($createdTs + $ttl) > $now) {
+      continue;
+    }
+    if (admin_delete_tree($jobDir)) {
+      $removed++;
+    }
+  }
+
+  return $removed;
+}
+
+function admin_youtube_cuts_delete_job($jobId) {
+  $runtimeDir = admin_youtube_cuts_runtime_dir();
+  $safeJobId = preg_replace('/[^A-Za-z0-9_-]+/', '', (string) $jobId);
+  if (!$runtimeDir || $safeJobId === '') {
+    return false;
+  }
+
+  $jobDir = realpath($runtimeDir . DIRECTORY_SEPARATOR . $safeJobId);
+  if ($jobDir === false || strpos($jobDir, realpath($runtimeDir)) !== 0 || !is_dir($jobDir)) {
+    return false;
+  }
+
+  return admin_delete_tree($jobDir);
+}
+
+function admin_youtube_cuts_asset_path($jobId, $filename) {
+  $runtimeDir = admin_youtube_cuts_runtime_dir();
+  $safeJobId = preg_replace('/[^A-Za-z0-9_-]+/', '', (string) $jobId);
+  $safeFile = basename((string) $filename);
+  if (!$runtimeDir || $safeJobId === '' || $safeFile === '') {
+    return null;
+  }
+
+  $runtimeReal = realpath($runtimeDir);
+  if ($runtimeReal === false) {
+    return null;
+  }
+
+  $jobDir = realpath($runtimeReal . DIRECTORY_SEPARATOR . $safeJobId);
+  if ($jobDir === false || strpos($jobDir, $runtimeReal) !== 0 || !is_dir($jobDir)) {
+    return null;
+  }
+
+  $assetPath = $jobDir . DIRECTORY_SEPARATOR . $safeFile;
+  if (!is_file($assetPath)) {
+    return null;
+  }
+
+  $assetReal = realpath($assetPath);
+  if ($assetReal === false || strpos($assetReal, $jobDir) !== 0) {
+    return null;
+  }
+
+  return $assetReal;
+}
+
+function admin_youtube_cuts_list_jobs($limit = 20) {
+  admin_youtube_cuts_cleanup_expired();
+
+  $runtimeDir = admin_youtube_cuts_runtime_dir();
+  $runtimeReal = $runtimeDir ? realpath($runtimeDir) : false;
+  if ($runtimeReal === false) {
+    return [];
+  }
+
+  $jobs = [];
+  foreach (glob($runtimeReal . DIRECTORY_SEPARATOR . '*', GLOB_ONLYDIR) ?: [] as $jobDir) {
+    $manifestPath = $jobDir . DIRECTORY_SEPARATOR . 'manifest.json';
+    if (!is_file($manifestPath)) {
+      continue;
+    }
+
+    $manifest = json_decode((string) @file_get_contents($manifestPath), true);
+    if (!is_array($manifest)) {
+      continue;
+    }
+
+    $createdTs = admin_youtube_cuts_job_created_ts($jobDir);
+    $expiresTs = $createdTs + admin_youtube_cuts_retention_seconds();
+    $cuts = array_values(array_filter((array) ($manifest['cuts'] ?? []), static function ($cut) {
+      return is_array($cut) && !empty($cut['video_filename']);
+    }));
+    $totalBytes = 0;
+    foreach ($cuts as $cut) {
+      $path = $jobDir . DIRECTORY_SEPARATOR . basename((string) ($cut['video_filename'] ?? ''));
+      if (is_file($path)) {
+        $totalBytes += (int) @filesize($path);
+      }
+    }
+
+    $jobs[] = [
+      'job_id' => (string) ($manifest['job_id'] ?? basename($jobDir)),
+      'mode' => (string) ($manifest['mode'] ?? 'short'),
+      'selection_strategy' => (string) ($manifest['selection_strategy'] ?? ''),
+      'target_channel_profile_id' => (int) ($manifest['target_channel_profile_id'] ?? 0),
+      'target_channel_profile_name' => (string) ($manifest['target_channel_profile_name'] ?? ''),
+      'video' => is_array($manifest['video'] ?? null) ? $manifest['video'] : [],
+      'transcript' => is_array($manifest['transcript'] ?? null) ? $manifest['transcript'] : [],
+      'cuts' => $cuts,
+      'created_ts' => $createdTs,
+      'expires_ts' => $expiresTs,
+      'manifest_path' => $manifestPath,
+      'total_bytes' => $totalBytes,
+    ];
+  }
+
+  usort($jobs, static function ($a, $b) {
+    return (int) ($b['created_ts'] ?? 0) <=> (int) ($a['created_ts'] ?? 0);
+  });
+
+  return array_slice($jobs, 0, max(1, min((int) $limit, 100)));
+}
+
+
 function admin_decode_python_runner_output($output) {
   $trimmed = trim((string) $output);
   if ($trimmed === '') {
@@ -449,6 +840,166 @@ function admin_strip_actor_args(array $args) {
     $clean[] = $arg;
   }
   return $clean;
+}
+
+function admin_python_job_runtime_dir() {
+  $automationRoot = admin_automation_root_path();
+  if (!$automationRoot) {
+    return null;
+  }
+
+  $runtimeDir = $automationRoot . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'admin_python_jobs';
+  if (!is_dir($runtimeDir)) {
+    @mkdir($runtimeDir, 0775, true);
+  }
+  return is_dir($runtimeDir) ? $runtimeDir : null;
+}
+
+function admin_python_job_file_path($jobId, $extension) {
+  $runtimeDir = admin_python_job_runtime_dir();
+  $safeJobId = preg_replace('/[^A-Za-z0-9_-]+/', '', (string) $jobId);
+  $safeExtension = preg_replace('/[^A-Za-z0-9]+/', '', (string) $extension);
+  if (!$runtimeDir || $safeJobId === '' || $safeExtension === '') {
+    return null;
+  }
+  return $runtimeDir . DIRECTORY_SEPARATOR . $safeJobId . '.' . $safeExtension;
+}
+
+function admin_python_job_command(array $args) {
+  $scriptPath = (string) AUTOMACAO_PYTHON_SCRIPT;
+  $parts = [escapeshellarg((string) AUTOMACAO_PYTHON_BIN), escapeshellarg($scriptPath)];
+  foreach ($args as $arg) {
+    $parts[] = escapeshellarg((string) $arg);
+  }
+  return implode(' ', $parts);
+}
+
+function admin_write_python_job_meta($jobId, array $meta) {
+  $metaPath = admin_python_job_file_path($jobId, 'json');
+  if (!$metaPath) {
+    return false;
+  }
+  return @file_put_contents($metaPath, json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) !== false;
+}
+
+function admin_read_python_job_meta($jobId) {
+  $metaPath = admin_python_job_file_path($jobId, 'json');
+  if (!$metaPath || !is_file($metaPath)) {
+    return null;
+  }
+  $decoded = json_decode((string) @file_get_contents($metaPath), true);
+  return is_array($decoded) ? $decoded : null;
+}
+
+function admin_start_python_job_async(array $args, array $meta = []) {
+  if (!admin_python_job_enabled()) {
+    return [
+      'ok' => false,
+      'error' => 'AUTOMACAO_PYTHON_BIN ou AUTOMACAO_PYTHON_SCRIPT nao configurados.',
+    ];
+  }
+
+  if (!admin_shell_exec_enabled()) {
+    return [
+      'ok' => false,
+      'error' => 'shell_exec desabilitado no PHP. Use cron/SSH no servidor.',
+    ];
+  }
+
+  $scriptPath = (string) AUTOMACAO_PYTHON_SCRIPT;
+  if (!is_file($scriptPath)) {
+    return [
+      'ok' => false,
+      'error' => 'Script Python do runner nao encontrado no servidor.',
+    ];
+  }
+
+  $jobId = 'pyjob_' . gmdate('YmdHis') . '_' . bin2hex(random_bytes(4));
+  $outputPath = admin_python_job_file_path($jobId, 'out');
+  $exitPath = admin_python_job_file_path($jobId, 'exit');
+  if (!$outputPath || !$exitPath) {
+    return [
+      'ok' => false,
+      'error' => 'Nao foi possivel preparar o diretório de jobs do admin.',
+    ];
+  }
+
+  @unlink($outputPath);
+  @unlink($exitPath);
+  admin_write_python_job_meta($jobId, [
+    'job_id' => $jobId,
+    'status' => 'running',
+    'created_at' => gmdate('c'),
+    'kind' => (string) ($meta['kind'] ?? 'generic'),
+    'target_tab' => (string) ($meta['target_tab'] ?? 'gerar'),
+    'args' => array_values($args),
+  ]);
+
+  $runnerCommand = admin_python_job_command($args);
+  $backgroundCommand = "nohup sh -c "
+    . escapeshellarg($runnerCommand . ' > ' . escapeshellarg($outputPath) . ' 2>&1; status=$?; printf "%s" "$status" > ' . escapeshellarg($exitPath))
+    . ' >/dev/null 2>&1 & echo $!';
+  $pid = trim((string) shell_exec($backgroundCommand));
+
+  if ($pid === '') {
+    return [
+      'ok' => false,
+      'error' => 'Falha ao iniciar o job Python em segundo plano.',
+    ];
+  }
+
+  $storedMeta = admin_read_python_job_meta($jobId) ?: [];
+  $storedMeta['pid'] = $pid;
+  admin_write_python_job_meta($jobId, $storedMeta);
+
+  return [
+    'ok' => true,
+    'job_id' => $jobId,
+    'pid' => $pid,
+  ];
+}
+
+function admin_python_job_status($jobId) {
+  $meta = admin_read_python_job_meta($jobId);
+  if (!is_array($meta)) {
+    return [
+      'ok' => false,
+      'error' => 'Job do admin nao encontrado.',
+    ];
+  }
+
+  $outputPath = admin_python_job_file_path($jobId, 'out');
+  $exitPath = admin_python_job_file_path($jobId, 'exit');
+  $rawOutput = $outputPath && is_file($outputPath) ? trim((string) @file_get_contents($outputPath)) : '';
+  $elapsedSeconds = max(0, time() - strtotime((string) ($meta['created_at'] ?? 'now')));
+
+  if (!$exitPath || !is_file($exitPath)) {
+    return [
+      'ok' => true,
+      'status' => 'running',
+      'job' => $meta,
+      'elapsed_seconds' => $elapsedSeconds,
+      'raw_output' => $rawOutput,
+    ];
+  }
+
+  $exitCode = (int) trim((string) @file_get_contents($exitPath));
+  $decoded = admin_decode_python_runner_output($rawOutput);
+  $success = is_array($decoded) && !empty($decoded['ok']) && $exitCode === 0;
+  $status = $success ? 'success' : 'error';
+  $meta['status'] = $status;
+  $meta['finished_at'] = gmdate('c');
+  admin_write_python_job_meta($jobId, $meta);
+
+  return [
+    'ok' => true,
+    'status' => $status,
+    'job' => $meta,
+    'elapsed_seconds' => $elapsedSeconds,
+    'payload' => is_array($decoded) ? $decoded : null,
+    'raw_output' => $rawOutput,
+    'exit_code' => $exitCode,
+  ];
 }
 
 function admin_run_python_job(array $args) {
@@ -579,7 +1130,7 @@ function admin_fetch_social_candidates(PDO $pdo, $search = '', $store = '', $lim
   $rows = $stmt->fetchAll() ?: [];
 
   $eligibleRows = array_values(array_filter($rows, static function ($row) {
-    return admin_affiliate_audit($row['loja'] ?? '', $row['url_afiliado'] ?? '')['severity'] === 'ok';
+    return admin_affiliate_is_acceptable(admin_affiliate_audit($row['loja'] ?? '', $row['url_afiliado'] ?? ''));
   }));
 
   $total = count($eligibleRows);

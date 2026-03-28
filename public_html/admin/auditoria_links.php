@@ -26,7 +26,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $idsToDisable = [];
     foreach ($rows as $row) {
       $audit = admin_affiliate_audit($row['loja'], $row['url_afiliado']);
-      if ($audit['severity'] !== 'ok') {
+      if (!admin_affiliate_is_acceptable($audit)) {
         $idsToDisable[] = (int) $row['id'];
       }
     }
@@ -44,7 +44,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       $item = $itemStmt->fetch();
       if ($item) {
         $audit = admin_affiliate_audit($item['loja'], $item['url_afiliado']);
-        if ($audit['severity'] === 'ok') {
+        if (admin_affiliate_is_acceptable($audit)) {
           $pdo->prepare("UPDATE ofertas SET ativo = 1 WHERE id = ?")->execute([$id]);
           $feedback = 'Oferta reativada com sucesso.';
         } else {
@@ -70,7 +70,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $idsToEnable = [];
     foreach ($items as $item) {
       $audit = admin_affiliate_audit($item['loja'], $item['url_afiliado']);
-      if ($audit['severity'] === 'ok') {
+      if (admin_affiliate_is_acceptable($audit)) {
         $idsToEnable[] = (int) $item['id'];
       }
     }

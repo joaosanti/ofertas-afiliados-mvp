@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from sqlalchemy import bindparam, text
 
 from app.services.dashboard_data import ensure_dashboard_tables
-from app.services.offer_card_asset import generate_offer_square_card_asset
+from app.services.offer_card_asset import clean_offer_highlight_text, generate_offer_square_card_asset, normalize_installments_text
 from app.services.sftp_deploy import deploy_stories_via_sftp, ensure_stories_dir, story_public_url
 
 
@@ -159,6 +159,13 @@ def _decode_tag_url(tags: str | None, prefix: str) -> str | None:
         if value.startswith(("http://", "https://")):
             return value
     return None
+
+
+def _offer_source_video_url(offer: dict[str, Any]) -> str | None:
+    manual_video_url = _decode_tag_url(offer.get("tags"), "offer_video_url:")
+    if manual_video_url:
+        return manual_video_url
+    return _decode_tag_url(offer.get("tags"), "shopee_video_url:")
 
 
 def _affiliate_audit(store: str, url: str) -> dict[str, str]:
@@ -672,6 +679,53 @@ def _split_text(value: str, limit: int) -> list[str]:
     return [content[index:index + limit] for index in range(0, len(content), limit)]
 
 
+def _truncate_text(value: str, limit: int) -> str:
+    content = (value or "").strip()
+    if len(content) <= limit:
+        return content
+    return content[: max(0, limit - 3)].rstrip(" -|,.;") + "..."
+
+
+def _draw_story_chip(
+    draw: ImageDraw.ImageDraw,
+    *,
+    x: int,
+    y: int,
+    text: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    max_width: int,
+    fill: str,
+    text_fill: str,
+    height: int = 46,
+) -> int:
+    content = _truncate_text(text, 58)
+    bbox = draw.textbbox((0, 0), content, font=font)
+    width = min(max_width, (bbox[2] - bbox[0]) + 44)
+    draw.rounded_rectangle((x, y, x + width, y + height), radius=18, fill=fill)
+    draw.text((x + 18, y + 7), content, font=font, fill=text_fill)
+    return y + height + 14
+
+
+def _draw_story_link_sticker(
+    draw: ImageDraw.ImageDraw,
+    *,
+    x: int,
+    y: int,
+    host: str,
+    width: int = 430,
+) -> None:
+    sticker_box = (x, y, x + width, y + 68)
+    icon_box = (x + 14, y + 14, x + 54, y + 54)
+    draw.rounded_rectangle(sticker_box, radius=24, fill="#ffffff")
+    draw.rounded_rectangle(icon_box, radius=20, fill="#e7f0ff")
+    icon_font = _load_font(16, bold=True)
+    label_font = _load_font(22, bold=True)
+    host_font = _load_font(18)
+    draw.text((x + 19, y + 24), "URL", font=icon_font, fill="#1463ff")
+    draw.text((x + 70, y + 13), "Link da loja aqui", font=label_font, fill="#0b2d78")
+    draw.text((x + 70, y + 38), _truncate_text(host, 30), font=host_font, fill="#5a6f99")
+
+
 def _fit_remote_product_image(url: str, size: tuple[int, int]) -> Image.Image | None:
     image_url = (url or "").strip()
     if not image_url:
@@ -698,9 +752,12 @@ def _fit_local_product_image(path: Path, size: tuple[int, int]) -> Image.Image |
         return None
 
 
-def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
-    filename = f"offer-{offer['id']}-{_slugify(offer['slug'])}.jpg"
-    destination = ensure_stories_dir() / filename
+def _build_story_canvas(
+    offer: dict[str, Any],
+    *,
+    product_image: Image.Image | None = None,
+    show_placeholder: bool = True,
+) -> dict[str, Any]:
     destination_url = _destination_url(offer)
     destination_host = _display_url(destination_url)
     destination_label = "Acesse no site"
@@ -718,8 +775,9 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
     draw.ellipse((-120, 1450, 260, 1830), fill="#12398f")
     draw.rounded_rectangle((54, 54, 1026, 1866), radius=42, outline="#2f65db", width=4)
 
-    title_font = _load_font(58, bold=True)
+    title_font = _load_font(56, bold=True)
     price_font = _load_font(96, bold=True)
+    old_price_font = _load_font(34)
     label_font = _load_font(30, bold=True)
     text_font = _load_font(32)
     cta_font = _load_font(34, bold=True)
@@ -729,34 +787,75 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
 
     draw.text((80, 120), "ZERO PRECO", font=label_font, fill="#dbe7ff")
 
-    title_lines = _wrap_text(offer["titulo"], 24)[:3]
+    title_lines = _wrap_text(offer["titulo"], 23)[:3]
     y = 250
     for line in title_lines:
         draw.text((80, y), line, font=title_font, fill="#f4f7fb")
         y += 68
 
     discount = _discount_percent(offer["preco"], offer.get("preco_antigo"))
-    if discount > 0:
-        draw.rounded_rectangle((80, 190, 310, 260), radius=24, fill="#143b90")
-        draw.text((116, 208), f"{discount}% OFF", font=label_font, fill="#f4f7fb")
 
-    price_y = y + 52
+    price_y = y + 34
     draw.text((80, price_y), _money(offer["preco"]), font=price_font, fill="#ffffff")
 
-    info_y = y + 170
+    info_y = price_y + 116
     if offer.get("preco_antigo"):
         old_price_text = f"De {_money(offer['preco_antigo'])}"
-        draw.text((80, info_y), old_price_text, font=text_font, fill="#b9c8e6")
-        old_price_bbox = draw.textbbox((80, info_y), old_price_text, font=text_font)
+        draw.text((80, info_y), old_price_text, font=old_price_font, fill="#b9c8e6")
+        old_price_bbox = draw.textbbox((80, info_y), old_price_text, font=old_price_font)
         strike_y = (old_price_bbox[1] + old_price_bbox[3]) / 2
         draw.line((old_price_bbox[0], strike_y, old_price_bbox[2], strike_y), fill="#ffb7b7", width=3)
-        info_y += 52
+        info_y += 54
+
+    installments_text = normalize_installments_text(offer.get("parcelas_texto"))
+    if installments_text:
+        info_y = _draw_story_chip(
+            draw,
+            x=80,
+            y=info_y,
+            text=f"Parcelamento: {installments_text}",
+            font=_load_font(24, bold=True),
+            max_width=820,
+            fill="#163d95",
+            text_fill="#eef4ff",
+        )
+    elif offer.get("preco_pix") is not None:
+        info_y = _draw_story_chip(
+            draw,
+            x=80,
+            y=info_y,
+            text=f"No Pix: {_money(offer['preco_pix'])}",
+            font=_load_font(24, bold=True),
+            max_width=640,
+            fill="#163d95",
+            text_fill="#eef4ff",
+        )
+
+    coupon_text = (offer.get("cupom") or "").strip()
+    promo_text = clean_offer_highlight_text(offer.get("promocao_texto"), discount=discount, installments=installments_text)
+    banner_text = ""
+    banner_fill = "#113885"
+    banner_text_fill = "#f4f7fb"
+    if coupon_text:
+        banner_text = f"Cupom: {coupon_text}"
+        banner_fill = "#fff2c2"
+        banner_text_fill = "#6b4700"
+    elif promo_text:
+        banner_text = promo_text
+    if banner_text:
+        info_y = _draw_story_chip(
+            draw,
+            x=80,
+            y=info_y,
+            text=banner_text,
+            font=_load_font(24, bold=True),
+            max_width=860,
+            fill=banner_fill,
+            text_fill=banner_text_fill,
+            height=52,
+        )
 
     commerce_lines: list[str] = []
-    if offer.get("preco_pix") is not None:
-        commerce_lines.append(f"No Pix: {_money(offer['preco_pix'])}")
-    if (offer.get("parcelas_texto") or "").strip():
-        commerce_lines.append(f"Parcelamento: {str(offer.get('parcelas_texto')).strip()}")
     if (offer.get("frete_texto") or "").strip():
         commerce_lines.append(f"Frete: {str(offer.get('frete_texto')).strip()}")
     rating = offer.get("avaliacao_nota")
@@ -766,41 +865,55 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
     elif rating is not None:
         commerce_lines.append(f"Avaliacao: {float(rating):.1f}/5")
 
-    for line in commerce_lines[:2]:
-        chip_text = line[:42]
-        chip_font = _load_font(24, bold=True)
-        chip_bbox = draw.textbbox((0, 0), chip_text, font=chip_font)
-        chip_width = min(760, (chip_bbox[2] - chip_bbox[0]) + 48)
-        chip_box = (80, info_y, 80 + chip_width, info_y + 42)
-        draw.rounded_rectangle(chip_box, radius=18, fill="#163d95")
-        draw.text((chip_box[0] + 18, chip_box[1] + 7), chip_text, font=chip_font, fill="#eef4ff")
-        info_y += 52
+    for line in commerce_lines[:1]:
+        info_y = _draw_story_chip(
+            draw,
+            x=80,
+            y=info_y,
+            text=line,
+            font=_load_font(24, bold=True),
+            max_width=760,
+            fill="#163d95",
+            text_fill="#eef4ff",
+        )
 
     draw.text(
-        (80, info_y + 12),
+        (80, info_y + 4),
         f"{_store_label(offer['loja'])} | {_category_label(offer['categoria'])}",
         font=text_font,
         fill="#dbe7ff",
     )
 
-    product_card_box = (80, 760, 1000, 1310)
+    product_top = max(780, info_y + 56)
+    product_bottom = product_top + 520
+    product_card_box = (80, product_top, 1000, product_bottom)
     draw.rounded_rectangle(product_card_box, radius=36, fill="#f8fbff")
-    product_image = _fit_remote_product_image(offer.get("imagem_url"), (840, 470))
+    product_inner_box = (120, product_top + 40, 960, product_top + 510)
     if product_image is not None:
-        image.paste(product_image, (120, 800))
-        draw.rounded_rectangle((120, 800, 960, 1270), radius=28, outline="#d7e4ff", width=4)
+        image.paste(product_image, (product_inner_box[0], product_inner_box[1]))
     else:
-        draw.rounded_rectangle((120, 800, 960, 1270), radius=28, fill="#d9e5ff")
-        draw.text((180, 1015), "Imagem do produto", font=cta_font, fill="#0b2d78")
+        draw.rounded_rectangle(product_inner_box, radius=28, fill="#d9e5ff")
+    draw.rounded_rectangle(product_inner_box, radius=28, outline="#d7e4ff", width=4)
+    if product_image is None and show_placeholder:
+        draw.text((180, product_top + 255), "Imagem do produto", font=cta_font, fill="#0b2d78")
 
-    draw.rounded_rectangle((80, 1348, 580, 1518), radius=32, fill="#ffffff")
-    draw.rounded_rectangle((104, 1372, 556, 1494), radius=26, fill="#e8f0ff")
-    draw.text((136, 1382), destination_label, font=cta_small_font, fill="#0b2d78")
-    draw.text((136, 1426), destination_label_secondary, font=cta_font, fill="#0b2d78")
+    _draw_story_link_sticker(
+        draw,
+        x=142,
+        y=product_bottom - 34,
+        host=destination_host,
+        width=430,
+    )
 
-    draw.text((664, 1340), "Grupo WhatsApp", font=cta_small_font, fill="#ffffff")
-    qr_outer_box = (686, 1378, 880, 1572)
-    qr_inner_box = (694, 1386, 872, 1564)
+    footer_top = product_bottom + 38
+    draw.rounded_rectangle((80, footer_top, 580, footer_top + 170), radius=32, fill="#ffffff")
+    draw.rounded_rectangle((104, footer_top + 24, 556, footer_top + 146), radius=26, fill="#e8f0ff")
+    draw.text((136, footer_top + 34), destination_label, font=cta_small_font, fill="#0b2d78")
+    draw.text((136, footer_top + 78), destination_label_secondary, font=cta_font, fill="#0b2d78")
+
+    draw.text((664, footer_top - 8), "Grupo WhatsApp", font=cta_small_font, fill="#ffffff")
+    qr_outer_box = (686, footer_top + 30, 880, footer_top + 224)
+    qr_inner_box = (694, footer_top + 38, 872, footer_top + 216)
     draw.rounded_rectangle(qr_outer_box, radius=18, fill="#f7fbff", outline="#8fb9ff", width=3)
     if whatsapp_group_qr is not None:
         qr_image = ImageOps.fit(whatsapp_group_qr, (178, 178), method=Image.Resampling.LANCZOS)
@@ -809,27 +922,32 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
         draw.rounded_rectangle(qr_inner_box, radius=18, fill="#d9e5ff")
         draw.text((742, 1462), "QR", font=cta_font, fill="#0b2d78")
 
-    draw.text((80, 1608), destination_host, font=domain_font, fill="#ffffff")
+    link_top = footer_top + 260
+    draw.text((80, link_top), destination_host, font=domain_font, fill="#ffffff")
     draw.text(
-        (80, 1716),
+        (80, link_top + 108),
         "Siga para a loja parceira.",
         font=text_font,
         fill="#dbe7ff",
     )
-    draw.text((80, 1760), "Use o link publicado junto da oferta.", font=micro_font, fill="#dbe7ff")
-    for index, link_line in enumerate(_split_text(whatsapp_group_link, 72)[:2]):
-        draw.text((80, 1800 + (index * 28)), link_line, font=micro_font, fill="#dbe7ff")
+    draw.text((80, link_top + 152), "Use o link publicado junto da oferta.", font=micro_font, fill="#dbe7ff")
+    draw.text((80, link_top + 192), "Entre no grupo pelo QR ao lado.", font=micro_font, fill="#dbe7ff")
 
-    coupon_text = (offer.get("cupom") or "").strip()
-    promo_text = (offer.get("promocao_texto") or "").strip()
-    banner_text = ""
-    if coupon_text:
-        banner_text = f"Cupom: {coupon_text[:20]}"
-    elif promo_text:
-        banner_text = promo_text[:34].rstrip(" -|,.;")
-    if banner_text:
-        draw.rounded_rectangle((80, 650, 620, 730), radius=20, fill="#113885")
-        draw.text((110, 676), banner_text, font=label_font, fill="#f4f7fb")
+    return {
+        "image": image,
+        "destination_url": destination_url,
+        "destination_host": destination_host,
+        "product_inner_box": product_inner_box,
+        "product_border_radius": 28,
+    }
+
+
+def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
+    filename = f"offer-{offer['id']}-{_slugify(offer['slug'])}.jpg"
+    destination = ensure_stories_dir() / filename
+    product_image = _fit_remote_product_image(offer.get("imagem_url"), (840, 470))
+    story_canvas = _build_story_canvas(offer, product_image=product_image)
+    image = story_canvas["image"]
 
     image.save(destination, format="JPEG", quality=92, optimize=True)
     return {
@@ -839,7 +957,80 @@ def generate_story_asset(offer: dict[str, Any]) -> dict[str, Any]:
         "file_path": str(destination),
         "public_url": story_public_url(filename),
         "caption": _story_caption_for_offer(offer),
-        "destination_url": destination_url,
+        "destination_url": story_canvas["destination_url"],
+    }
+
+
+def generate_story_video_asset(
+    offer: dict[str, Any],
+    source_video_path: str,
+    *,
+    max_duration_seconds: int = 12,
+) -> dict[str, Any]:
+    source_path = Path(source_video_path)
+    if not source_path.is_file():
+        raise ValueError("Arquivo de video de origem nao encontrado para story.")
+
+    poster_asset = generate_story_asset(offer)
+    story_canvas = _build_story_canvas(offer, product_image=None, show_placeholder=False)
+    base_image = story_canvas["image"].convert("RGB")
+    product_inner_box = tuple(int(value) for value in story_canvas["product_inner_box"])
+    x1, y1, x2, y2 = product_inner_box
+    product_size = (x2 - x1, y2 - y1)
+    border_radius = int(story_canvas["product_border_radius"])
+
+    mask = Image.new("L", product_size, 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.rounded_rectangle((0, 0, product_size[0], product_size[1]), radius=border_radius, fill=255)
+
+    filename = Path(poster_asset["filename"]).stem + "-story-video.mp4"
+    destination = ensure_stories_dir() / filename
+
+    reader = imageio.get_reader(str(source_path))
+    metadata = reader.get_meta_data() or {}
+    fps = float(metadata.get("fps") or 24)
+    if fps <= 0:
+        fps = 24
+    fps = min(max(fps, 12), 30)
+    max_frames = max(1, int(fps * max_duration_seconds))
+    writer = imageio.get_writer(
+        str(destination),
+        fps=fps,
+        codec="libx264",
+        pixelformat="yuv420p",
+        macro_block_size=None,
+    )
+
+    rendered_frames = 0
+    try:
+        for frame_data in reader:
+            frame_image = Image.fromarray(frame_data).convert("RGB")
+            fitted = ImageOps.fit(frame_image, product_size, method=Image.Resampling.LANCZOS)
+            canvas = base_image.copy()
+            canvas.paste(fitted, (x1, y1), mask)
+            frame_draw = ImageDraw.Draw(canvas)
+            frame_draw.rounded_rectangle(product_inner_box, radius=border_radius, outline="#d7e4ff", width=4)
+            writer.append_data(np.asarray(canvas))
+            rendered_frames += 1
+            if rendered_frames >= max_frames:
+                break
+    finally:
+        writer.close()
+        reader.close()
+
+    if rendered_frames <= 0:
+        destination.unlink(missing_ok=True)
+        raise ValueError("Nao foi possivel renderizar frames do video para o story.")
+
+    return {
+        "ok": True,
+        "offer_id": offer["id"],
+        "filename": filename,
+        "file_path": str(destination),
+        "public_url": story_public_url(filename),
+        "caption": _story_caption_for_offer(offer),
+        "destination_url": story_canvas["destination_url"],
+        "poster_url": poster_asset["public_url"],
     }
 
 
@@ -1020,7 +1211,7 @@ def build_meta_post_previews(
                 "promotion_text": offer.get("promocao_texto"),
                 "coupon": offer.get("cupom"),
                 "image_url": offer["imagem_url"],
-                "video_url": _decode_tag_url(offer.get("tags"), "shopee_video_url:"),
+                "video_url": _offer_source_video_url(offer),
                 "clicks": int(offer.get("clicks") or 0),
                 "offer_url": _offer_url(offer["slug"]),
                 "cta_url": _destination_url(offer),
@@ -1041,7 +1232,7 @@ def build_meta_post_previews(
                 "reel_payload": {
                     "caption": _story_caption_for_offer(offer),
                     "offer_url": _destination_url(offer),
-                    "source_video_url": _decode_tag_url(offer.get("tags"), "shopee_video_url:"),
+                    "source_video_url": _offer_source_video_url(offer),
                 },
             }
         )
@@ -1129,6 +1320,65 @@ def publish_facebook_story_photo(image_url: str) -> dict[str, Any]:
         "page_id": page_id,
         "photo_id": photo_id,
         "result": story_data,
+    }
+
+
+def publish_facebook_story_video(video_path: str) -> dict[str, Any]:
+    normalized_path = Path(video_path)
+    if not normalized_path.is_file():
+        raise ValueError("Arquivo de video do story do Facebook nao encontrado.")
+
+    page_id = _meta_page_id()
+    access_token = _meta_page_token()
+    file_size = normalized_path.stat().st_size
+    if file_size <= 0:
+        raise ValueError("Arquivo de video do story do Facebook vazio.")
+
+    with httpx.Client(timeout=90) as client:
+        start_response = client.post(
+            f"{_meta_api_base()}/{page_id}/video_stories",
+            data={
+                "upload_phase": "start",
+                "access_token": access_token,
+            },
+        )
+        start_response.raise_for_status()
+        start_data = start_response.json()
+
+        video_id = (start_data.get("video_id") or "").strip()
+        upload_url = (start_data.get("upload_url") or "").strip()
+        if not video_id or not upload_url:
+            raise ValueError(f"Resposta inesperada da Meta ao iniciar story em video: {start_data}")
+
+        with normalized_path.open("rb") as video_file:
+            upload_response = client.post(
+                upload_url,
+                headers={
+                    "Authorization": f"OAuth {access_token}",
+                    "offset": "0",
+                    "file_size": str(file_size),
+                },
+                content=video_file.read(),
+            )
+        upload_response.raise_for_status()
+
+        finish_response = client.post(
+            f"{_meta_api_base()}/{page_id}/video_stories",
+            data={
+                "upload_phase": "finish",
+                "video_id": video_id,
+                "access_token": access_token,
+            },
+        )
+        finish_response.raise_for_status()
+        finish_data = finish_response.json()
+
+    return {
+        "ok": True,
+        "platform": "facebook_story_video",
+        "page_id": page_id,
+        "video_id": video_id,
+        "result": finish_data,
     }
 
 
@@ -1248,16 +1498,20 @@ def create_instagram_media_container(image_url: str, caption: str) -> dict[str, 
     }
 
 
-def create_instagram_story_container(image_url: str) -> dict[str, Any]:
+def create_instagram_story_container(image_url: str | None = None, video_url: str | None = None) -> dict[str, Any]:
     image_url = (image_url or "").strip()
-    if not image_url:
-        raise ValueError("image_url do story nao pode ficar vazio.")
+    video_url = (video_url or "").strip()
+    if not image_url and not video_url:
+        raise ValueError("image_url ou video_url do story nao pode ficar vazio.")
 
     payload = {
-        "image_url": image_url,
         "media_type": "STORIES",
         "access_token": _meta_page_token(),
     }
+    if video_url:
+        payload["video_url"] = video_url
+    else:
+        payload["image_url"] = image_url
 
     with httpx.Client(timeout=20) as client:
         response = client.post(f"{_meta_api_base()}/{_meta_instagram_account_id()}/media", data=payload)

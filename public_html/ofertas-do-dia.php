@@ -8,7 +8,9 @@ $budgetDeals = $data['budget_deals'];
 $budgetStrictCount = (int) ($data['budget_strict_count'] ?? count($budgetDeals));
 $couponDeals = $data['coupon_deals'];
 $topClicked = $data['top_clicked'];
-$activeOfferCount = $data['active_offer_count'];
+$activeOfferCount = (int) ($data['active_offer_count'] ?? 0);
+$freshDealsCount = (int) ($data['fresh_deals_count'] ?? 0);
+$lastRefreshAt = trim((string) ($data['last_refresh_at'] ?? ''));
 $siteHeaderCurrent = 'deals';
 $siteHeaderSearchPlaceholder = 'Buscar oferta com desconto';
 ?>
@@ -28,24 +30,6 @@ $siteHeaderSearchPlaceholder = 'Buscar oferta com desconto';
 
   <main class="page-shell" style="padding-top:18px;">
     <div class="container">
-      <section class="section-panel deals-hero-panel">
-        <div class="deals-hero-copy">
-          <span class="eyebrow">Ofertas do Dia</span>
-          <h1>Melhores ofertas do dia</h1>
-          <div class="deals-hero-links">
-            <a class="hero-chip-link" href="#melhores-ofertas">Ver ofertas</a>
-            <a class="hero-chip-link" href="#ofertas-ate-150">Até R$ 150</a>
-            <?php if ($couponDeals): ?>
-              <a class="hero-chip-link" href="#cupons">Com cupom</a>
-            <?php endif; ?>
-            <?php if ($topClicked): ?>
-              <a class="hero-chip-link" href="#mais-clicadas">Mais clicadas</a>
-            <?php endif; ?>
-          </div>
-        </div>
-
-      </section>
-
       <section class="section-panel" id="melhores-ofertas">
         <div class="section-heading">
           <div>
@@ -82,7 +66,7 @@ $siteHeaderSearchPlaceholder = 'Buscar oferta com desconto';
                     <?php if (!empty($offer['cupom'])): ?>
                       <span class="meta-chip">Cupom ativo</span>
                     <?php endif; ?>
-                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promoção</a>
+                    <a class="btn-link primary" href="<?= h(site_offer_redirect_href($offer['slug'])) ?>" target="_blank" rel="noopener sponsored nofollow">Ver promocao</a>
                   </div>
                 </div>
               </article>
@@ -96,7 +80,7 @@ $siteHeaderSearchPlaceholder = 'Buscar oferta com desconto';
       <section class="section-panel" id="ofertas-ate-150">
         <div class="section-heading">
           <div>
-            <h2><?= $budgetStrictCount >= count($budgetDeals) ? 'Ofertas até R$ 150' : 'Ofertas em conta' ?></h2>
+            <h2><?= $budgetStrictCount >= count($budgetDeals) ? 'Ofertas ate R$ 150' : 'Ofertas em conta' ?></h2>
           </div>
         </div>
 

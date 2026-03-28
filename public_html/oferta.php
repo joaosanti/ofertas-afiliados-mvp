@@ -15,15 +15,25 @@ if (!$offer) {
 
 if (isset($_GET['go']) && $_GET['go'] === '1') {
   $redirectUrl = site_offer_preferred_affiliate_url($offer);
+  $clickProfile = click_request_profile(
+    (string) ($_SERVER['HTTP_USER_AGENT'] ?? ''),
+    (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'),
+    (string) ($_SERVER['HTTP_REFERER'] ?? '')
+  );
+  $clickLocation = click_location_context();
   try {
-    $pdo->prepare("INSERT INTO cliques (oferta_id, ip_hash, user_agent, referer) VALUES (?,?,?,?)")
-        ->execute([
-          $offer['id'],
-          ip_hash(),
-          substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255),
-          substr((string) ($_SERVER['HTTP_REFERER'] ?? ''), 0, 2000) ?: null,
-        ]);
+    if (empty($clickProfile['is_bot'])) {
+      $pdo->prepare("INSERT INTO cliques (oferta_id, ip_hash, user_agent, referer) VALUES (?,?,?,?)")
+          ->execute([
+            $offer['id'],
+            ip_hash(),
+            substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255),
+            substr((string) ($_SERVER['HTTP_REFERER'] ?? ''), 0, 2000) ?: null,
+          ]);
+    }
+    site_log_offer_click($offer, $redirectUrl, $clickProfile, $clickLocation);
     header('X-ZeroPreco-Click-Logged: 1');
+    header('X-ZeroPreco-Traffic-Type: ' . (!empty($clickProfile['is_bot']) ? 'bot' : 'human'));
   } catch (Throwable $e) {
     error_log('Zero Preco click log failure: ' . $e->getMessage());
     header('X-ZeroPreco-Click-Logged: 0');

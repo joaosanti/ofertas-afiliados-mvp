@@ -109,7 +109,6 @@ def _has_meli_affiliate_marker(url: str) -> bool:
     polycard = (combined.get("polycard_client") or [None])[0]
     source = (combined.get("source") or [None])[0]
     reco_client = (combined.get("reco_client") or [None])[0]
-
     return bool(
         _is_meli_social_link(url)
         or ("matt_tool" in query)
@@ -186,6 +185,7 @@ def ensure_tags(tags: str | None, store: str, affiliate_tag: str | None) -> str 
             base_tags.append(marker)
 
     if normalized_store == "mercado livre":
+        base_tags = [candidate for candidate in base_tags if not _is_meli_social_link(candidate)]
         for candidate in base_tags:
             if candidate.startswith("meli_social_url:"):
                 return ",".join(base_tags) or None
@@ -205,12 +205,39 @@ def ensure_tags(tags: str | None, store: str, affiliate_tag: str | None) -> str 
     return ",".join(base_tags) or None
 
 
+def _tag_url(tags: str | None, prefix: str, url: str | None) -> str | None:
+    normalized_url = repair_text(url)
+    if not normalized_url.startswith(("http://", "https://")):
+        return tags
+
+    base_tags = [repair_text(tag) for tag in (tags or "").split(",") if repair_text(tag)]
+    base_tags = [candidate for candidate in base_tags if not candidate.startswith(prefix)]
+    encoded_url = urlsafe_b64encode(normalized_url.encode("utf-8")).decode("ascii").rstrip("=")
+    base_tags.append(f"{prefix}{encoded_url}")
+    return ",".join(dict.fromkeys(base_tags)) or None
+
+
 def normalize_offer(raw: dict, store: str, affiliate_tag: str | None = None) -> NormalizedOffer:
     clean_store = repair_text(store)
     clean_url = repair_text(raw.get("url", "#"))
+    social_url = repair_text(raw.get("social_url"))
     raw_tags = repair_text(raw.get("tags"))
-    if clean_store.strip().lower() == "mercado livre" and _is_meli_social_link(clean_url):
-        raw_tags = ",".join(part for part in [raw_tags, clean_url] if part)
+    raw_video_url = repair_text(raw.get("video_url"))
+    primary_url = clean_url
+    if clean_store.strip().lower() == "mercado livre":
+        if social_url:
+            primary_url = social_url
+        if _is_meli_social_link(primary_url):
+            raw_tags = ",".join(part for part in [raw_tags, primary_url] if part)
+
+    if raw_video_url:
+        site_base_url = (os.getenv("SITE_BASE_URL") or "https://zeropreco.com.br").rstrip("/").lower()
+        if raw_video_url.lower().startswith(f"{site_base_url}/uploads/ofertas_videos/"):
+            raw_tags = _tag_url(raw_tags, "offer_video_url:", raw_video_url) or ""
+        elif clean_store.strip().lower() == "shopee":
+            raw_tags = _tag_url(raw_tags, "shopee_video_url:", raw_video_url) or ""
+        else:
+            raw_tags = _tag_url(raw_tags, "offer_video_url:", raw_video_url) or ""
 
     return NormalizedOffer(
         titulo=repair_text(raw.get("title", "Oferta sem titulo")),
@@ -227,7 +254,7 @@ def normalize_offer(raw: dict, store: str, affiliate_tag: str | None = None) -> 
         promocao_texto=repair_text(raw.get("promotion_text")) or None,
         loja=clean_store,
         url_afiliado=ensure_affiliate_link(
-            clean_url,
+            primary_url,
             clean_store,
             affiliate_tag,
             raw.get("item_id"),

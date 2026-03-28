@@ -51,6 +51,13 @@ curl -X POST http://127.0.0.1:8010/integrations/meli/oauth/refresh -H "Content-T
 
 Com `MELI_ACCESS_TOKEN` definido, o coletor tenta importar seus itens ativos via API autenticada.
 
+Para aumentar a chance de resolver mais links `deep social` do Mercado Livre, configure tambem:
+- `MELI_SOCIAL_PAGE_URL` com a URL da sua pagina social/perfil de afiliado.
+- `MELI_SOCIAL_PAGE_URLS` com varias URLs sociais separadas por virgula quando voce tiver mais de uma pagina/perfil/fonte oficial.
+- `MELI_SOCIAL_LIST_MAX_PAGES` para paginar listas `/social/.../lists/...` quando uma lista tiver muitos produtos.
+- `MELI_BROWSER_SESSION_PROFILES` com perfis do navegador separados por virgula, por exemplo: `Default,Profile 1`.
+- `MELI_CHROME_SESSION_PROFILE` continua aceito como compatibilidade, mas agora o coletor tambem tenta descobrir sessoes recentes de Chrome e Edge automaticamente.
+
 ## 5) Conectores
 - Mercado Livre: API publica + OAuth real.
 - Shopee: API de afiliados GraphQL assinada por `SHOPEE_API_KEY` + `SHOPEE_API_SECRET`, com fallback para `SHOPEE_FEED_URL`.
@@ -143,6 +150,50 @@ Teste rapido pela API local:
 curl -X POST http://127.0.0.1:8010/dashboard/api/deploy/stories
 curl -X POST http://127.0.0.1:8010/dashboard/api/deploy/site
 ```
+
+Bootstrap do backend Python no DreamHost:
+
+```bash
+cd ~/seu-dominio.com/automacao_ofertas
+sh bootstrap_dreamhost.sh
+```
+
+Esse bootstrap:
+- cria a `.venv` se ainda nao existir
+- instala `requirements.txt`
+- instala/atualiza `yt-dlp` para o modulo de cortes do YouTube
+
+Diagnostico rapido no DreamHost:
+
+```bash
+cd ~/seu-dominio.com/automacao_ofertas
+.venv/bin/python -c "from app.services.youtube_cuts import _ytdlp_command; print(_ytdlp_command())"
+```
+
+Rodar importacao do Mercado Livre por CLI no DreamHost:
+
+```bash
+cd ~/seu-dominio.com/automacao_ofertas
+.venv/bin/python run_job.py import --provider mercadolivre
+```
+
+Ou com o wrapper pronto para cron:
+
+```bash
+cd ~/seu-dominio.com/automacao_ofertas
+sh cron_import_mercadolivre.sh
+```
+
+Exemplo de cron `3x por dia`:
+
+```cron
+30 6,12,18 * * * cd /home/SEU_USUARIO/SEU_DOMINIO/automacao_ofertas && sh cron_import_mercadolivre.sh >> /home/SEU_USUARIO/logs/ofertas_import_ml.log 2>&1
+```
+
+Observacoes:
+- esse cron usa a mesma logica do importador manual da CLI (`run_job.py import --provider mercadolivre`)
+- o importador so publica/atualiza ofertas do Mercado Livre quando o link vier com marcador oficial de afiliado
+- o `.env` pode ficar com `AUTO_IMPORT_ENABLED=true` e `AUTO_IMPORT_TIMES=06:30,12:30,18:30` para manter a configuracao alinhada com o cron
 
 ## 8) Shopee Affiliate API (real)
 1. Preencha no `.env`:
