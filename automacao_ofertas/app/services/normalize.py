@@ -94,6 +94,20 @@ def _is_meli_social_link(url: str) -> bool:
     return "/social/" in path or "matt_tool" in query
 
 
+def _is_meli_profile_or_list_social_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    if "mercadolivre" not in host and "mercadolibre" not in host:
+        return False
+    if "/social/" not in path:
+        return False
+    if "/lists/" in path:
+        return True
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    return not bool((query.get("ref") or [None])[0])
+
+
 def _has_meli_affiliate_marker(url: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.netloc or "").lower()
@@ -160,6 +174,19 @@ def ensure_affiliate_link(url: str, store: str, tag: str | None = None, item_id:
         # Tracking must come from an official affiliate link or an explicit template.
         return url
 
+    if normalized_store == "shopee":
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").lower()
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        if "shopee" in host and (
+            host.startswith("s.shopee.")
+            or (query.get("utm_medium") or [""])[0] == "affiliates"
+            or bool((query.get("mmp_pid") or [None])[0])
+            or bool((query.get("utm_source") or [None])[0])
+        ):
+            return url
+        return url
+
     if normalized_store == "amazon":
         parsed = urlparse(url)
         asin = _extract_amazon_asin(url, product_id)
@@ -194,7 +221,7 @@ def ensure_tags(tags: str | None, store: str, affiliate_tag: str | None) -> str 
             (
                 repair_text(candidate)
                 for candidate in (tags or "").split(",")
-                if _is_meli_social_link(repair_text(candidate))
+                if _is_meli_social_link(repair_text(candidate)) and not _is_meli_profile_or_list_social_url(repair_text(candidate))
             ),
             "",
         )
@@ -223,12 +250,11 @@ def normalize_offer(raw: dict, store: str, affiliate_tag: str | None = None) -> 
     social_url = repair_text(raw.get("social_url"))
     raw_tags = repair_text(raw.get("tags"))
     raw_video_url = repair_text(raw.get("video_url"))
+    requires_manual_review = bool(raw.get("price_missing_review"))
     primary_url = clean_url
     if clean_store.strip().lower() == "mercado livre":
-        if social_url:
-            primary_url = social_url
-        if _is_meli_social_link(primary_url):
-            raw_tags = ",".join(part for part in [raw_tags, primary_url] if part)
+        if social_url and not _is_meli_profile_or_list_social_url(social_url):
+            raw_tags = ",".join(part for part in [raw_tags, social_url] if part)
 
     if raw_video_url:
         site_base_url = (os.getenv("SITE_BASE_URL") or "https://zeropreco.com.br").rstrip("/").lower()
@@ -238,6 +264,9 @@ def normalize_offer(raw: dict, store: str, affiliate_tag: str | None = None) -> 
             raw_tags = _tag_url(raw_tags, "shopee_video_url:", raw_video_url) or ""
         else:
             raw_tags = _tag_url(raw_tags, "offer_video_url:", raw_video_url) or ""
+
+    if requires_manual_review:
+        raw_tags = ",".join(part for part in [raw_tags, "manual_review", "price_missing"] if part)
 
     return NormalizedOffer(
         titulo=repair_text(raw.get("title", "Oferta sem titulo")),
@@ -265,5 +294,5 @@ def normalize_offer(raw: dict, store: str, affiliate_tag: str | None = None) -> 
         categoria=repair_text(raw.get("category", "ofertas")),
         tags=ensure_tags(raw_tags, clean_store, affiliate_tag),
         destaque=int(raw.get("featured", 0)),
-        ativo=1,
+        ativo=0 if requires_manual_review else 1,
     )

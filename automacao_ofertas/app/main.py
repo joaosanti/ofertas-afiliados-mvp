@@ -1,6 +1,7 @@
 import json
 import os
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -50,6 +51,7 @@ from app.services.normalize import _has_meli_affiliate_marker, build_slug, norma
 from app.services.publish import publish_offer
 from app.services.store_maintenance import (
     preview_mercadolivre_existing_offer_relinks,
+    repair_mercadolivre_product_links,
     relink_mercadolivre_existing_offers,
     repair_amazon_affiliate_links,
     repair_mercadolivre_affiliate_links,
@@ -101,6 +103,7 @@ from app.services.whatsapp_social import (
 )
 from app.services.youtube_cuts import analyze_youtube_video_for_cuts
 from app.services.youtube_cuts import build_youtube_cut_publish_draft
+from app.services.youtube_cuts import rerender_youtube_cut
 from app.services.youtube_cuts import youtube_cut_video_path
 from app.services.youtube_cuts import process_youtube_video_for_cuts
 from app.services.youtube_cuts import youtube_cuts_asset_path
@@ -844,11 +847,20 @@ def _auto_social_candidate_score(item: dict[str, Any]) -> float:
     clicks = float(item.get("clicks") or 0)
     price = float(item.get("price") or 0)
     old_price = float(item.get("old_price") or 0)
+    store_key = (str(item.get("store") or "") or "").strip().lower()
+    has_source_video = str(item.get("video_url") or "").strip() != ""
     discount = 0.0
     if old_price > price > 0:
         discount = ((old_price - price) / old_price) * 100.0
     coupon_bonus = 5.0 if str(item.get("coupon") or "").strip() else 0.0
-    return (clicks * 12.0) + (discount * 4.0) + coupon_bonus + min(price / 100.0, 15.0)
+    video_bonus = 0.0
+    if has_source_video:
+        video_bonus = 12.0
+        if store_key == "shopee":
+            video_bonus = 120.0
+    elif store_key == "shopee":
+        video_bonus = -18.0
+    return (clicks * 12.0) + (discount * 4.0) + coupon_bonus + min(price / 100.0, 15.0) + video_bonus
 
 
 def _pick_auto_social_offer_ids(db, platform: str, mode: str, limit: int = 1) -> list[int]:
@@ -1231,6 +1243,58 @@ def _http_error_detail(exc: Exception) -> str:
     return str(exc)
 
 
+def _is_meta_remote_video_fetch_error(detail: str) -> bool:
+    lowered = (detail or "").strip().lower()
+    if not lowered:
+        return False
+    return (
+        "video download failed" in lowered
+        or "fwdproxy failed to fetch headers" in lowered
+        or "failed to fetch headers" in lowered
+    )
+
+
+def _cache_busted_media_url(url: str, attempt: int) -> str:
+    normalized = (url or "").strip()
+    if normalized == "" or attempt <= 1:
+        return normalized
+    separator = "&" if "?" in normalized else "?"
+    return f"{normalized}{separator}zp_retry={int(time.time())}-{attempt}"
+
+
+def _create_instagram_story_video_container_with_retry(video_url: str) -> dict[str, Any]:
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            return create_instagram_story_container(video_url=_cache_busted_media_url(video_url, attempt))
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt >= 3 or not _is_meta_remote_video_fetch_error(_http_error_detail(exc)):
+                raise
+            time.sleep(4 * attempt)
+    if last_exc is not None:
+        raise last_exc
+    raise ValueError("Falha ao criar o container de story em video no Instagram.")
+
+
+def _create_instagram_reel_container_with_retry(video_url: str, caption: str) -> dict[str, Any]:
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            return create_instagram_reel_container(
+                video_url=_cache_busted_media_url(video_url, attempt),
+                caption=caption,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt >= 3 or not _is_meta_remote_video_fetch_error(_http_error_detail(exc)):
+                raise
+            time.sleep(4 * attempt)
+    if last_exc is not None:
+        raise last_exc
+    raise ValueError("Falha ao criar o container de reel no Instagram.")
+
+
 def _instagram_publish_capacity(required_posts: int = 1) -> dict[str, int]:
     limit_payload = get_instagram_content_publishing_limit()
     result = limit_payload.get("result") or {}
@@ -1550,7 +1614,7 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
             if story_video_asset:
                 try:
                     deploy_stories_via_sftp(only_files=[story_video_asset["filename"]])
-                    created_story = create_instagram_story_container(video_url=story_video_asset["public_url"])
+                    created_story = _create_instagram_story_video_container_with_retry(story_video_asset["public_url"])
                     published_story = publish_instagram_container(created_story["result"]["id"])
                     combined_item["story_creation_id"] = created_story["result"]["id"]
                     combined_item["story_result"] = published_story["result"]
@@ -1943,9 +2007,9 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                         if instagram_capacity_error:
                             raise ValueError(instagram_capacity_error)
                         deploy_stories_via_sftp(only_files=[reel_asset["filename"]])
-                        created_reel = create_instagram_reel_container(
-                            video_url=reel_asset["public_url"],
-                            caption=item["reel_payload"]["caption"],
+                        created_reel = _create_instagram_reel_container_with_retry(
+                            reel_asset["public_url"],
+                            item["reel_payload"]["caption"],
                         )
                         status_payload = wait_for_instagram_container_ready(created_reel["result"]["id"])
                         published_reel = publish_instagram_container(created_reel["result"]["id"])
@@ -2040,9 +2104,9 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                         combined_item["instagram_skipped_reason"] = instagram_capacity_error
                         raise StopIteration
                     deploy_stories_via_sftp(only_files=[reel_asset["filename"]])
-                    created = create_instagram_reel_container(
-                        video_url=reel_asset["public_url"],
-                        caption=item["reel_payload"]["caption"],
+                    created = _create_instagram_reel_container_with_retry(
+                        reel_asset["public_url"],
+                        item["reel_payload"]["caption"],
                     )
                     status_payload = wait_for_instagram_container_ready(created["result"]["id"])
                     published = publish_instagram_container(created["result"]["id"])
@@ -2095,9 +2159,9 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                         raise ValueError(instagram_capacity_error)
                     reel_asset, reel_source, source_video_url, reel_asset_error = prepare_reel_asset(item)
                     deploy_stories_via_sftp(only_files=[reel_asset["filename"]])
-                    created = create_instagram_reel_container(
-                        video_url=reel_asset["public_url"],
-                        caption=item["reel_payload"]["caption"],
+                    created = _create_instagram_reel_container_with_retry(
+                        reel_asset["public_url"],
+                        item["reel_payload"]["caption"],
                     )
                     status_payload = wait_for_instagram_container_ready(created["result"]["id"])
                     published = publish_instagram_container(created["result"]["id"])
@@ -2241,9 +2305,9 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                         raise ValueError(instagram_capacity_error)
                     reel_asset, reel_source, source_video_url, reel_asset_error = prepare_reel_asset(item)
                     deploy_stories_via_sftp(only_files=[reel_asset["filename"]])
-                    created_reel = create_instagram_reel_container(
-                        video_url=reel_asset["public_url"],
-                        caption=item["reel_payload"]["caption"],
+                    created_reel = _create_instagram_reel_container_with_retry(
+                        reel_asset["public_url"],
+                        item["reel_payload"]["caption"],
                     )
                     status_payload = wait_for_instagram_container_ready(created_reel["result"]["id"])
                     published_reel = publish_instagram_container(created_reel["result"]["id"])
@@ -2684,6 +2748,8 @@ def execute_youtube_cut_publish(
     normalized_privacy = (privacy_status or draft["privacy_status"]).strip().lower()
     normalized_publish_at = (publish_at or "").strip()
     normalized_mode = (mode or draft.get("mode") or "short").strip().lower()
+    if normalized_mode == "short" and not bool(draft.get("publish_allowed", True)):
+        raise ValueError(str(draft.get("publish_block_reason") or "Esse short nao mostrou uma pessoa falando no enquadramento inicial."))
     access_token, profile = _youtube_access_token_ready(channel_profile_id or draft.get("channel_profile_id"))
     video_path = youtube_cut_video_path(job_id, cut_id)
     published = upload_youtube_short(
@@ -2793,6 +2859,11 @@ def _best_generated_youtube_cut(cuts: list[dict[str, Any]]) -> dict[str, Any]:
     available = [item for item in cuts if isinstance(item, dict)]
     if not available:
         raise ValueError("Nenhum corte foi gerado para publicar automaticamente.")
+    publishable = [item for item in available if bool(item.get("publish_allowed", True))]
+    if publishable:
+        available = publishable
+    else:
+        raise ValueError("Nenhum corte gerado mostrou uma pessoa em quadro no inicio. Ajuste o enquadramento antes de publicar.")
     return max(
         available,
         key=lambda item: (
@@ -2800,6 +2871,44 @@ def _best_generated_youtube_cut(cuts: list[dict[str, Any]]) -> dict[str, Any]:
             float(item.get("duration_seconds") or 0),
         ),
     )
+
+
+def _try_left_framing_for_blocked_youtube_cuts(job_id: str, cuts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    refreshed: list[dict[str, Any]] = []
+    for item in [cut for cut in cuts if isinstance(cut, dict)]:
+        updated_item = dict(item)
+        if bool(updated_item.get("publish_allowed", True)):
+            refreshed.append(updated_item)
+            continue
+
+        current_zone = str(updated_item.get("opening_focus_zone") or updated_item.get("crop_override") or "").strip().lower()
+        if current_zone == "esquerda" and bool(updated_item.get("opening_speaker_detected")):
+            refreshed.append(updated_item)
+            continue
+
+        cut_id = int(updated_item.get("cut_id") or 0)
+        if cut_id <= 0 or not str(job_id or "").strip():
+            refreshed.append(updated_item)
+            continue
+
+        try:
+            rerendered = rerender_youtube_cut(str(job_id), cut_id, framing="esquerda")
+        except Exception:
+            refreshed.append(updated_item)
+            continue
+
+        updated_item["crop_override"] = str(rerendered.get("framing") or "esquerda")
+        updated_item["opening_focus_zone"] = str(rerendered.get("opening_focus_zone") or "esquerda")
+        updated_item["opening_focus_confidence"] = int(rerendered.get("opening_focus_confidence") or updated_item.get("opening_focus_confidence") or 0)
+        updated_item["opening_subject_signal"] = str(rerendered.get("opening_subject_signal") or updated_item.get("opening_subject_signal") or "")
+        updated_item["opening_visual_score"] = int(rerendered.get("opening_visual_score") or updated_item.get("opening_visual_score") or 0)
+        updated_item["opening_speaker_detected"] = bool(rerendered.get("opening_speaker_detected"))
+        updated_item["opening_speaker_score"] = int(rerendered.get("opening_speaker_score") or updated_item.get("opening_speaker_score") or 0)
+        updated_item["publish_allowed"] = bool(rerendered.get("publish_allowed"))
+        updated_item["publish_block_reason"] = str(rerendered.get("publish_block_reason") or updated_item.get("publish_block_reason") or "")
+        updated_item["video_filename"] = str(rerendered.get("video_filename") or updated_item.get("video_filename") or "")
+        refreshed.append(updated_item)
+    return refreshed
 
 
 def execute_youtube_auto_cut_publish(
@@ -2884,7 +2993,11 @@ def execute_youtube_auto_cut_publish(
                     channel_profile_id=profile_id,
                     burn_subtitles=requested_burn_subtitles,
                 )
-                selected_cut = _best_generated_youtube_cut(list(process_result.get("cuts") or []))
+                processed_cuts = list(process_result.get("cuts") or [])
+                if processed_cuts and not any(bool(item.get("publish_allowed", True)) for item in processed_cuts if isinstance(item, dict)):
+                    processed_cuts = _try_left_framing_for_blocked_youtube_cuts(str(process_result.get("job_id") or ""), processed_cuts)
+                    process_result["cuts"] = processed_cuts
+                selected_cut = _best_generated_youtube_cut(processed_cuts)
                 actual_burn_subtitles = bool(process_result.get("burn_subtitles"))
                 publish_result = execute_youtube_cut_publish(
                     job_id=str(process_result.get("job_id") or ""),
@@ -2912,6 +3025,10 @@ def execute_youtube_auto_cut_publish(
                         "duration_seconds": float(selected_cut.get("duration_seconds") or 0),
                         "duration_label": str(selected_cut.get("duration_label") or ""),
                         "burn_subtitles": actual_burn_subtitles,
+                        "crop_override": str(selected_cut.get("crop_override") or "auto"),
+                        "opening_focus_zone": str(selected_cut.get("opening_focus_zone") or ""),
+                        "opening_speaker_detected": bool(selected_cut.get("opening_speaker_detected")),
+                        "opening_speaker_score": int(selected_cut.get("opening_speaker_score") or 0),
                     },
                     "job_id": str(process_result.get("job_id") or ""),
                     "youtube_video_id": str(publish_result.get("youtube_video_id") or ""),
@@ -3545,6 +3662,20 @@ def dashboard_api_youtube_channels(_: str = Depends(require_manager_auth)):
         db.close()
 
 
+@app.post("/dashboard/api/import/store/mercadolivre/repair-product-links")
+def dashboard_api_mercadolivre_repair_product_links(payload: DashboardAmazonRepairPayload, _: str = Depends(require_manager_auth)):
+    db = SessionLocal()
+    try:
+        summary = repair_mercadolivre_product_links(db, only_inactive=bool(payload.only_inactive))
+        db.commit()
+        return {"ok": True, "store": "Mercado Livre", **summary}
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
 @app.post("/dashboard/api/youtube/channels")
 def dashboard_api_youtube_channel_create(payload: DashboardYoutubeChannelPayload, _: str = Depends(require_manager_auth)):
     db = SessionLocal()
@@ -3654,6 +3785,8 @@ def dashboard_api_youtube_cuts_publish(payload: DashboardYoutubeCutPublishPayloa
         privacy_status = (payload.privacy_status or draft["privacy_status"]).strip().lower()
         publish_at = (payload.publish_at or "").strip()
         mode = (payload.mode or draft.get("mode") or "short").strip().lower()
+        if mode == "short" and not bool(draft.get("publish_allowed", True)):
+            raise ValueError(str(draft.get("publish_block_reason") or "Esse short nao mostrou uma pessoa falando no enquadramento inicial."))
         access_token, profile = _youtube_access_token_ready(payload.channel_profile_id or draft.get("channel_profile_id"))
         video_path = youtube_cut_video_path(payload.job_id, payload.cut_id)
         published = upload_youtube_short(

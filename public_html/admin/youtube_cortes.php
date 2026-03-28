@@ -480,7 +480,11 @@ function admin_compact_youtube_process_result($result) {
       })),
       'opening_score' => (int) ($item['opening_score'] ?? 0),
       'opening_visual_score' => (int) ($item['opening_visual_score'] ?? 0),
+      'opening_speaker_score' => (int) ($item['opening_speaker_score'] ?? 0),
       'opening_focus_zone' => (string) ($item['opening_focus_zone'] ?? ''),
+      'opening_speaker_detected' => !empty($item['opening_speaker_detected']),
+      'publish_allowed' => !array_key_exists('publish_allowed', $item) || !empty($item['publish_allowed']),
+      'publish_block_reason' => (string) ($item['publish_block_reason'] ?? ''),
       'crop_override' => (string) ($item['crop_override'] ?? 'auto'),
       'publish_draft' => is_array($item['publish_draft'] ?? null) ? [
         'channel_profile_id' => (int) (($item['publish_draft']['channel_profile_id'] ?? 0)),
@@ -501,6 +505,40 @@ function admin_youtube_publish_schedule_defaults() {
   return [
     'date' => date('Y-m-d', $scheduledTs),
     'time' => '09:00',
+  ];
+}
+
+function admin_youtube_cut_person_status($cut, $mode = 'short') {
+  $normalizedMode = trim((string) $mode);
+  if ($normalizedMode !== 'short') {
+    return null;
+  }
+
+  $speakerDetected = !empty($cut['opening_speaker_detected']);
+  $publishAllowed = !array_key_exists('publish_allowed', (array) $cut) || !empty($cut['publish_allowed']);
+  $speakerScore = (int) ($cut['opening_speaker_score'] ?? 0);
+  $reason = trim((string) ($cut['publish_block_reason'] ?? ''));
+
+  if ($speakerDetected) {
+    return [
+      'label' => 'Pessoa detectada',
+      'class' => 'ok',
+      'message' => $speakerScore > 0 ? ('Deteccao visual de pessoa falando no inicio do short. Score ' . $speakerScore . '.') : 'Deteccao visual de pessoa falando no inicio do short.',
+    ];
+  }
+
+  if (!$publishAllowed) {
+    return [
+      'label' => 'Nao publicar',
+      'class' => 'off',
+      'message' => $reason !== '' ? $reason : 'O inicio do short nao mostrou uma pessoa falando em quadro.',
+    ];
+  }
+
+  return [
+    'label' => 'Revisar pessoa',
+    'class' => 'warn',
+    'message' => $reason !== '' ? $reason : 'Revise o enquadramento antes de publicar este short.',
   ];
 }
 
@@ -1186,6 +1224,8 @@ function admin_cuts_format_bytes($bytes) {
             $titleVariants = array_slice((array) ($item['title_variants'] ?? []), 0, 3);
             $packagingNotes = array_slice((array) ($item['packaging_notes'] ?? []), 0, 3);
             $cropOverride = (string) ($item['crop_override'] ?? 'auto');
+            $personStatus = admin_youtube_cut_person_status($item, $mode);
+            $publishBlocked = $mode === 'short' && !empty($personStatus) && (string) ($personStatus['label'] ?? '') === 'Nao publicar';
           ?>
           <article class="admin-side-card">
             <?php if ($videoUrl !== ''): ?>
@@ -1204,8 +1244,14 @@ function admin_cuts_format_bytes($bytes) {
               <?php if (!empty($item['opening_visual_score'])): ?>
                 <span class="admin-meta-chip admin-meta-chip-soft">visual <?= (int) $item['opening_visual_score'] ?></span>
               <?php endif; ?>
+              <?php if (!empty($item['opening_speaker_score'])): ?>
+                <span class="admin-meta-chip admin-meta-chip-soft">pessoa <?= (int) $item['opening_speaker_score'] ?></span>
+              <?php endif; ?>
               <?php if (!empty($item['opening_focus_zone'])): ?>
                 <span class="admin-meta-chip admin-meta-chip-soft">foco <?= h((string) $item['opening_focus_zone']) ?></span>
+              <?php endif; ?>
+              <?php if ($personStatus): ?>
+                <span class="admin-status <?= h((string) ($personStatus['class'] ?? 'warn')) ?>"><?= h((string) ($personStatus['label'] ?? 'Revisar')) ?></span>
               <?php endif; ?>
               <?php if (!empty($draft['channel_profile_name'])): ?>
                 <span class="admin-meta-chip admin-meta-chip-soft"><?= h((string) $draft['channel_profile_name']) ?></span>
@@ -1213,6 +1259,9 @@ function admin_cuts_format_bytes($bytes) {
             </div>
             <?php if (!empty($item['hook'])): ?>
               <div class="admin-card-subtitle"><?= h((string) $item['hook']) ?></div>
+            <?php endif; ?>
+            <?php if ($personStatus && !empty($personStatus['message'])): ?>
+              <div class="admin-help" style="margin-top:8px;"><?= h((string) $personStatus['message']) ?></div>
             <?php endif; ?>
             <?php if (!empty($item['first_frame_text'])): ?>
               <div class="admin-help" style="margin-top:8px;">Abertura sugerida: <strong><?= h((string) $item['first_frame_text']) ?></strong></div>
@@ -1273,7 +1322,12 @@ function admin_cuts_format_bytes($bytes) {
                     <input type="time" name="publish_time" value="<?= h((string) $publishScheduleDefaults['time']) ?>" step="60">
                   </label>
                 </div>
-                <button class="btn-link primary" type="submit">Enviar ao YouTube</button>
+                <?php if ($publishBlocked && !empty($personStatus['message'])): ?>
+                  <div class="admin-help"><?= h((string) $personStatus['message']) ?></div>
+                <?php endif; ?>
+                <button class="btn-link primary" type="submit" <?= $publishBlocked ? 'disabled aria-disabled="true"' : '' ?>>
+                  <?= $publishBlocked ? 'Bloqueado sem pessoa' : 'Enviar ao YouTube' ?>
+                </button>
               </form>
             </div>
           </article>
@@ -1405,6 +1459,9 @@ function admin_cuts_format_bytes($bytes) {
                   $subtitleUrl = $subtitleFilename !== ''
                     ? '/admin/youtube_corte_arquivo.php?job=' . rawurlencode($jobId) . '&file=' . rawurlencode($subtitleFilename) . '&download=1'
                     : '';
+                  $cutMode = (string) ($cut['mode'] ?? $job['mode'] ?? 'short');
+                  $personStatus = admin_youtube_cut_person_status($cut, $cutMode);
+                  $publishBlocked = $cutMode === 'short' && !empty($personStatus) && (string) ($personStatus['label'] ?? '') === 'Nao publicar';
                 ?>
                 <article class="admin-side-card">
                   <video class="admin-cut-video" controls preload="metadata" src="<?= h($streamUrl) ?>"></video>
@@ -1419,8 +1476,14 @@ function admin_cuts_format_bytes($bytes) {
                     <?php if (!empty($cut['opening_visual_score'])): ?>
                       <span class="admin-meta-chip admin-meta-chip-soft">visual <?= (int) $cut['opening_visual_score'] ?></span>
                     <?php endif; ?>
+                    <?php if (!empty($cut['opening_speaker_score'])): ?>
+                      <span class="admin-meta-chip admin-meta-chip-soft">pessoa <?= (int) $cut['opening_speaker_score'] ?></span>
+                    <?php endif; ?>
                     <?php if (!empty($cut['opening_focus_zone'])): ?>
                       <span class="admin-meta-chip admin-meta-chip-soft">foco <?= h((string) $cut['opening_focus_zone']) ?></span>
+                    <?php endif; ?>
+                    <?php if ($personStatus): ?>
+                      <span class="admin-status <?= h((string) ($personStatus['class'] ?? 'warn')) ?>"><?= h((string) ($personStatus['label'] ?? 'Revisar')) ?></span>
                     <?php endif; ?>
                     <?php if (!empty($cut['series_label'])): ?>
                       <span class="admin-meta-chip admin-meta-chip-soft"><?= h((string) $cut['series_label']) ?></span>
@@ -1428,6 +1491,9 @@ function admin_cuts_format_bytes($bytes) {
                   </div>
                   <?php if (!empty($cut['hook'])): ?>
                     <div class="admin-card-subtitle"><?= h((string) $cut['hook']) ?></div>
+                  <?php endif; ?>
+                  <?php if ($personStatus && !empty($personStatus['message'])): ?>
+                    <div class="admin-help" style="margin-top:8px;"><?= h((string) $personStatus['message']) ?></div>
                   <?php endif; ?>
                   <?php if (!empty($cut['first_frame_text'])): ?>
                     <div class="admin-help" style="margin-top:8px;">Abertura sugerida: <strong><?= h((string) $cut['first_frame_text']) ?></strong></div>
@@ -1442,7 +1508,7 @@ function admin_cuts_format_bytes($bytes) {
                       <?= h(implode(' • ', array_map(static fn($value) => (string) $value, $packagingNotes))) ?>
                     </div>
                   <?php endif; ?>
-                  <?php if ((string) ($cut['mode'] ?? $job['mode'] ?? 'short') === 'short'): ?>
+                  <?php if ($cutMode === 'short'): ?>
                     <form method="post" style="margin-top:10px; display:grid; gap:8px;">
                       <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
                       <input type="hidden" name="acao" value="rerender_cut">
@@ -1470,7 +1536,7 @@ function admin_cuts_format_bytes($bytes) {
                       <input type="hidden" name="acao" value="publish_cut">
                       <input type="hidden" name="job_id" value="<?= h($jobId) ?>">
                       <input type="hidden" name="cut_id" value="<?= (int) ($cut['cut_id'] ?? 0) ?>">
-                      <input type="hidden" name="mode" value="<?= h((string) ($cut['mode'] ?? $job['mode'] ?? 'short')) ?>">
+                      <input type="hidden" name="mode" value="<?= h($cutMode) ?>">
                       <input type="hidden" name="channel_profile_id" value="<?= (int) ($cut['channel_profile_id'] ?? $job['target_channel_profile_id'] ?? 0) ?>">
                       <label class="admin-field admin-field-compact">
                         <span>Status no YouTube</span>
@@ -1490,7 +1556,12 @@ function admin_cuts_format_bytes($bytes) {
                           <input type="time" name="publish_time" value="<?= h((string) $publishScheduleDefaults['time']) ?>" step="60">
                         </label>
                       </div>
-                      <button class="btn-link" type="submit">Enviar ao YouTube</button>
+                      <?php if ($publishBlocked && !empty($personStatus['message'])): ?>
+                        <div class="admin-help"><?= h((string) $personStatus['message']) ?></div>
+                      <?php endif; ?>
+                      <button class="btn-link" type="submit" <?= $publishBlocked ? 'disabled aria-disabled="true"' : '' ?>>
+                        <?= $publishBlocked ? 'Bloqueado sem pessoa' : 'Enviar ao YouTube' ?>
+                      </button>
                     </form>
                   </div>
                 </article>

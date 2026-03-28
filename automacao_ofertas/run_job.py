@@ -20,6 +20,7 @@ from app.services.manual_file_import import preview_amazon_txt_file, preview_mer
 from app.services.manual_link_import import preview_manual_affiliate_links
 from app.services.normalize import normalize_offer
 from app.services.publish import publish_offer
+from app.services.store_maintenance import repair_mercadolivre_product_links
 from app.services.youtube_cuts import rerender_youtube_cut
 
 
@@ -83,6 +84,9 @@ def main() -> int:
     import_links_parser.add_argument("--input-file", required=True)
     import_links_parser.add_argument("--actor-user-id", type=int, default=None)
     import_links_parser.add_argument("--actor-login", default=None)
+
+    repair_meli_product_links_parser = subparsers.add_parser("repair-mercadolivre-product-links", help="Corrige links de produto do Mercado Livre salvos como perfil/lista.")
+    repair_meli_product_links_parser.add_argument("--only-inactive", action="store_true")
 
     subparsers.add_parser("deploy-site", help="Envia public_html via SFTP.")
 
@@ -168,6 +172,18 @@ def main() -> int:
             items = [item for item in items if bool(item.get("import_allowed", item.get("affiliate_detected", True)))]
             result = _import_items(items, actor_user_id=args.actor_user_id, actor_login=args.actor_login)
             return _emit({"ok": True, "command": "import-links", "result": result})
+
+        if args.command == "repair-mercadolivre-product-links":
+            db = SessionLocal()
+            try:
+                result = repair_mercadolivre_product_links(db, only_inactive=bool(args.only_inactive))
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+            return _emit({"ok": True, "command": "repair-mercadolivre-product-links", "result": result})
 
         if args.command == "deploy-site":
             result = execute_deploy_site()

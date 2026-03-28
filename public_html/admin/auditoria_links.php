@@ -2,6 +2,42 @@
 require_once __DIR__ . '/_init.php';
 admin_require_login();
 
+function admin_strip_shopee_aff_param($url) {
+  $value = trim((string) $url);
+  if ($value === '') {
+    return '';
+  }
+
+  $parts = parse_url($value);
+  if (!is_array($parts)) {
+    return $value;
+  }
+
+  $host = strtolower((string) ($parts['host'] ?? ''));
+  if ($host === '' || strpos($host, 'shopee') === false) {
+    return $value;
+  }
+
+  $query = [];
+  parse_str((string) ($parts['query'] ?? ''), $query);
+  if (!array_key_exists('aff', $query)) {
+    return $value;
+  }
+
+  unset($query['aff']);
+
+  $scheme = isset($parts['scheme']) ? $parts['scheme'] . '://' : '';
+  $user = (string) ($parts['user'] ?? '');
+  $pass = (string) ($parts['pass'] ?? '');
+  $auth = $user !== '' ? $user . ($pass !== '' ? ':' . $pass : '') . '@' : '';
+  $port = isset($parts['port']) ? ':' . $parts['port'] : '';
+  $path = (string) ($parts['path'] ?? '');
+  $queryString = $query ? ('?' . http_build_query($query)) : '';
+  $fragment = isset($parts['fragment']) && $parts['fragment'] !== '' ? ('#' . $parts['fragment']) : '';
+
+  return $scheme . $auth . $host . $port . $path . $queryString . $fragment;
+}
+
 $flash = admin_flash_get();
 
 $pdo = db();
@@ -79,6 +115,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       $pdo->prepare("UPDATE ofertas SET ativo = 1 WHERE id IN ($placeholders)")->execute($idsToEnable);
     }
     $feedback = 'Reativacao concluida: apenas links OK da selecao atual foram ligados.';
+  } elseif ($action === 'sanitize_shopee_aff') {
+    $stmt = $pdo->query("SELECT id, url_afiliado, ativo FROM ofertas WHERE LOWER(loja) = 'shopee' ORDER BY id DESC");
+    $rows = $stmt->fetchAll();
+    $updated = 0;
+    foreach ($rows as $row) {
+      $currentUrl = trim((string) ($row['url_afiliado'] ?? ''));
+      if ($currentUrl === '') {
+        continue;
+      }
+      $fixedUrl = admin_strip_shopee_aff_param($currentUrl);
+      if ($fixedUrl === $currentUrl) {
+        continue;
+      }
+      $pdo->prepare("UPDATE ofertas SET url_afiliado = ? WHERE id = ?")->execute([$fixedUrl, (int) $row['id']]);
+      $updated++;
+    }
+    $feedback = $updated > 0
+      ? "Limpeza da Shopee concluida: {$updated} link(s) tiveram o parametro aff removido."
+      : 'Nenhum link da Shopee com parametro aff foi encontrado para limpar.';
+  } elseif ($action === 'repair_ml_product_links') {
+    $payload = admin_run_python_job(['repair-mercadolivre-product-links']);
+    if (!empty($payload['ok'])) {
+      $summary = is_array($payload['result'] ?? null) ? $payload['result'] : [];
+      $updated = (int) ($summary['updated'] ?? 0);
+      $reactivated = (int) ($summary['reactivated'] ?? 0);
+      $invalid = (int) ($summary['invalid'] ?? 0);
+      $feedback = "Mercado Livre corrigido: {$updated} link(s) atualizados, {$reactivated} reativados, {$invalid} sem correcao automatica.";
+    } else {
+      $feedback = 'Falha ao rodar a correcao do Mercado Livre: ' . (string) ($payload['error'] ?? 'erro desconhecido');
+    }
   }
 }
 
@@ -226,6 +292,16 @@ foreach ($rows as $row) {
       <input type="hidden" name="action" value="reactivate_ok_filtered">
       <input type="hidden" name="target_store" value="<?= h($selectedStore) ?>">
       <button class="btn" type="submit">Reativar OK da selecao atual</button>
+    </form>
+    <form method="post" style="margin-top:10px;">
+      <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+      <input type="hidden" name="action" value="sanitize_shopee_aff">
+      <button class="btn" type="submit">Limpar aff da Shopee</button>
+    </form>
+    <form method="post" style="margin-top:10px;">
+      <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+      <input type="hidden" name="action" value="repair_ml_product_links">
+      <button class="btn" type="submit">Corrigir links produto ML</button>
     </form>
   </section>
 

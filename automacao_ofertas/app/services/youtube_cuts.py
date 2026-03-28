@@ -272,6 +272,8 @@ SHORT_MIN_OPENING_SCORE = 54
 SHORT_MIN_VISUAL_SCORE = 44
 SHORT_STRONG_OPENING_SCORE = 62
 SHORT_STRONG_VISUAL_SCORE = 54
+SHORT_SPEAKER_MIN_SCORE = 34
+SHORT_SPEAKER_STRONG_SCORE = 52
 YOUTUBE_CUTS_RETENTION = timedelta(hours=12)
 
 
@@ -2552,6 +2554,8 @@ def _passes_short_opening_gate(item: dict[str, Any], *, relaxed: bool = False) -
     max_pause = float(item.get("max_pause") or 0.0)
     lead_pause = float(item.get("lead_pause") or 0.0)
     subject_signal = str(item.get("opening_subject_signal") or "").strip().lower()
+    if not bool(item.get("opening_speaker_detected")):
+        return False
     if relaxed:
         if speech_score and speech_score < 42:
             return False
@@ -2817,6 +2821,18 @@ def _generate_hook_overlay_asset(
     return destination
 
 
+def _overlay_asset_has_visible_pixels(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        with Image.open(path) as image:
+            rgba = image.convert("RGBA")
+            alpha = rgba.getchannel("A")
+            return alpha.getbbox() is not None
+    except Exception:
+        return True
+
+
 def _generate_long_thumbnail(
     job_dir: Path,
     cut_id: int,
@@ -2951,6 +2967,176 @@ def _short_focus_zone(position_ratio: float) -> str:
     return "centro"
 
 
+def _crop_x_for_focus_zone(max_crop_x: int, focus_zone: str) -> int:
+    normalized = str(focus_zone or "centro").strip().lower()
+    if normalized == "esquerda":
+        return 0
+    if normalized == "direita":
+        return max(0, max_crop_x)
+    return max(0, max_crop_x // 2)
+
+
+def _is_skin_like_pixel(red: int, green: int, blue: int) -> bool:
+    maximum = max(red, green, blue)
+    minimum = min(red, green, blue)
+    if red > 95 and green > 40 and blue > 20 and (maximum - minimum) > 15 and abs(red - green) > 15 and red > green and red > blue:
+        return True
+    y = (0.299 * red) + (0.587 * green) + (0.114 * blue)
+    cb = 128 - (0.168736 * red) - (0.331264 * green) + (0.5 * blue)
+    cr = 128 + (0.5 * red) - (0.418688 * green) - (0.081312 * blue)
+    return 40 <= y <= 245 and 77 <= cb <= 137 and 133 <= cr <= 185
+
+
+def _largest_connected_blob(mask: list[bool], width: int, height: int) -> int:
+    if not mask or width <= 0 or height <= 0:
+        return 0
+    visited = [False] * len(mask)
+    best = 0
+    for index, enabled in enumerate(mask):
+        if not enabled or visited[index]:
+            continue
+        stack = [index]
+        visited[index] = True
+        size = 0
+        while stack:
+            current = stack.pop()
+            size += 1
+            x = current % width
+            y = current // width
+            neighbours: list[int] = []
+            if x > 0:
+                neighbours.append(current - 1)
+            if x + 1 < width:
+                neighbours.append(current + 1)
+            if y > 0:
+                neighbours.append(current - width)
+            if y + 1 < height:
+                neighbours.append(current + width)
+            for neighbour in neighbours:
+                if mask[neighbour] and not visited[neighbour]:
+                    visited[neighbour] = True
+                    stack.append(neighbour)
+        if size > best:
+            best = size
+    return best
+
+
+def _speaker_presence_metrics_for_window(window: Image.Image) -> dict[str, float]:
+    if window.width <= 1 or window.height <= 1:
+        return {
+            "skin_ratio": 0.0,
+            "center_skin_ratio": 0.0,
+            "largest_skin_blob_ratio": 0.0,
+            "portrait_score": 0.0,
+        }
+
+    resized_width = 48
+    resized_height = max(36, int(round(window.height * resized_width / max(1, window.width))))
+    analysis = window.resize((resized_width, resized_height), Image.Resampling.BILINEAR).convert("RGB")
+    top_limit = max(8, int(resized_height * 0.74))
+    center_left = int(resized_width * 0.18)
+    center_right = max(center_left + 1, int(resized_width * 0.82))
+    upper_limit = max(4, int(top_limit * 0.58))
+
+    mask: list[bool] = []
+    total = 0
+    skin_pixels = 0
+    center_skin_pixels = 0
+    upper_skin_pixels = 0
+    for y in range(top_limit):
+        for x in range(resized_width):
+            red, green, blue = analysis.getpixel((x, y))
+            is_skin = _is_skin_like_pixel(int(red), int(green), int(blue))
+            mask.append(is_skin)
+            total += 1
+            if not is_skin:
+                continue
+            skin_pixels += 1
+            if center_left <= x < center_right:
+                center_skin_pixels += 1
+            if y < upper_limit:
+                upper_skin_pixels += 1
+
+    if total <= 0:
+        return {
+            "skin_ratio": 0.0,
+            "center_skin_ratio": 0.0,
+            "largest_skin_blob_ratio": 0.0,
+            "portrait_score": 0.0,
+        }
+
+    center_total = max(1, (center_right - center_left) * top_limit)
+    upper_total = max(1, resized_width * upper_limit)
+    skin_ratio = skin_pixels / total
+    center_skin_ratio = center_skin_pixels / center_total
+    upper_skin_ratio = upper_skin_pixels / upper_total
+    largest_skin_blob_ratio = _largest_connected_blob(mask, resized_width, top_limit) / total
+
+    portrait_score = 0.0
+    if 0.012 <= skin_ratio <= 0.28:
+        portrait_score += 14
+    elif skin_ratio > 0.34:
+        portrait_score -= 10
+    portrait_score += min(28.0, center_skin_ratio * 240.0)
+    portrait_score += min(32.0, largest_skin_blob_ratio * 520.0)
+    portrait_score += min(18.0, upper_skin_ratio * 160.0)
+    if center_skin_ratio < 0.008 and largest_skin_blob_ratio < 0.004:
+        portrait_score -= 16
+    portrait_score = max(0.0, min(99.0, portrait_score))
+
+    return {
+        "skin_ratio": skin_ratio,
+        "center_skin_ratio": center_skin_ratio,
+        "largest_skin_blob_ratio": largest_skin_blob_ratio,
+        "portrait_score": portrait_score,
+    }
+
+
+def _aggregate_speaker_zone_metrics(
+    frame_paths: list[Path],
+    *,
+    zone_start: int,
+    zone_width: int,
+) -> dict[str, float]:
+    if not frame_paths or zone_width <= 0:
+        return {
+            "skin_ratio": 0.0,
+            "center_skin_ratio": 0.0,
+            "largest_skin_blob_ratio": 0.0,
+            "portrait_score": 0.0,
+        }
+
+    accumulators = {
+        "skin_ratio": 0.0,
+        "center_skin_ratio": 0.0,
+        "largest_skin_blob_ratio": 0.0,
+        "portrait_score": 0.0,
+    }
+    samples = 0
+    for frame_path in frame_paths[: min(len(frame_paths), 8)]:
+        try:
+            with Image.open(frame_path) as frame_image:
+                left = max(0, min(zone_start, max(0, frame_image.width - 1)))
+                right = max(left + 1, min(frame_image.width, left + zone_width))
+                crop = frame_image.crop((left, 0, right, frame_image.height))
+                metrics = _speaker_presence_metrics_for_window(crop)
+        except Exception:
+            continue
+        samples += 1
+        for key in accumulators:
+            accumulators[key] += float(metrics.get(key) or 0.0)
+
+    if samples <= 0:
+        return {
+            "skin_ratio": 0.0,
+            "center_skin_ratio": 0.0,
+            "largest_skin_blob_ratio": 0.0,
+            "portrait_score": 0.0,
+        }
+
+    return {key: value / samples for key, value in accumulators.items()}
+
+
 def _analyze_short_opening_visual_signal(
     source_video: Path,
     output_video: Path,
@@ -2958,40 +3144,34 @@ def _analyze_short_opening_visual_signal(
     start_time: float,
     duration_seconds: float,
 ) -> dict[str, Any]:
+    default_payload = {
+        "crop_x": 0,
+        "opening_visual_score": 50,
+        "opening_focus_zone": "centro",
+        "opening_focus_confidence": 0,
+        "opening_subject_signal": "neutro",
+        "opening_speaker_detected": False,
+        "opening_speaker_score": 0,
+        "publish_allowed": False,
+        "publish_block_reason": "Nao detectei uma pessoa em quadro no primeiro segundo do corte.",
+        "speaker_zone_scores": {},
+    }
     dimensions = _video_dimensions(source_video)
     if dimensions is None:
-        return {
-            "crop_x": 0,
-            "opening_visual_score": 50,
-            "opening_focus_zone": "centro",
-            "opening_focus_confidence": 0,
-            "opening_subject_signal": "neutro",
-        }
+        return default_payload
 
     source_width, source_height = dimensions
     scaled_width = _scaled_width_for_height(source_width, source_height, SHORT_VIDEO_HEIGHT)
     max_crop_x = max(0, scaled_width - SHORT_VIDEO_WIDTH)
     center_crop_x = max_crop_x // 2
     if max_crop_x <= 0:
-        return {
-            "crop_x": 0,
-            "opening_visual_score": 52,
-            "opening_focus_zone": "centro",
-            "opening_focus_confidence": 0,
-            "opening_subject_signal": "neutro",
-        }
+        return default_payload | {"crop_x": 0, "opening_visual_score": 52}
 
     analysis_width = _scaled_width_for_height(source_width, source_height, SHORT_SMART_CROP_ANALYSIS_HEIGHT)
     crop_width_analysis = max(2, min(analysis_width, _even_int(SHORT_VIDEO_WIDTH * SHORT_SMART_CROP_ANALYSIS_HEIGHT / SHORT_VIDEO_HEIGHT)))
     center_analysis_x = max(0, (analysis_width - crop_width_analysis) // 2)
     if analysis_width <= crop_width_analysis:
-        return {
-            "crop_x": center_crop_x,
-            "opening_visual_score": 52,
-            "opening_focus_zone": "centro",
-            "opening_focus_confidence": 0,
-            "opening_subject_signal": "neutro",
-        }
+        return default_payload | {"crop_x": center_crop_x, "opening_visual_score": 52}
 
     frames_dir = output_video.with_suffix("")
     frames_dir = frames_dir.with_name(f"{frames_dir.name}-smartcrop")
@@ -3003,87 +3183,130 @@ def _analyze_short_opening_visual_signal(
             duration_seconds=duration_seconds,
         )
         if len(frame_paths) < 2:
-            return {
+            return default_payload | {
                 "crop_x": center_crop_x,
-                "opening_visual_score": 48,
-                "opening_focus_zone": "centro",
-                "opening_focus_confidence": 0,
-                "opening_subject_signal": "fraco",
+                "opening_visual_score": 34,
+                "opening_focus_zone": "direita",
+                "opening_subject_signal": "sem_pessoa",
             }
         column_scores = _motion_column_scores(frame_paths)
         if not column_scores:
-            return {
+            return default_payload | {
                 "crop_x": center_crop_x,
-                "opening_visual_score": 48,
-                "opening_focus_zone": "centro",
-                "opening_focus_confidence": 0,
-                "opening_subject_signal": "fraco",
+                "opening_visual_score": 34,
+                "opening_focus_zone": "direita",
+                "opening_subject_signal": "sem_pessoa",
             }
         prefix_sums = [0.0]
         for value in column_scores:
             prefix_sums.append(prefix_sums[-1] + value)
         center_score = _window_sum(prefix_sums, center_analysis_x, crop_width_analysis)
-        best_x = center_analysis_x
-        best_score = center_score
         last_start = max(0, analysis_width - crop_width_analysis)
-        step = max(2, SHORT_SMART_CROP_WINDOW_STEP)
-        for start in range(0, last_start + 1, step):
-            score = _window_sum(prefix_sums, start, crop_width_analysis)
-            if score > best_score:
-                best_score = score
-                best_x = start
         average_energy = prefix_sums[-1] / max(1, len(column_scores))
         peak_energy = max(column_scores) if column_scores else 0.0
-        focus_ratio = best_score / max(1.0, center_score or 1.0)
+        zone_starts = {
+            "esquerda": 0,
+            "centro": center_analysis_x,
+            "direita": last_start,
+        }
+        zone_results: dict[str, dict[str, Any]] = {}
+        for zone_name, zone_start in zone_starts.items():
+            motion_score = _window_sum(prefix_sums, zone_start, crop_width_analysis)
+            motion_ratio = motion_score / max(1.0, center_score or 1.0)
+            speaker_metrics = _aggregate_speaker_zone_metrics(
+                frame_paths,
+                zone_start=zone_start,
+                zone_width=crop_width_analysis,
+            )
+            portrait_score = float(speaker_metrics.get("portrait_score") or 0.0)
+            speaker_score = portrait_score
+            speaker_score += min(18.0, max(0.0, (motion_ratio - 0.88) * 26.0))
+            if zone_name == "esquerda":
+                speaker_score += 4.0
+            elif zone_name == "centro":
+                speaker_score += 2.0
+            speaker_score = max(0.0, min(99.0, speaker_score))
+            speaker_detected = bool(
+                speaker_score >= SHORT_SPEAKER_MIN_SCORE
+                and (
+                    float(speaker_metrics.get("largest_skin_blob_ratio") or 0.0) >= 0.004
+                    or float(speaker_metrics.get("center_skin_ratio") or 0.0) >= 0.010
+                    or float(speaker_metrics.get("skin_ratio") or 0.0) >= 0.020
+                )
+            )
+            zone_results[zone_name] = {
+                "zone": zone_name,
+                "motion_score": round(float(motion_score), 2),
+                "motion_ratio": round(float(motion_ratio), 3),
+                "skin_ratio": round(float(speaker_metrics.get("skin_ratio") or 0.0), 4),
+                "center_skin_ratio": round(float(speaker_metrics.get("center_skin_ratio") or 0.0), 4),
+                "largest_skin_blob_ratio": round(float(speaker_metrics.get("largest_skin_blob_ratio") or 0.0), 4),
+                "speaker_score": int(round(speaker_score)),
+                "speaker_detected": speaker_detected,
+            }
+
+        chosen_zone = "direita"
+        if zone_results["esquerda"]["speaker_detected"]:
+            chosen_zone = "esquerda"
+        elif zone_results["direita"]["speaker_detected"]:
+            chosen_zone = "direita"
+        elif zone_results["centro"]["speaker_detected"]:
+            chosen_zone = "centro"
+
+        chosen = zone_results[chosen_zone]
+        opening_speaker_detected = bool(chosen.get("speaker_detected"))
         peak_ratio = peak_energy / max(1.0, average_energy or 1.0)
-        best_window_center = best_x + (crop_width_analysis / 2.0)
-        focus_zone = _short_focus_zone(best_window_center / max(1.0, float(analysis_width)))
         confidence = max(
             0.0,
             min(
                 1.0,
-                ((focus_ratio - 1.0) * 0.58)
-                + ((peak_ratio - 1.0) * 0.22),
+                ((float(chosen.get("speaker_score") or 0.0) / 100.0) * 0.72)
+                + max(0.0, (peak_ratio - 1.0) * 0.12),
             ),
         )
-        visual_score = 46
-        visual_score += min(16, max(0, round((focus_ratio - 1.0) * 22)))
-        visual_score += min(14, max(0, round((peak_ratio - 1.0) * 10)))
+        visual_score = 34
+        visual_score += min(12, max(0, round((peak_ratio - 1.0) * 10)))
+        visual_score += round((float(chosen.get("speaker_score") or 0.0) - 28.0) * 0.55)
         if average_energy < 14:
-            visual_score -= 14
+            visual_score -= 10
         elif average_energy < 22:
-            visual_score -= 8
+            visual_score -= 6
         elif average_energy > 40:
+            visual_score += 4
+        if opening_speaker_detected and chosen_zone in {"esquerda", "direita"}:
             visual_score += 6
-        if focus_zone != "centro" and confidence >= 0.34:
-            visual_score += 6
-        elif focus_zone == "centro" and confidence < 0.12:
-            visual_score -= 4
+        if not opening_speaker_detected:
+            visual_score -= 12
         visual_score = max(1, min(99, visual_score))
-        if visual_score >= 72:
+        if not opening_speaker_detected:
+            subject_signal = "sem_pessoa"
+            publish_allowed = False
+            publish_block_reason = "Nao detectei uma pessoa falando no enquadramento de abertura do short."
+        elif int(chosen.get("speaker_score") or 0) >= SHORT_SPEAKER_STRONG_SCORE and visual_score >= 64:
             subject_signal = "forte"
-        elif visual_score >= 56:
-            subject_signal = "medio"
+            publish_allowed = True
+            publish_block_reason = ""
         else:
-            subject_signal = "fraco"
-        if best_score <= center_score * SHORT_SMART_CROP_CENTER_STICKINESS:
-            best_x = center_analysis_x
-            focus_zone = "centro"
-        ratio = scaled_width / max(1, analysis_width)
-        detected_x = int(round(best_x * ratio))
+            subject_signal = "medio"
+            publish_allowed = True
+            publish_block_reason = ""
         return {
-            "crop_x": max(0, min(max_crop_x, detected_x)),
+            "crop_x": _crop_x_for_focus_zone(max_crop_x, chosen_zone),
             "opening_visual_score": int(visual_score),
-            "opening_focus_zone": focus_zone,
+            "opening_focus_zone": chosen_zone,
             "opening_focus_confidence": int(round(confidence * 100)),
             "opening_subject_signal": subject_signal,
+            "opening_speaker_detected": opening_speaker_detected,
+            "opening_speaker_score": int(chosen.get("speaker_score") or 0),
+            "publish_allowed": publish_allowed,
+            "publish_block_reason": publish_block_reason,
+            "speaker_zone_scores": zone_results,
         }
     except Exception:
-        return {
+        return default_payload | {
             "crop_x": center_crop_x,
-            "opening_visual_score": 50,
-            "opening_focus_zone": "centro",
-            "opening_focus_confidence": 0,
+            "opening_visual_score": 42,
+            "opening_focus_zone": "direita",
             "opening_subject_signal": "neutro",
         }
     finally:
@@ -3117,6 +3340,7 @@ def _generate_vertical_cut(
 ) -> None:
     ffmpeg = _ffmpeg_command()
     rendered_video = output_video.with_name(f"{output_video.stem}.video-only{output_video.suffix}")
+    use_overlay = _overlay_asset_has_visible_pixels(overlay_path)
     resolved_crop_x = int(crop_x) if crop_x is not None else _detect_short_crop_x(
         source_video,
         output_video,
@@ -3125,39 +3349,53 @@ def _generate_vertical_cut(
     )
     filter_steps = [
         f"[0:v]scale=-2:{SHORT_VIDEO_HEIGHT}:flags=lanczos,crop={SHORT_VIDEO_WIDTH}:{SHORT_VIDEO_HEIGHT}:{resolved_crop_x}:0,setsar=1[base]",
-        "[base][1:v]overlay=0:0:enable='lt(t,3.2)'[hooked]",
     ]
+    if use_overlay:
+        filter_steps.append("[base][1:v]overlay=0:0:enable='lt(t,3.2)'[hooked]")
+        source_label = "hooked"
+    else:
+        source_label = "base"
     if subtitles_path is not None:
         subtitle_filter = _escape_subtitles_filter_path(subtitles_path)
-        filter_steps.append(f"[hooked]subtitles='{subtitle_filter}',format=yuv420p[vout]")
+        filter_steps.append(f"[{source_label}]subtitles='{subtitle_filter}',format=yuv420p[vout]")
     else:
-        filter_steps.append("[hooked]format=yuv420p[vout]")
+        filter_steps.append(f"[{source_label}]format=yuv420p[vout]")
     filter_complex = ";".join(filter_steps)
-    try:
-        _run_command(
-            ffmpeg
-            + [
-                "-y",
-                *_ffmpeg_filter_thread_args(),
-                "-ss",
-                f"{start_time:.2f}",
-                "-i",
-                str(source_video),
+    render_command = (
+        ffmpeg
+        + [
+            "-y",
+            *_ffmpeg_filter_thread_args(),
+            "-ss",
+            f"{start_time:.2f}",
+            "-i",
+            str(source_video),
+        ]
+    )
+    if use_overlay:
+        render_command.extend(
+            [
                 "-loop",
                 "1",
                 "-i",
                 str(overlay_path),
-                "-t",
-                f"{duration_seconds:.2f}",
-                "-filter_complex",
-                filter_complex,
-                "-map",
-                "[vout]",
-                *_ffmpeg_h264_video_args(mode="short"),
-                "-an",
-                str(rendered_video),
             ]
         )
+    render_command.extend(
+        [
+            "-t",
+            f"{duration_seconds:.2f}",
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[vout]",
+            *_ffmpeg_h264_video_args(mode="short"),
+            "-an",
+            str(rendered_video),
+        ]
+    )
+    try:
+        _run_command(render_command)
         _run_command(
             ffmpeg
             + [
@@ -3194,35 +3432,51 @@ def _generate_horizontal_cut(
 ) -> None:
     ffmpeg = _ffmpeg_command()
     rendered_video = output_video.with_name(f"{output_video.stem}.video-only{output_video.suffix}")
-    filter_complex = (
-        "[0:v]scale=1920:-2:flags=lanczos,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[base];"
-        "[base][1:v]overlay=0:0:enable='lt(t,4.0)',format=yuv420p[vout]"
+    use_overlay = _overlay_asset_has_visible_pixels(overlay_path)
+    filter_steps = [
+        "[0:v]scale=1920:-2:flags=lanczos,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[base]",
+    ]
+    if use_overlay:
+        filter_steps.append("[base][1:v]overlay=0:0:enable='lt(t,4.0)'[hooked]")
+        filter_steps.append("[hooked]format=yuv420p[vout]")
+    else:
+        filter_steps.append("[base]format=yuv420p[vout]")
+    filter_complex = ";".join(filter_steps)
+    render_command = (
+        ffmpeg
+        + [
+            "-y",
+            *_ffmpeg_filter_thread_args(),
+            "-ss",
+            f"{start_time:.2f}",
+            "-i",
+            str(source_video),
+        ]
     )
-    try:
-        _run_command(
-            ffmpeg
-            + [
-                "-y",
-                *_ffmpeg_filter_thread_args(),
-                "-ss",
-                f"{start_time:.2f}",
-                "-i",
-                str(source_video),
+    if use_overlay:
+        render_command.extend(
+            [
                 "-loop",
                 "1",
                 "-i",
                 str(overlay_path),
-                "-t",
-                f"{duration_seconds:.2f}",
-                "-filter_complex",
-                filter_complex,
-                "-map",
-                "[vout]",
-                *_ffmpeg_h264_video_args(mode="long"),
-                "-an",
-                str(rendered_video),
             ]
         )
+    render_command.extend(
+        [
+            "-t",
+            f"{duration_seconds:.2f}",
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[vout]",
+            *_ffmpeg_h264_video_args(mode="long"),
+            "-an",
+            str(rendered_video),
+        ]
+    )
+    try:
+        _run_command(render_command)
         _run_command(
             ffmpeg
             + [
@@ -3451,24 +3705,33 @@ def rerender_youtube_cut(job_id: str, cut_id: int, *, framing: str = "auto") -> 
         overlay_filename = overlay_path.name
 
     subtitle_path = youtube_cuts_asset_path(job_id, subtitle_filename) if subtitle_filename else None
+    visual_signal = _analyze_short_opening_visual_signal(
+        source_video,
+        output_video,
+        start_time=float(cut.get("start") or 0.0),
+        duration_seconds=min(float(cut.get("duration_seconds") or 0.0), 4.0),
+    )
     if normalized_framing == "auto":
-        visual_signal = _analyze_short_opening_visual_signal(
-            source_video,
-            output_video,
-            start_time=float(cut.get("start") or 0.0),
-            duration_seconds=min(float(cut.get("duration_seconds") or 0.0), 4.0),
-        )
         crop_x = int(visual_signal.get("crop_x") or 0)
         opening_focus_zone = str(visual_signal.get("opening_focus_zone") or "centro")
         opening_focus_confidence = int(visual_signal.get("opening_focus_confidence") or 0)
         opening_subject_signal = str(visual_signal.get("opening_subject_signal") or "neutro")
         opening_visual_score = int(visual_signal.get("opening_visual_score") or 50)
+        opening_speaker_detected = bool(visual_signal.get("opening_speaker_detected"))
+        opening_speaker_score = int(visual_signal.get("opening_speaker_score") or 0)
+        publish_allowed = bool(visual_signal.get("publish_allowed"))
+        publish_block_reason = str(visual_signal.get("publish_block_reason") or "").strip()
     else:
         crop_x = _manual_short_crop_x(source_video, normalized_framing)
         opening_focus_zone = normalized_framing
-        opening_focus_confidence = 100
-        opening_subject_signal = "manual"
-        opening_visual_score = int(cut.get("opening_visual_score") or 50)
+        zone_signal = dict((visual_signal.get("speaker_zone_scores") or {}).get(normalized_framing) or {})
+        opening_speaker_detected = bool(zone_signal.get("speaker_detected"))
+        opening_speaker_score = int(zone_signal.get("speaker_score") or 0)
+        opening_focus_confidence = max(80, min(100, opening_speaker_score + 18)) if opening_speaker_score else 100
+        opening_subject_signal = "manual" if opening_speaker_score <= 0 else ("forte" if opening_speaker_score >= SHORT_SPEAKER_STRONG_SCORE else "medio")
+        opening_visual_score = int(max(int(cut.get("opening_visual_score") or 50), opening_speaker_score))
+        publish_allowed = opening_speaker_detected
+        publish_block_reason = "" if publish_allowed else "O enquadramento manual ainda nao mostrou uma pessoa falando no inicio do short."
 
     _generate_vertical_cut(
         source_video,
@@ -3486,9 +3749,15 @@ def rerender_youtube_cut(job_id: str, cut_id: int, *, framing: str = "auto") -> 
     cut["opening_focus_confidence"] = opening_focus_confidence
     cut["opening_subject_signal"] = opening_subject_signal
     cut["opening_visual_score"] = opening_visual_score
+    cut["opening_speaker_detected"] = opening_speaker_detected
+    cut["opening_speaker_score"] = opening_speaker_score
+    cut["publish_allowed"] = publish_allowed
+    cut["publish_block_reason"] = publish_block_reason
     cut["hook_overlay_filename"] = overlay_filename
     packaging_notes = list(cut.get("packaging_notes") or [])
     packaging_notes.append(f"Enquadramento manual: {normalized_framing}.")
+    if not publish_allowed and publish_block_reason:
+        packaging_notes.append(publish_block_reason)
     cut["packaging_notes"] = _dedupe_preserve_order(packaging_notes, limit=8)
     cuts[cut_index] = cut
     manifest["cuts"] = cuts
@@ -3505,6 +3774,10 @@ def rerender_youtube_cut(job_id: str, cut_id: int, *, framing: str = "auto") -> 
         "opening_focus_confidence": opening_focus_confidence,
         "opening_subject_signal": opening_subject_signal,
         "opening_visual_score": opening_visual_score,
+        "opening_speaker_detected": opening_speaker_detected,
+        "opening_speaker_score": opening_speaker_score,
+        "publish_allowed": publish_allowed,
+        "publish_block_reason": publish_block_reason,
         "video_filename": video_filename,
     }
 
@@ -3712,6 +3985,10 @@ def build_youtube_cut_publish_draft(job_id: str, cut_id: int, *, privacy_status:
         "title_variants": list(selected.get("title_variants") or []),
         "thumbnail_text_variants": list(selected.get("thumbnail_text_variants") or []),
         "scorecard": dict(selected.get("scorecard") or {}),
+        "publish_allowed": bool(selected.get("publish_allowed", True)),
+        "publish_block_reason": str(selected.get("publish_block_reason") or "").strip(),
+        "opening_speaker_detected": bool(selected.get("opening_speaker_detected")),
+        "opening_speaker_score": int(selected.get("opening_speaker_score") or 0),
         "chapters": chapters,
         "topic_tags": topic_tags,
         "first_frame_text": str(selected.get("first_frame_text") or ""),
@@ -3830,7 +4107,11 @@ def process_youtube_video_for_cuts(
             updated_item = item | visual_signal
             updated_item["scorecard"] = scorecard
             updated_item["visual_delta"] = visual_delta
-            updated_item["score"] = max(1, min(99, int(item.get("score") or 0) + visual_delta))
+            if not bool(visual_signal.get("opening_speaker_detected")):
+                updated_item["visual_delta"] = int(updated_item.get("visual_delta") or 0) - 22
+            updated_item["score"] = max(1, min(99, int(item.get("score") or 0) + int(updated_item.get("visual_delta") or 0)))
+            updated_item["publish_allowed"] = bool(visual_signal.get("publish_allowed"))
+            updated_item["publish_block_reason"] = str(visual_signal.get("publish_block_reason") or "").strip()
             updated_item["packaging_notes"] = _dedupe_preserve_order(
                 list(item.get("packaging_notes") or [])
                 + [
@@ -3843,6 +4124,7 @@ def process_youtube_video_for_cuts(
                     ),
                     "Evitar publicar esse corte se o rosto nao aparecer logo no primeiro segundo.",
                 ]
+                + ([str(visual_signal.get("publish_block_reason") or "").strip()] if str(visual_signal.get("publish_block_reason") or "").strip() else [])
             )
             visually_scored_candidates.append(updated_item)
         ranked_candidates = sorted(

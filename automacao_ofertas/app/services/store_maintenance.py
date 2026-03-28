@@ -1,9 +1,10 @@
 import os
 import re
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urlparse, urlunparse
 
 from sqlalchemy import text
 
+from app.services.manual_link_import import preview_manual_affiliate_links
 from app.services.normalize import _extract_meli_item_id, _has_meli_affiliate_marker, ensure_affiliate_link
 from app.services.normalize import build_slug
 
@@ -22,6 +23,16 @@ UPDATE_OFFER_SQL = text(
     """
     UPDATE ofertas
     SET url_afiliado = :url_afiliado,
+        ativo = :ativo
+    WHERE id = :id
+    """
+)
+
+UPDATE_OFFER_URL_AND_TAGS_SQL = text(
+    """
+    UPDATE ofertas
+    SET url_afiliado = :url_afiliado,
+        tags = :tags,
         ativo = :ativo
     WHERE id = :id
     """
@@ -166,6 +177,20 @@ def _has_shopee_affiliate_marker(url: str) -> bool:
     )
 
 
+def _sanitize_shopee_affiliate_url(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+
+    parsed = urlparse(raw)
+    host = (parsed.netloc or "").lower()
+    if "shopee" not in host:
+        return raw
+
+    filtered_query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key.lower() != "aff"]
+    return urlunparse(parsed._replace(query=urlencode(filtered_query), fragment=""))
+
+
 def repair_shopee_affiliate_links(db, only_inactive: bool = True) -> dict[str, int | str]:
     rows = db.execute(
         SELECT_AMAZON_OFFERS_SQL,
@@ -178,6 +203,7 @@ def repair_shopee_affiliate_links(db, only_inactive: bool = True) -> dict[str, i
         "reactivated": 0,
         "skipped": 0,
         "invalid": 0,
+        "sanitized": 0,
     }
 
     for row in rows:
@@ -187,21 +213,27 @@ def repair_shopee_affiliate_links(db, only_inactive: bool = True) -> dict[str, i
             summary["invalid"] += 1
             continue
 
-        if not _has_shopee_affiliate_marker(current_url):
+        fixed_url = _sanitize_shopee_affiliate_url(current_url)
+
+        if not _has_shopee_affiliate_marker(fixed_url):
             summary["invalid"] += 1
             continue
 
         next_active = 1
-        if int(row.get("ativo") or 0) == next_active:
+        changed = fixed_url != current_url or int(row.get("ativo") or 0) != next_active
+        if not changed:
             summary["skipped"] += 1
             continue
 
         db.execute(
             UPDATE_OFFER_SQL,
-            {"id": row["id"], "url_afiliado": current_url, "ativo": next_active},
+            {"id": row["id"], "url_afiliado": fixed_url, "ativo": next_active},
         )
         summary["updated"] += 1
-        summary["reactivated"] += 1
+        if fixed_url != current_url:
+            summary["sanitized"] += 1
+        if int(row.get("ativo") or 0) != 1:
+            summary["reactivated"] += 1
 
     return summary
 
@@ -209,6 +241,85 @@ def repair_shopee_affiliate_links(db, only_inactive: bool = True) -> dict[str, i
 def _extract_ml_product_id(url: str) -> str | None:
     match = re.search(r"/p/(MLB\d+)", (url or "").strip(), re.IGNORECASE)
     return match.group(1).upper() if match else None
+
+
+def _is_meli_social_source_url(url: str) -> bool:
+    parsed = urlparse((url or "").strip())
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    if "mercadolivre" not in host and "mercadolibre" not in host:
+        return False
+    return "/social/" in path
+
+
+def _strip_meli_social_url_tag(tags: str | None) -> str | None:
+    parts = [str(part or "").strip() for part in str(tags or "").split(",")]
+    cleaned = [part for part in parts if part and not part.startswith("meli_social_url:")]
+    return ",".join(cleaned) or None
+
+
+def repair_mercadolivre_product_links(db, only_inactive: bool = False) -> dict[str, int | str]:
+    rows = db.execute(
+        SELECT_AMAZON_OFFERS_SQL,
+        {"store": "Mercado Livre", "only_inactive": 1 if only_inactive else 0},
+    ).mappings().all()
+
+    tags_by_id = {
+        int(row["id"]): row
+        for row in db.execute(
+            text(
+                """
+                SELECT id, tags
+                FROM ofertas
+                WHERE LOWER(loja) = LOWER('Mercado Livre')
+                  AND (:only_inactive = 0 OR ativo = 0)
+                """
+            ),
+            {"only_inactive": 1 if only_inactive else 0},
+        ).mappings().all()
+    }
+
+    summary = {"processed": 0, "updated": 0, "reactivated": 0, "skipped": 0, "invalid": 0, "sanitized_tags": 0}
+    for row in rows:
+        summary["processed"] += 1
+        offer_id = int(row["id"])
+        current_url = str(row.get("url_afiliado") or "").strip()
+        current_tags = str((tags_by_id.get(offer_id) or {}).get("tags") or "").strip()
+        if not current_url:
+            summary["invalid"] += 1
+            continue
+
+        next_url = current_url
+        if _is_meli_social_source_url(current_url):
+            try:
+                items = preview_manual_affiliate_links([current_url])
+            except Exception:
+                items = []
+            candidate = dict(items[0]) if items else {}
+            candidate_url = str(candidate.get("url") or candidate.get("canonical_url") or "").strip()
+            if not candidate_url or _is_meli_social_source_url(candidate_url) or not _has_meli_affiliate_marker(candidate_url):
+                summary["invalid"] += 1
+                continue
+            next_url = candidate_url
+
+        next_tags = _strip_meli_social_url_tag(current_tags)
+        next_active = 1
+        changed = next_url != current_url or (next_tags or "") != current_tags or int(row.get("ativo") or 0) != next_active
+        if not changed:
+            summary["skipped"] += 1
+            continue
+
+        db.execute(
+            UPDATE_OFFER_URL_AND_TAGS_SQL,
+            {"id": offer_id, "url_afiliado": next_url, "tags": next_tags, "ativo": next_active},
+        )
+        summary["updated"] += 1
+        if (next_tags or "") != current_tags:
+            summary["sanitized_tags"] += 1
+        if int(row.get("ativo") or 0) != 1:
+            summary["reactivated"] += 1
+
+    return summary
 
 
 def _normalize_input_links(links: list[str]) -> list[str]:

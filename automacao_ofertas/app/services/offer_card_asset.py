@@ -245,6 +245,86 @@ def _truncate_text(text: str, limit: int) -> str:
     return value[: max(0, limit - 3)].rstrip(" -|,.;") + "..."
 
 
+def _fit_text_with_ellipsis(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont, max_width: int) -> str:
+    value = _clean_text(text)
+    if not value:
+        return ""
+    if draw.textbbox((0, 0), value, font=font)[2] <= max_width:
+        return value
+
+    words = value.split()
+    while words:
+        candidate = " ".join(words).rstrip(" -|,.;") + "..."
+        if draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
+            return candidate
+        words.pop()
+    return "..."
+
+
+def _wrap_text_to_width(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    max_width: int,
+    *,
+    max_lines: int | None = None,
+) -> list[str]:
+    words = _clean_text(text).split()
+    if not words:
+        return []
+
+    lines: list[str] = []
+    index = 0
+    while index < len(words):
+        current = words[index]
+        index += 1
+        while index < len(words):
+            trial = f"{current} {words[index]}"
+            if draw.textbbox((0, 0), trial, font=font)[2] <= max_width:
+                current = trial
+                index += 1
+                continue
+            break
+
+        if max_lines is not None and len(lines) == max_lines - 1 and index < len(words):
+            remaining = " ".join([current] + words[index:])
+            lines.append(_fit_text_with_ellipsis(draw, remaining, font, max_width))
+            return lines
+        lines.append(current)
+
+    return lines
+
+
+def _fit_square_card_title_layout(
+    draw: ImageDraw.ImageDraw,
+    title: str,
+    *,
+    max_width: int,
+    max_height: int,
+) -> dict[str, Any] | None:
+    clean_title = _clean_text(title)
+    if not clean_title or max_height <= 0:
+        return None
+
+    for font_size in range(36, 21, -2):
+        font = _load_font(font_size, bold=True)
+        sample_bbox = draw.textbbox((0, 0), "Ag", font=font)
+        line_height = (sample_bbox[3] - sample_bbox[1]) + 8
+        for max_lines in (4, 3):
+            lines = _wrap_text_to_width(draw, clean_title, font, max_width, max_lines=max_lines)
+            if not lines:
+                continue
+            total_height = line_height * len(lines)
+            if total_height <= max_height:
+                return {
+                    "font": font,
+                    "lines": lines,
+                    "line_height": line_height,
+                    "total_height": total_height,
+                }
+    return None
+
+
 def _contain_remote_product_image(url: str, size: tuple[int, int]) -> Image.Image | None:
     image_url = (url or "").strip()
     if not image_url:
@@ -304,7 +384,6 @@ def generate_offer_square_card_asset(offer: dict[str, Any], *, suffix: str = "ca
     draw.rounded_rectangle(site_badge_box, radius=46, fill="#ffcb19")
 
     brand_font = _load_font(42, bold=True)
-    title_font = _load_font(36, bold=True)
     price_label_font = _load_font(20, bold=True)
     site_font = _load_font(28, bold=True)
 
@@ -380,50 +459,106 @@ def generate_offer_square_card_asset(offer: dict[str, Any], *, suffix: str = "ca
 
     draw.text((text_left, line_y), _truncate_text(primary_detail_line, 30), font=details_font, fill="#efe6ff")
 
-    chip_y = 850
+    chip_specs: list[dict[str, Any]] = []
     highlight_text = layout["highlight_text"]
     if highlight_text:
-        highlight_max_width = max(260, hero_box[0] - 120)
-        chip_font = _fit_font_for_width(draw, highlight_text, max_width=highlight_max_width - 48, start_size=24, min_size=18, bold=True)
-        chip_text = _truncate_text(highlight_text, 40)
-        chip_bbox = draw.textbbox((0, 0), chip_text, font=chip_font)
-        chip_width = chip_bbox[2] - chip_bbox[0]
-        chip_box = (94, chip_y, min(hero_box[0] - 22, 94 + chip_width + 56), chip_y + 48)
-        chip_fill = "#eaf0ff" if not layout["coupon"] else "#fff2c2"
-        chip_text_fill = "#29426d" if not layout["coupon"] else "#734c00"
-        draw.rounded_rectangle(chip_box, radius=22, fill=chip_fill)
-        draw.text((chip_box[0] + 24, chip_box[1] + 8), chip_text, font=chip_font, fill=chip_text_fill)
-        chip_y += 56
-
+        chip_specs.append(
+            {
+                "kind": "highlight",
+                "text": _truncate_text(highlight_text, 40),
+                "fill": "#eaf0ff" if not layout["coupon"] else "#fff2c2",
+                "text_fill": "#29426d" if not layout["coupon"] else "#734c00",
+                "radius": 22,
+                "height": 48,
+                "advance": 56,
+                "font_start": 24,
+                "font_min": 18,
+                "max_width": max(260, hero_box[0] - 168),
+                "pad_x": 24,
+                "text_y": 8,
+                "box_right": hero_box[0] - 22,
+            }
+        )
     for chip in layout["badges"]:
-        chip_text = chip
-        chip_font = _fit_font_for_width(draw, chip_text, max_width=892, start_size=22, min_size=17, bold=True)
-        chip_bbox = draw.textbbox((0, 0), chip_text, font=chip_font)
+        chip_specs.append(
+            {
+                "kind": "badge",
+                "text": chip,
+                "fill": "#eef3ff",
+                "text_fill": "#26416b",
+                "radius": 20,
+                "height": 42,
+                "advance": 50,
+                "font_start": 22,
+                "font_min": 17,
+                "max_width": 844,
+                "pad_x": 22,
+                "text_y": 7,
+                "box_right": 986,
+            }
+        )
+
+    title_bottom_limit = 1012
+    selected_chip_count = 0
+    selected_title_layout: dict[str, Any] | None = None
+    selected_title_y = 886
+    for chip_count in range(len(chip_specs), -1, -1):
+        simulated_chip_y = 850
+        for chip in chip_specs[:chip_count]:
+            simulated_chip_y += chip["advance"]
+        title_y = max(886, simulated_chip_y + 14)
+        title_layout = _fit_square_card_title_layout(
+            draw,
+            str(offer["titulo"]),
+            max_width=916,
+            max_height=title_bottom_limit - title_y,
+        )
+        if title_layout is not None:
+            selected_chip_count = chip_count
+            selected_title_layout = title_layout
+            selected_title_y = title_y
+            break
+
+    if selected_title_layout is None:
+        selected_title_layout = _fit_square_card_title_layout(
+            draw,
+            str(offer["titulo"]),
+            max_width=916,
+            max_height=title_bottom_limit - 886,
+        )
+        selected_title_y = 886
+
+    chip_y = 850
+    for chip in chip_specs[:selected_chip_count]:
+        chip_font = _fit_font_for_width(
+            draw,
+            chip["text"],
+            max_width=chip["max_width"],
+            start_size=chip["font_start"],
+            min_size=chip["font_min"],
+            bold=True,
+        )
+        chip_bbox = draw.textbbox((0, 0), chip["text"], font=chip_font)
         chip_width = chip_bbox[2] - chip_bbox[0]
-        chip_box = (94, chip_y, min(986, 94 + chip_width + 48), chip_y + 42)
-        draw.rounded_rectangle(chip_box, radius=20, fill="#eef3ff")
-        draw.text((chip_box[0] + 22, chip_box[1] + 7), chip_text, font=chip_font, fill="#26416b")
-        chip_y += 50
+        chip_box = (94, chip_y, min(chip["box_right"], 94 + chip_width + (chip["pad_x"] * 2)), chip_y + chip["height"])
+        draw.rounded_rectangle(chip_box, radius=chip["radius"], fill=chip["fill"])
+        draw.text((chip_box[0] + chip["pad_x"], chip_box[1] + chip["text_y"]), chip["text"], font=chip_font, fill=chip["text_fill"])
+        chip_y += chip["advance"]
 
-    title_lines = []
-    current = []
-    for word in str(offer["titulo"]).split():
-        trial = " ".join(current + [word]).strip()
-        if len(trial) <= 32:
-            current.append(word)
-        else:
-            if current:
-                title_lines.append(" ".join(current))
-            current = [word]
-    if current:
-        title_lines.append(" ".join(current))
-    title_lines = title_lines[:3]
+    if selected_title_layout is None:
+        selected_title_layout = {
+            "font": _load_font(24, bold=True),
+            "lines": [_fit_text_with_ellipsis(draw, str(offer["titulo"]), _load_font(24, bold=True), 916)],
+            "line_height": 34,
+        }
 
-    y = max(886, chip_y + 14)
-    for line in title_lines:
-        text_width = draw.textbbox((0, 0), line, font=title_font)[2]
+    y = selected_title_y
+    title_font = selected_title_layout["font"]
+    for line in selected_title_layout["lines"]:
+        bbox = draw.textbbox((0, 0), line, font=title_font)
+        text_width = bbox[2] - bbox[0]
         draw.text(((1080 - text_width) / 2, y), line, font=title_font, fill="#202124")
-        y += 46
+        y += selected_title_layout["line_height"]
 
     image.save(destination, format="JPEG", quality=92, optimize=True)
     return {

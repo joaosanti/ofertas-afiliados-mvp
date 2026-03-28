@@ -295,6 +295,10 @@ def _provider_label(provider: str) -> str:
     return PROVIDER_LABELS.get(provider, provider.title())
 
 
+def _is_shopee_short_url(url: str) -> bool:
+    return (urlparse((url or "").strip()).netloc or "").lower().startswith("s.shopee.")
+
+
 def _clean_title(title: str, provider: str) -> str:
     patterns = {
         "mercadolivre": r"\s*\|\s*Mercado Livre\s*$",
@@ -348,6 +352,20 @@ def _is_ml_social_link(url: str) -> bool:
     parsed = urlparse((url or "").strip())
     host = (parsed.netloc or "").lower()
     return ("mercadolivre" in host or "mercadolibre" in host) and "/social/" in (parsed.path or "").lower()
+
+
+def _is_ml_profile_or_list_social_url(url: str) -> bool:
+    parsed = urlparse((url or "").strip())
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    if "mercadolivre" not in host and "mercadolibre" not in host:
+        return False
+    if "/social/" not in path:
+        return False
+    if "/lists/" in path:
+        return True
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    return not bool((query.get("ref") or [None])[0])
 
 
 def _looks_like_ml_product_url(url: str) -> bool:
@@ -556,7 +574,7 @@ def _extract_ml_social_embedded_offer(html_text: str, affiliate_url: str) -> dic
         "description": description,
         "price": float(current_price_match.group(1)),
         "old_price": float(previous_price_match.group(1)) if previous_price_match else None,
-        "url": social_source_url or final_affiliate_url,
+        "url": final_affiliate_url,
         "canonical_url": final_affiliate_url,
         "image": image_url,
         "category": infer_category_label(title, description or title, final_affiliate_url, final_affiliate_url, default="ofertas"),
@@ -625,7 +643,7 @@ def _build_ml_offer_from_api(item_id: str, affiliate_url: str, fallback_html: st
         "description": description,
         "price": price,
         "old_price": old_price,
-        "url": social_source_url or affiliate_url,
+        "url": canonical_hint if social_source_url else affiliate_url,
         "canonical_url": canonical_hint,
         "image": image,
         "category": infer_category_label(title, description or title, social_source_url or affiliate_url, canonical_hint, default="ofertas"),
@@ -648,7 +666,6 @@ def _resolve_ml_social_offer(link: str) -> dict[str, Any]:
     embedded_offer = _extract_ml_social_embedded_offer(social_html, link)
     if embedded_offer:
         embedded_offer["social_url"] = social_url
-        embedded_offer["url"] = social_url
         embedded_offer["canonical_url"] = embedded_offer.get("canonical_url") or embedded_offer.get("url") or social_url
         return embedded_offer
     trigger_item_id = _extract_ml_trigger_item_id_from_html(social_html)
@@ -656,7 +673,6 @@ def _resolve_ml_social_offer(link: str) -> dict[str, Any]:
         try:
             item = _build_ml_offer_from_api(trigger_item_id, link, social_html)
             item["social_url"] = social_url
-            item["url"] = social_url
             item["canonical_url"] = item.get("canonical_url") or item.get("url") or social_url
             return item
         except Exception:
@@ -674,7 +690,6 @@ def _resolve_ml_social_offer(link: str) -> dict[str, Any]:
             item = _extract_generic_offer("mercadolivre", affiliate_source, final_url, html_text)
             item["social_url"] = social_url
             item["canonical_url"] = final_url or product_link or item.get("canonical_url") or item.get("url") or social_url
-            item["url"] = social_url
             item["item_id"] = item.get("item_id") or _extract_ml_item_id_from_url(product_link) or _extract_ml_item_id_from_url(final_url)
             item["product_id"] = item.get("product_id") or _extract_ml_product_id_from_url(final_url) or _extract_ml_product_id_from_url(product_link)
             if social_url != link:
@@ -1035,11 +1050,15 @@ def preview_manual_affiliate_links(links: list[str]) -> list[dict[str, Any]]:
 
     items: list[dict[str, Any]] = []
     for link in cleaned_links:
+        original_link = link
         provider = detect_provider(link)
         if provider == "shopee":
             shopee_items = preview_shopee_affiliate_links([link])
             for item in shopee_items:
-                affiliate_detected, affiliate_code = _detect_affiliate(item.get("url") or link)
+                resolved_url = item.get("url") or item.get("canonical_url") or link
+                affiliate_detected, affiliate_code = _detect_affiliate(resolved_url)
+                is_shortlink = _is_shopee_short_url(link) or _is_shopee_short_url(resolved_url)
+                needs_price_review = float(item.get("price") or 0) <= 0
                 items.append(
                     {
                         "provider": "shopee",
@@ -1048,8 +1067,8 @@ def preview_manual_affiliate_links(links: list[str]) -> list[dict[str, Any]]:
                         "description": item.get("description") or "Oferta Shopee importada manualmente.",
                         "price": float(item.get("price") or 0),
                         "old_price": float(item["old_price"]) if item.get("old_price") else None,
-                        "url": item.get("url") or link,
-                        "canonical_url": item.get("canonical_url") or link,
+                        "url": resolved_url,
+                        "canonical_url": item.get("canonical_url") or resolved_url,
                         "image": item.get("image") or "",
                         "category": item.get("category") or infer_category_label(item.get("title"), item.get("description"), item.get("url"), item.get("canonical_url")),
                         "tags": item.get("tags") or "shopee,manual",
@@ -1057,6 +1076,14 @@ def preview_manual_affiliate_links(links: list[str]) -> list[dict[str, Any]]:
                         "video_url": item.get("video_url"),
                         "affiliate_detected": affiliate_detected,
                         "affiliate_code": affiliate_code,
+                        "affiliate_status": "official" if (affiliate_detected or is_shortlink) else "missing",
+                        "affiliate_warning": (
+                            "A Shopee nao expôs o preco no HTML publico; a oferta sera importada como rascunho inativo para revisao manual."
+                            if needs_price_review
+                            else None
+                        ),
+                        "import_allowed": bool(affiliate_detected or is_shortlink),
+                        "price_missing_review": needs_price_review,
                     }
                 )
             continue
@@ -1070,16 +1097,22 @@ def preview_manual_affiliate_links(links: list[str]) -> list[dict[str, Any]]:
 
         if provider == "mercadolivre" and _is_ml_social_link(link):
             try:
-                items.append(_resolve_ml_social_offer(link))
+                item = _resolve_ml_social_offer(link)
+                if urlparse(original_link).netloc.lower() == "meli.la" and bool(_meli_affiliate_meta(original_link)["detected"]):
+                    item["url"] = original_link
+                elif _is_ml_social_link(str(item.get("url") or "")):
+                    item["url"] = str(item.get("canonical_url") or item.get("url") or link)
+                items.append(item)
             except Exception:
                 try:
                     final_url, html_text = _fetch_best_html_for_provider(link, "mercadolivre")
-                    items.append(_extract_generic_offer("mercadolivre", final_url or link, final_url, html_text))
+                    item = _extract_generic_offer("mercadolivre", original_link if urlparse(original_link).netloc.lower() == "meli.la" else (final_url or link), final_url, html_text)
+                    items.append(item)
                     continue
                 except Exception:
                     pass
                 if _meli_affiliate_meta(link)["detected"]:
-                    items.append(_build_ml_fallback_offer(link))
+                    items.append(_build_ml_fallback_offer(original_link if urlparse(original_link).netloc.lower() == "meli.la" else link))
                     continue
                 raise
             continue

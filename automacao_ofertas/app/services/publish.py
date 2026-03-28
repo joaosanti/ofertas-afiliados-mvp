@@ -35,7 +35,7 @@ CHECK_SLUG_SQL = text("SELECT id FROM ofertas WHERE slug = :slug LIMIT 1")
 
 
 def publish_offer(db, offer: NormalizedOffer, actor_user_id: int | None = None, actor_login: str | None = None) -> str:
-    if float(offer.preco or 0) <= 0:
+    if float(offer.preco or 0) <= 0 and int(offer.ativo or 1) != 0:
         return "skipped"
 
     slug = build_slug(offer.titulo)

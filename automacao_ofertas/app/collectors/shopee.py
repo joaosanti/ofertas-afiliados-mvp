@@ -213,6 +213,11 @@ def _normalize_manual_link(link: str) -> str:
     return f"https://{raw.lstrip('/')}"
 
 
+def _is_shopee_short_url(url: str) -> bool:
+    host = (urlparse((url or "").strip()).netloc or "").lower()
+    return host.startswith("s.shopee.")
+
+
 def _build_browser_headers() -> dict[str, str]:
     return {
         "User-Agent": (
@@ -329,8 +334,8 @@ def _manual_offer_from_html(source_url: str, final_url: str, html_text: str) -> 
         "description": description or f"Oferta Shopee importada manualmente de {source_url}",
         "price": price,
         "old_price": old_price if old_price and old_price > price else None,
-        "url": source_url,
-        "canonical_url": final_url,
+        "url": final_url or source_url,
+        "canonical_url": final_url or source_url,
         "image": image,
         "category": infer_category_label(title, description, source_url, final_url),
         "tags": ",".join(tags),
@@ -350,19 +355,39 @@ def preview_shopee_affiliate_links(links: list[str]) -> list[dict[str, Any]]:
     offers: list[dict[str, Any]] = []
     for link in cleaned_links:
         last_error: Exception | None = None
+        candidates: list[dict[str, Any]] = []
+        resolved_affiliate_url = ""
         for headers in (_build_crawler_headers(), _build_browser_headers()):
             try:
                 with httpx.Client(timeout=25, headers=headers, follow_redirects=True) as client:
                     response = client.get(link)
                     response.raise_for_status()
+                    response_url = str(response.url)
+                    if response_url and not _is_shopee_short_url(response_url):
+                        resolved_affiliate_url = response_url
                     content_type = (response.headers.get("content-type") or "").lower()
                     if "text/html" not in content_type and "application/xhtml" not in content_type:
                         raise ValueError("A Shopee retornou um formato inesperado para o link informado.")
-                    offers.append(_manual_offer_from_html(link, str(response.url), response.text))
+                    candidates.append(_manual_offer_from_html(link, response_url, response.text))
                     last_error = None
-                    break
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
+        if candidates:
+            candidates.sort(
+                key=lambda item: (
+                    1 if float(item.get("price") or 0) > 0 else 0,
+                    1 if not _is_shopee_short_url(item.get("canonical_url") or "") else 0,
+                    1 if "utm_medium=affiliates" in str(item.get("url") or "").lower() else 0,
+                ),
+                reverse=True,
+            )
+            selected = dict(candidates[0])
+            if resolved_affiliate_url:
+                selected["url"] = resolved_affiliate_url
+                if _is_shopee_short_url(selected.get("canonical_url") or ""):
+                    selected["canonical_url"] = resolved_affiliate_url
+            offers.append(selected)
+            continue
         if last_error is not None:
             raise last_error
 

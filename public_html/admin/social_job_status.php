@@ -115,7 +115,12 @@ function admin_social_success_message($result, $pending) {
   }
 
   if ($errors) {
-    $error = trim((string) (($errors[0]['error'] ?? '') ?: ''));
+    $rawError = trim((string) (($errors[0]['error'] ?? '') ?: ''));
+    $lowerError = strtolower($rawError);
+    $error = $rawError;
+    if ($lowerError !== '' && (strpos($lowerError, 'video download failed') !== false || strpos($lowerError, 'fwdproxy failed to fetch headers') !== false)) {
+      $error = 'A Meta concluiu parte da publicacao, mas falhou ao baixar um video remoto para outra etapa. Isso costuma afetar reel ou story em video e geralmente e temporario.';
+    }
     $parts[] = $error !== '' ? "Algumas etapas falharam: {$error}" : 'Algumas etapas falharam. Confira o historico abaixo.';
   }
 

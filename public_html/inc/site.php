@@ -150,17 +150,7 @@ function site_remote_video_url_is_available($url) {
 }
 
 function site_offer_preferred_affiliate_url($offer) {
-  $store = strtolower(trim((string) ($offer['loja'] ?? '')));
   $affiliateUrl = trim((string) ($offer['url_afiliado'] ?? ''));
-  if ($store !== 'mercado livre') {
-    return $affiliateUrl;
-  }
-
-  $socialUrl = site_decode_tag_url($offer['tags'] ?? '', 'meli_social_url:');
-  if ($socialUrl !== '' && str_contains($socialUrl, '/social/')) {
-    return $socialUrl;
-  }
-
   return $affiliateUrl;
 }
 
