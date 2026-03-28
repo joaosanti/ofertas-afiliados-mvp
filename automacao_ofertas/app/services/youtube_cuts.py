@@ -201,6 +201,9 @@ EDITORIAL_TOPIC_KEYWORDS: dict[str, list[str]] = {
     "geopolitica": ["china", "taiwan", "iran", "israel", "russia", "ucrania", "otan", "guerra", "conflito", "nuclear"],
     "mercado": ["mercado", "bolsa", "acoes", "tarifa", "investidor", "economia", "crise"],
     "brasil": ["brasil", "brasileiro", "bolso", "importacao", "exportacao", "governo", "estado"],
+    "futebol": ["futebol", "jogo", "partida", "rodada", "clube", "time", "torcida", "gol", "camisa", "tecnico"],
+    "arbitragem": ["arbitragem", "arbitro", "penalti", "var", "expulsao", "impedimento", "falta"],
+    "mercado_da_bola": ["mercado da bola", "janela", "contratacao", "reforco", "transferencia", "emprestimo", "bastidor"],
 }
 
 HIGH_IMPACT_WORDS = [
@@ -236,6 +239,24 @@ WEAK_OPENERS = [
     "olha",
     "olha so",
     "seguinte",
+]
+
+CONTEXTLESS_OPENERS = [
+    "e ai",
+    "ai",
+    "dai",
+    "mas",
+    "porque",
+    "por isso",
+    "so que",
+    "entao",
+    "isso",
+    "essa",
+    "esse",
+    "ele",
+    "ela",
+    "eles",
+    "elas",
 ]
 
 SHORT_SUBTITLE_MARGIN_H = 68
@@ -656,6 +677,12 @@ def _topic_tags_from_text(text: str) -> list[str]:
 def _impact_frame_text(text: str, *, mode: str = "short") -> str:
     lowered = (text or "").lower()
     options: list[str] = []
+    if any(word in lowered for word in ["futebol", "jogo", "rodada", "clube", "time", "torcida"]):
+        options.extend(["Isso muda a rodada", "O ponto quente do jogo"])
+    if any(word in lowered for word in ["arbitragem", "arbitro", "penalti", "var", "impedimento", "expulsao"]):
+        options.extend(["A polemica do lance", "O VAR virou assunto"])
+    if any(word in lowered for word in ["mercado da bola", "janela", "contratacao", "reforco", "transferencia", "tecnico"]):
+        options.extend(["O bastidor que pesa", "Ele cravou o cenario"])
     if "dolar" in lowered:
         options.extend(["O dolar pode disparar?", "Isso mexe no cambio"])
     if "inflacao" in lowered:
@@ -679,6 +706,191 @@ def _looks_like_weak_opener(text: str) -> bool:
     return any(sentence.startswith(item) for item in WEAK_OPENERS)
 
 
+def _looks_like_contextless_short_open(text: str) -> bool:
+    sentence = _clean_editorial_text(_hook_from_text(text)).lower().strip(" -:;,.!?")
+    if not sentence:
+        return False
+    if any(sentence.startswith(item) for item in CONTEXTLESS_OPENERS):
+        return True
+    words = sentence.split()
+    if not words:
+        return False
+    if words[0] not in {"isso", "essa", "esse", "ele", "ela", "eles", "elas", "entao", "mas", "ai", "dai"}:
+        return False
+    strong_context_terms = {
+        "brasil",
+        "mercado",
+        "dolar",
+        "inflacao",
+        "guerra",
+        "china",
+        "petroleo",
+        "futebol",
+        "rodada",
+        "var",
+        "arbitragem",
+        "jogo",
+        "clube",
+    }
+    return not any(term in sentence for term in strong_context_terms)
+
+
+def _collect_timed_words_for_range(
+    segments: list[dict[str, Any]],
+    start_time: float,
+    end_time: float,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[int, int, str]] = set()
+    for segment in segments:
+        segment_start = float(segment.get("start") or 0.0)
+        segment_end = float(segment.get("end") or segment_start)
+        if segment_end <= start_time or segment_start >= end_time:
+            continue
+        for word in _normalize_timed_words(segment.get("words") or []):
+            word_start = max(float(word.get("start") or 0.0), start_time)
+            word_end = min(float(word.get("end") or word_start), end_time)
+            word_text = str(word.get("text") or "").strip()
+            if not word_text or word_end - word_start <= 0:
+                continue
+            signature = (
+                int(round(word_start * 100)),
+                int(round(word_end * 100)),
+                word_text,
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            entries.append({"start": word_start, "end": word_end, "text": word_text})
+    entries.sort(key=lambda item: (float(item.get("start") or 0.0), float(item.get("end") or 0.0)))
+    return entries
+
+
+def _speech_metrics_for_range(
+    segments: list[dict[str, Any]],
+    start_time: float,
+    end_time: float,
+) -> dict[str, Any]:
+    duration = max(0.01, float(end_time) - float(start_time))
+    words = _collect_timed_words_for_range(segments, start_time, end_time)
+    has_word_timestamps = bool(words)
+
+    intervals: list[list[float]] = []
+    if words:
+        for word in words:
+            word_start = float(word.get("start") or 0.0)
+            word_end = float(word.get("end") or word_start)
+            if not intervals or word_start > intervals[-1][1] + 0.18:
+                intervals.append([word_start, word_end])
+            else:
+                intervals[-1][1] = max(intervals[-1][1], word_end)
+    else:
+        for segment in segments:
+            segment_start = max(float(segment.get("start") or 0.0), start_time)
+            segment_end = min(float(segment.get("end") or segment_start), end_time)
+            if segment_end - segment_start <= 0:
+                continue
+            if not intervals or segment_start > intervals[-1][1] + 0.35:
+                intervals.append([segment_start, segment_end])
+            else:
+                intervals[-1][1] = max(intervals[-1][1], segment_end)
+
+    if not intervals:
+        return {
+            "has_word_timestamps": has_word_timestamps,
+            "word_count": 0,
+            "words_per_second": 0.0,
+            "speech_coverage": 0.0,
+            "lead_pause": duration,
+            "tail_pause": 0.0,
+            "max_pause": duration,
+            "speaking_turns": 0,
+            "speech_score": 1,
+        }
+
+    coverage = sum(max(0.0, interval_end - interval_start) for interval_start, interval_end in intervals) / duration
+    lead_pause = max(0.0, intervals[0][0] - start_time)
+    tail_pause = max(0.0, end_time - intervals[-1][1])
+    internal_pauses = [
+        max(0.0, intervals[index][0] - intervals[index - 1][1])
+        for index in range(1, len(intervals))
+    ]
+    max_pause = max([lead_pause, tail_pause] + internal_pauses)
+    word_count = len(words) if words else len(re.findall(r"\w+", " ".join(str(segment.get("text") or "") for segment in segments)))
+    words_per_second = word_count / duration
+
+    speech_score = 58
+    if coverage >= 0.78:
+        speech_score += 20
+    elif coverage >= 0.64:
+        speech_score += 10
+    elif coverage < 0.52:
+        speech_score -= 24
+    elif coverage < 0.60:
+        speech_score -= 10
+    if max_pause <= 0.65:
+        speech_score += 8
+    elif max_pause > 2.35:
+        speech_score -= 26
+    elif max_pause > 1.65:
+        speech_score -= 12
+    if lead_pause > 0.9:
+        speech_score -= 18
+    elif lead_pause < 0.2:
+        speech_score += 4
+    if words_per_second >= 2.1:
+        speech_score += 8
+    elif words_per_second < 1.35:
+        speech_score -= 14
+    if not has_word_timestamps:
+        speech_score = max(40, min(80, speech_score))
+
+    return {
+        "has_word_timestamps": has_word_timestamps,
+        "word_count": int(word_count),
+        "words_per_second": round(words_per_second, 2),
+        "speech_coverage": round(coverage, 3),
+        "lead_pause": round(lead_pause, 2),
+        "tail_pause": round(tail_pause, 2),
+        "max_pause": round(max_pause, 2),
+        "speaking_turns": len(intervals),
+        "speech_score": max(1, min(99, int(round(speech_score)))),
+    }
+
+
+def _trim_short_candidate_range(
+    segments: list[dict[str, Any]],
+    start_time: float,
+    end_time: float,
+) -> tuple[float, float]:
+    words = _collect_timed_words_for_range(segments, start_time, end_time)
+    if not words:
+        return start_time, end_time
+    trimmed_start = max(start_time, float(words[0].get("start") or start_time) - 0.08)
+    trimmed_end = min(end_time, float(words[-1].get("end") or end_time) + 0.18)
+    if trimmed_end - trimmed_start < 24:
+        return start_time, end_time
+    return trimmed_start, trimmed_end
+
+
+def _short_candidate_has_active_speech(speech_metrics: dict[str, Any], text: str) -> bool:
+    coverage = float(speech_metrics.get("speech_coverage") or 0.0)
+    max_pause = float(speech_metrics.get("max_pause") or 0.0)
+    lead_pause = float(speech_metrics.get("lead_pause") or 0.0)
+    words_per_second = float(speech_metrics.get("words_per_second") or 0.0)
+    if coverage < 0.52:
+        return False
+    if lead_pause > 0.9:
+        return False
+    if max_pause > 2.35:
+        return False
+    if words_per_second < 1.35 and coverage < 0.65:
+        return False
+    if _looks_like_contextless_short_open(text) and coverage < 0.62:
+        return False
+    return True
+
+
 def _opening_sentence_score(text: str) -> int:
     sentence = _clean_editorial_text(_hook_from_text(text))
     lowered = sentence.lower()
@@ -687,6 +899,8 @@ def _opening_sentence_score(text: str) -> int:
         return 0
     if _looks_like_weak_opener(sentence):
         score -= 24
+    if _looks_like_contextless_short_open(sentence):
+        score -= 18
     if "?" in sentence:
         score += 10
     if any(word in lowered for word in ["dolar", "inflacao", "brasil", "mercado", "guerra", "crise", "china", "combustivel"]):
@@ -769,6 +983,27 @@ def _short_title_variants(text: str, chosen_title: str = "") -> list[str]:
                 "Por que essa escalada preocupa o mercado",
             ]
         )
+    if any(word in lowered for word in ["futebol", "jogo", "rodada", "clube", "time", "torcida"]):
+        variants.extend(
+            [
+                "O ponto que muda a rodada",
+                "A leitura que pega o jogo no centro",
+            ]
+        )
+    if any(word in lowered for word in ["arbitragem", "arbitro", "penalti", "var", "impedimento", "expulsao"]):
+        variants.extend(
+            [
+                "A polemica que vai dar debate",
+                "O lance que virou tema no jogo",
+            ]
+        )
+    if any(word in lowered for word in ["mercado da bola", "janela", "contratacao", "reforco", "transferencia", "tecnico"]):
+        variants.extend(
+            [
+                "O bastidor que muda o cenario",
+                "Ele cravou o que vem por ai",
+            ]
+        )
     if "brasil" in lowered:
         variants.extend(
             [
@@ -781,9 +1016,25 @@ def _short_title_variants(text: str, chosen_title: str = "") -> list[str]:
     return _dedupe_preserve_order(variants, limit=5)
 
 
-def _hashtags_for_cut(topic_tags: list[str], *, mode: str) -> list[str]:
+def _hashtags_for_cut(
+    topic_tags: list[str],
+    *,
+    mode: str,
+    source_text: str = "",
+    editorial_profile: dict[str, Any] | None = None,
+) -> list[str]:
     normalized = [tag.lower() for tag in topic_tags if tag]
-    hashtags = ["#economia", "#geopolitica", "#mercado", "#brasil", "#noticias", "#podcast", "#cortes"]
+    lowered = (source_text or "").lower()
+    profile_name = str((editorial_profile or {}).get("name") or "").lower()
+    sport_mode = (
+        "futebol" in profile_name
+        or any(tag in {"futebol", "arbitragem", "mercado_da_bola"} for tag in normalized)
+        or any(word in lowered for word in ["futebol", "jogo", "rodada", "clube", "arbitragem", "var", "gol", "libertadores", "brasileirao"])
+    )
+    if sport_mode:
+        hashtags = ["#futebol", "#esporte", "#debate", "#rodada", "#cortes"]
+    else:
+        hashtags = ["#economia", "#geopolitica", "#mercado", "#brasil", "#noticias", "#podcast", "#cortes"]
     if "dolar" in normalized:
         hashtags.append("#dolar")
     if "inflacao" in normalized:
@@ -794,8 +1045,16 @@ def _hashtags_for_cut(topic_tags: list[str], *, mode: str) -> list[str]:
         hashtags.append("#guerra")
     if "brasil" in normalized:
         hashtags.append("#politica")
+    if "futebol" in normalized:
+        hashtags.append("#futebol")
+    if "arbitragem" in normalized:
+        hashtags.append("#arbitragem")
+    if "mercado_da_bola" in normalized:
+        hashtags.append("#mercadodabola")
+    if any(word in lowered for word in ["libertadores", "sulamericana", "brasileirao", "serie a", "serie b"]):
+        hashtags.append("#brasileirao")
     if mode == "short":
-        hashtags = ["#shorts", "#shortsyoutube"] + hashtags
+        hashtags = ["#cortes", "#shorts", "#shortsyoutube"] + hashtags
     else:
         hashtags.extend(["#analise", "#youtubebrasil"])
     return _dedupe_preserve_order(hashtags, limit=10)
@@ -831,12 +1090,17 @@ def _short_series_description(
     hashtags: list[str],
     *,
     editorial_profile: dict[str, Any] | None = None,
+    opening_lines: list[str] | None = None,
+    footer_lines: list[str] | None = None,
 ) -> str:
     profile = editorial_profile or EDITORIAL_PROFILE
     part = int(item.get("series_part") or 0)
     total = int(item.get("series_total") or 0)
     title_or_hook = str(item.get("hook") or item.get("title") or "").strip()
-    lines = [title_or_hook, ""]
+    lines = list(opening_lines or [])
+    if lines:
+        lines.append("")
+    lines.extend([title_or_hook, ""])
     if total > 1 and part > 0:
         lines.append(f"Parte {part} de {total} desta serie de cortes.")
         if part < total:
@@ -848,9 +1112,11 @@ def _short_series_description(
         [
             str(profile["short_series_summary"]),
             f"Video base: {video.get('title') or ''}".strip(),
-            " ".join(hashtags),
         ]
     )
+    if footer_lines:
+        lines.extend(["", *footer_lines])
+    lines.extend(["", " ".join(hashtags)])
     return "\n".join(line for line in lines if line is not None).strip()
 
 
@@ -1725,7 +1991,14 @@ def _best_short_title(text: str) -> str:
     return "Corte de podcast"
 
 
-def _short_candidate_editorial_score(text: str, start: float, duration: float, total_duration: float) -> tuple[int, dict[str, int]]:
+def _short_candidate_editorial_score(
+    text: str,
+    start: float,
+    duration: float,
+    total_duration: float,
+    *,
+    speech_metrics: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, int]]:
     lowered = (text or "").lower()
     ctr = _score_text(text) + 8
     retention = 50
@@ -1839,6 +2112,32 @@ def _short_candidate_editorial_score(text: str, start: float, duration: float, t
         retention -= penalty
         context -= penalty
 
+    if _looks_like_contextless_short_open(text):
+        ctr -= 16
+        retention -= 12
+        context -= 18
+
+    if speech_metrics:
+        speech_coverage = float(speech_metrics.get("speech_coverage") or 0.0)
+        max_pause = float(speech_metrics.get("max_pause") or 0.0)
+        lead_pause = float(speech_metrics.get("lead_pause") or 0.0)
+        words_per_second = float(speech_metrics.get("words_per_second") or 0.0)
+        speech_score = int(speech_metrics.get("speech_score") or 0)
+        retention += round((speech_score - 50) * 0.35)
+        ctr += round((speech_score - 50) * 0.18)
+        if speech_coverage >= 0.74:
+            retention += 8
+        elif speech_coverage < 0.56:
+            retention -= 14
+            context -= 6
+        if lead_pause > 0.5:
+            ctr -= 8
+        if max_pause > 1.7:
+            retention -= 10
+        if words_per_second < 1.45:
+            retention -= 8
+            context -= 4
+
     title = _best_short_title(text).lower()
     if title in {"ok", "exatamente", "obrigado", "valeu"}:
         ctr -= 22
@@ -1862,6 +2161,12 @@ def _short_candidate_summary(item: dict[str, Any]) -> dict[str, Any]:
         "hook": str(item.get("hook") or ""),
         "first_frame_text": str(item.get("first_frame_text") or ""),
         "topic_tags": list(item.get("topic_tags") or []),
+        "speech_score": int(item.get("speech_score") or 0),
+        "speech_coverage": float(item.get("speech_coverage") or 0.0),
+        "max_pause_seconds": float(item.get("max_pause") or 0.0),
+        "lead_pause_seconds": float(item.get("lead_pause") or 0.0),
+        "words_per_second": float(item.get("words_per_second") or 0.0),
+        "contextless_open": bool(item.get("contextless_open")),
         "excerpt": str(item.get("transcript_excerpt") or "")[:900],
     }
 
@@ -1891,7 +2196,8 @@ def _rerank_short_candidates_with_openai(
         "Voce e um editor senior de shorts para YouTube. "
         f"O canal e focado em {profile['positioning']}. "
         "Escolha os melhores cortes com foco em gancho forte no primeiro segundo, contexto suficiente, clareza, retencao e vontade de ver o episodio completo. "
-        "Evite publi, encerramento, agradecimentos, trechos sem contexto, respostas genericas e frases muito internas. "
+        "Prefira trechos com fala ativa e continua, sem buracos longos de silencio, sem abertura no meio da frase e com a pessoa sustentando a ideia no corte. "
+        "Evite publi, encerramento, agradecimentos, trechos sem contexto, respostas genericas, frases muito internas e cortes com pausas longas. "
         "Prefira trechos de 28 a 45 segundos com tese clara, conflito, explicacao, previsao, risco ou revelacao. "
         f"Use a formula editorial: {profile['title_formula']}. "
         f"{f'Priorize cortes com termos como: {preferred_terms_text}. ' if preferred_terms_text else ''}"
@@ -1914,7 +2220,8 @@ def _rerank_short_candidates_with_openai(
             "Para cada item escolhido, devolva candidate_id, score_ia (0-100), title, hook, first_frame_text e reason. "
             "O title deve ficar natural, clicavel, especifico e deixar clara a consequencia do tema. "
             "O hook deve resumir o gancho do corte em uma frase curta. "
-            "O first_frame_text deve ter entre 3 e 6 palavras e funcionar como texto forte na abertura."
+            "O first_frame_text deve ter entre 3 e 6 palavras e funcionar como texto forte na abertura. "
+            "Nao escolha candidatos com baixa speech_coverage, lead_pause alto ou max_pause muito longo."
         ),
         "candidates": payload_candidates,
     }
@@ -2009,25 +2316,45 @@ def _build_short_cut_candidates(
     for cursor in candidate_starts:
         opening_index = _find_better_short_open(segments, cursor, total_duration)
         start = float(segments[opening_index]["start"] or 0)
-        end = float(segments[cursor]["end"] or start)
-        text_parts = [segments[opening_index]["text"]]
+        end = max(
+            float(segments[cursor]["end"] or start),
+            float(segments[opening_index]["end"] or start),
+        )
         runner = opening_index + 1
         while runner < len(segments) and end - start < 52:
             end = float(segments[runner]["end"] or end)
-            text_parts.append(segments[runner]["text"])
             if end - start >= 38:
                 break
             runner += 1
+        candidate_segments = segments[opening_index:min(runner + 1, len(segments))]
+        start, end = _trim_short_candidate_range(candidate_segments, start, end)
         duration = end - start
         if 28 <= duration <= 59:
-            text = " ".join(text_parts).strip()
-            score, scorecard = _short_candidate_editorial_score(text, start, duration, total_duration)
+            active_segments = [
+                segment
+                for segment in candidate_segments
+                if float(segment.get("end") or 0.0) > start and float(segment.get("start") or 0.0) < end
+            ]
+            text = " ".join(str(segment.get("text") or "") for segment in active_segments).strip()
+            if not text:
+                continue
+            speech_metrics = _speech_metrics_for_range(active_segments, start, end)
+            if not _short_candidate_has_active_speech(speech_metrics, text):
+                continue
+            score, scorecard = _short_candidate_editorial_score(
+                text,
+                start,
+                duration,
+                total_duration,
+                speech_metrics=speech_metrics,
+            )
             preference_delta, preference_notes = _profile_preference_adjustment(text, editorial_profile)
             score = max(1, min(99, score + preference_delta))
             title = _best_short_title(text)
             hook = _hook_from_text(text)
             topic_tags = _topic_tags_from_text(text)
             first_frame_text = _impact_frame_text(text, mode="short")
+            scorecard["speech"] = int(speech_metrics.get("speech_score") or 0)
             candidates.append(
                 {
                     "candidate_id": len(candidates) + 1,
@@ -2048,9 +2375,21 @@ def _build_short_cut_candidates(
                     "preference_delta": preference_delta,
                     "caption_draft": hook,
                     "opening_score": _opening_sentence_score(text),
+                    "speech_score": int(speech_metrics.get("speech_score") or 0),
+                    "speech_coverage": float(speech_metrics.get("speech_coverage") or 0.0),
+                    "max_pause": float(speech_metrics.get("max_pause") or 0.0),
+                    "lead_pause": float(speech_metrics.get("lead_pause") or 0.0),
+                    "tail_pause": float(speech_metrics.get("tail_pause") or 0.0),
+                    "words_per_second": float(speech_metrics.get("words_per_second") or 0.0),
+                    "contextless_open": _looks_like_contextless_short_open(text),
                     "packaging_notes": [
                         f"Primeiro frame: {first_frame_text}",
                         f"Abertura detectada com score { _opening_sentence_score(text) } para os primeiros segundos.",
+                        (
+                            "Fala ativa com "
+                            f"{int(round(float(speech_metrics.get('speech_coverage') or 0.0) * 100))}% "
+                            f"de cobertura e pausa maxima de {float(speech_metrics.get('max_pause') or 0.0):.1f}s."
+                        ),
                         "Legenda branca com contorno preto e palavra ativa em azul.",
                         "Evitar subir outro corte muito parecido no mesmo dia.",
                     ]
@@ -2209,13 +2548,24 @@ def _build_cut_candidates(
 def _passes_short_opening_gate(item: dict[str, Any], *, relaxed: bool = False) -> bool:
     opening_score = int(item.get("opening_score") or 0)
     visual_score = int(item.get("opening_visual_score") or 0)
+    speech_score = int(item.get("speech_score") or 0)
+    max_pause = float(item.get("max_pause") or 0.0)
+    lead_pause = float(item.get("lead_pause") or 0.0)
     subject_signal = str(item.get("opening_subject_signal") or "").strip().lower()
     if relaxed:
+        if speech_score and speech_score < 42:
+            return False
+        if lead_pause > 0.95 or max_pause > 2.45:
+            return False
         if opening_score < max(1, SHORT_MIN_OPENING_SCORE - 8) and visual_score < max(1, SHORT_MIN_VISUAL_SCORE - 8):
             return False
         if opening_score < 42:
             return False
         return True
+    if speech_score and speech_score < 54:
+        return False
+    if lead_pause > 0.9 or max_pause > 2.35:
+        return False
     if opening_score < SHORT_MIN_OPENING_SCORE:
         return False
     if visual_score < SHORT_MIN_VISUAL_SCORE:
@@ -3264,6 +3614,28 @@ def _build_recent_offers_block(limit: int = 5) -> tuple[list[dict[str, Any]], li
     return enriched, lines
 
 
+def _build_latest_offer_footer(limit: int = 1) -> tuple[list[dict[str, Any]], list[str]]:
+    offers, _ = _build_recent_offers_block(limit=limit)
+    if not offers:
+        return [], []
+    offer = offers[0]
+    parts = [str(offer.get("titulo") or "").strip()]
+    store = str(offer.get("loja") or "").strip()
+    if store:
+        parts.append(store)
+    price_label = str(offer.get("price_label") or "").strip()
+    if price_label:
+        parts.append(price_label)
+    summary = " | ".join(part for part in parts if part)
+    lines = ["Ultima oferta publicada nas lojas:"]
+    if summary:
+        lines.append(summary)
+    offer_url = str(offer.get("offer_url") or "").strip()
+    if offer_url:
+        lines.append(offer_url)
+    return offers, lines
+
+
 def build_youtube_cut_publish_draft(job_id: str, cut_id: int, *, privacy_status: str = "public") -> dict[str, Any]:
     manifest = load_youtube_cuts_manifest(job_id)
     editorial_profile = _editorial_profile_for_channel(str(manifest.get("target_channel_profile_name") or ""))
@@ -3275,7 +3647,9 @@ def build_youtube_cut_publish_draft(job_id: str, cut_id: int, *, privacy_status:
     video = manifest.get("video") or {}
     mode = _normalize_cut_mode(str(selected.get("mode") or manifest.get("mode") or "short"))
     topic_tags = list(selected.get("topic_tags") or _topic_tags_from_text(str(selected.get("transcript_excerpt") or selected.get("hook") or "")))
-    hashtags = _hashtags_for_cut(topic_tags, mode=mode)
+    source_text = str(selected.get("transcript_excerpt") or selected.get("hook") or selected.get("title") or "")
+    hashtags = _hashtags_for_cut(topic_tags, mode=mode, source_text=source_text, editorial_profile=editorial_profile)
+    _, latest_offer_lines = _build_latest_offer_footer(limit=1)
     normalized_privacy = (privacy_status or "public").strip().lower()
     if normalized_privacy not in {"private", "unlisted", "public"}:
         normalized_privacy = "public"
@@ -3300,14 +3674,17 @@ def build_youtube_cut_publish_draft(job_id: str, cut_id: int, *, privacy_status:
             *chapters,
             "",
             str(editorial_profile["subscribe_line"]),
-            "",
-            " ".join(hashtags),
         ]
+        if latest_offer_lines:
+            description_lines.extend(["", *latest_offer_lines])
+        description_lines.extend(["", " ".join(hashtags)])
         title = str(selected.get("copy_title") or selected.get("title") or "Corte longo YouTube").strip()[:100]
     else:
         series_part = int(selected.get("series_part") or 0)
         series_total = int(selected.get("series_total") or 0)
         description_lines = [
+            "#cortes @shorts",
+            "",
             str(selected.get("hook") or selected.get("title") or "Corte pronto para publicar.").strip(),
             "",
             f"Parte {series_part} de {series_total} desta serie." if series_total > 1 and series_part > 0 else "",
@@ -3320,9 +3697,10 @@ def build_youtube_cut_publish_draft(job_id: str, cut_id: int, *, privacy_status:
             f"Video completo: {video.get('url') or ''}".strip(),
             "",
             str(editorial_profile["subscribe_line"]),
-            "",
-            " ".join(hashtags),
         ]
+        if latest_offer_lines:
+            description_lines.extend(["", *latest_offer_lines])
+        description_lines.extend(["", " ".join(hashtags)])
         title = str(selected.get("copy_title") or selected.get("title") or "Corte YouTube").strip()[:100]
     return {
         "job_id": job_id,
@@ -3492,6 +3870,7 @@ def process_youtube_video_for_cuts(
         else:
             cut_candidates = gated_candidates[:limit]
 
+    _, latest_offer_lines = _build_latest_offer_footer(limit=1)
     generated_items = []
     for index, item in enumerate(cut_candidates, start=1):
         video_filename = f"cut-{index:02d}.mp4"
@@ -3504,7 +3883,13 @@ def process_youtube_video_for_cuts(
             editorial_profile=editorial_profile,
         )
         topic_tags = list(item.get("topic_tags") or _topic_tags_from_text(str(item.get("transcript_excerpt") or item.get("hook") or "")))
-        hashtags = _hashtags_for_cut(topic_tags, mode=normalized_mode)
+        source_text = str(item.get("transcript_excerpt") or item.get("hook") or item.get("title") or "")
+        hashtags = _hashtags_for_cut(
+            topic_tags,
+            mode=normalized_mode,
+            source_text=source_text,
+            editorial_profile=editorial_profile,
+        )
         if normalized_mode == "long":
             description_draft = "\n".join(
                 [
@@ -3512,11 +3897,21 @@ def process_youtube_video_for_cuts(
                     "",
                     str(editorial_profile["long_series_summary"]),
                     f"Video base: {video.get('title') or ''}".strip(),
+                    "",
+                    *latest_offer_lines,
+                    "",
                     " ".join(hashtags),
                 ]
             ).strip()
         else:
-            description_draft = _short_series_description(item, video, hashtags, editorial_profile=editorial_profile)
+            description_draft = _short_series_description(
+                item,
+                video,
+                hashtags,
+                editorial_profile=editorial_profile,
+                opening_lines=["#cortes @shorts"],
+                footer_lines=latest_offer_lines,
+            )
         if normalized_mode == "long":
             subtitle_path = None
             _generate_horizontal_cut(source_video, overlay_path, video_output, item["start"], item["duration_seconds"])

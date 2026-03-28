@@ -42,6 +42,24 @@ def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def _store_label(value: Any) -> str:
+    lowered = _clean_text(value).lower()
+    mapping = {
+        "mercado livre": "Mercado Livre",
+        "shopee": "Shopee",
+        "amazon": "Amazon",
+        "tiktok": "TikTok Shop",
+    }
+    return mapping.get(lowered, _clean_text(value) or "Loja")
+
+
+def _category_label(value: Any) -> str:
+    cleaned = _clean_text(value)
+    if not cleaned or cleaned.lower() == "geral":
+        return "Ofertas"
+    return cleaned.replace("-", " ").replace("_", " ")
+
+
 def normalize_installments_text(value: Any) -> str:
     text = _clean_text(value)
     if not text:
@@ -124,7 +142,9 @@ def _offer_layout_data(offer: dict[str, Any]) -> dict[str, Any]:
         badges.append(f"{rating} estrelas ({rating_count})")
     elif rating:
         badges.append(f"{rating} estrelas")
-    badges = badges[:2]
+    store_category = f"{_store_label(offer.get('loja'))} | {_category_label(offer.get('categoria'))}"
+    badges.append(store_category)
+    badges = badges[:3]
 
     highlight_text = ""
     if coupon:
@@ -133,6 +153,16 @@ def _offer_layout_data(offer: dict[str, Any]) -> dict[str, Any]:
         highlight_text = promo[:64].rstrip(" -|,.;") + ("..." if len(promo) > 64 else "")
     elif shipping:
         highlight_text = shipping
+
+    normalized_highlight = _clean_text(highlight_text).lower()
+    deduped_badges: list[str] = []
+    seen_badges: set[str] = set()
+    for badge in badges:
+        normalized_badge = _clean_text(badge).lower()
+        if not normalized_badge or normalized_badge == normalized_highlight or normalized_badge in seen_badges:
+            continue
+        seen_badges.add(normalized_badge)
+        deduped_badges.append(badge)
 
     return {
         "discount": discount,
@@ -146,9 +176,24 @@ def _offer_layout_data(offer: dict[str, Any]) -> dict[str, Any]:
         "rating": rating,
         "rating_count": rating_count,
         "promo": promo,
-        "badges": badges,
+        "badges": deduped_badges,
         "highlight_text": highlight_text,
+        "store_category": store_category,
     }
+
+
+def _primary_card_detail_line(layout: dict[str, Any]) -> str:
+    if layout["installments"]:
+        return layout["installments"]
+    if layout["coupon"]:
+        return f"Cupom: {layout['coupon']}"
+    if layout["pix_price_text"]:
+        return f"No Pix: {layout['pix_price_text']}"
+    if layout["shipping"]:
+        return layout["shipping"]
+    if layout["promo"]:
+        return layout["promo"]
+    return layout["store_category"]
 
 
 def _fit_font_for_width(draw: ImageDraw.ImageDraw, text: str, max_width: int, start_size: int, min_size: int = 26, bold: bool = True):
@@ -313,7 +358,8 @@ def generate_offer_square_card_asset(offer: dict[str, Any], *, suffix: str = "ca
     price_key_font = _load_font(24, bold=True)
     price_old_font = _fit_font_for_width(draw, f"De {old_price_text}", max_width=330, start_size=28, min_size=20, bold=False)
     price_current_font = _fit_font_for_width(draw, current_price_text, max_width=360, start_size=50, min_size=30, bold=True)
-    details_font = _fit_font_for_width(draw, layout["installments"] or (layout["pix_price_text"] and f"Pix: {layout['pix_price_text']}") or (layout["shipping"] or "Confira no site"), max_width=350, start_size=24, min_size=18, bold=False)
+    primary_detail_line = _primary_card_detail_line(layout)
+    details_font = _fit_font_for_width(draw, primary_detail_line, max_width=350, start_size=24, min_size=18, bold=False)
 
     text_left = hero_box[0] + 34
     line_y = hero_box[1] + 82
@@ -332,12 +378,7 @@ def generate_offer_square_card_asset(offer: dict[str, Any], *, suffix: str = "ca
     draw.text((text_left, line_y), current_line, font=price_current_font, fill="#ffcb19")
     line_y += 62
 
-    details_line = layout["installments"] or ""
-    if not details_line and layout["pix_price_text"]:
-        details_line = f"Pix: {layout['pix_price_text']}"
-    if not details_line:
-        details_line = layout["shipping"] or "Acesse no site para ver mais"
-    draw.text((text_left, line_y), _truncate_text(details_line, 30), font=details_font, fill="#efe6ff")
+    draw.text((text_left, line_y), _truncate_text(primary_detail_line, 30), font=details_font, fill="#efe6ff")
 
     chip_y = 850
     highlight_text = layout["highlight_text"]

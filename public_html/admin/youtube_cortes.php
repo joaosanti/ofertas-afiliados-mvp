@@ -71,6 +71,105 @@ function admin_fetch_youtube_profile_for_oauth(PDO $pdo, $profileId = 0) {
   }
 }
 
+function admin_fetch_youtube_profile_status(PDO $pdo, $profileId = 0) {
+  try {
+    if ((int) $profileId > 0) {
+      $stmt = $pdo->prepare("
+        SELECT id, name, handle, channel_title, channel_custom_url, client_id, client_secret, redirect_uri,
+               access_token, refresh_token, token_expires_at, is_default, is_active, updated_at
+        FROM youtube_channel_profiles
+        WHERE id = ? AND is_active = 1
+        LIMIT 1
+      ");
+      $stmt->execute([(int) $profileId]);
+      $row = $stmt->fetch();
+      if ($row) {
+        return $row;
+      }
+    }
+
+    $stmt = $pdo->query("
+      SELECT id, name, handle, channel_title, channel_custom_url, client_id, client_secret, redirect_uri,
+             access_token, refresh_token, token_expires_at, is_default, is_active, updated_at
+      FROM youtube_channel_profiles
+      WHERE is_active = 1
+      ORDER BY is_default DESC, updated_at DESC, id DESC
+      LIMIT 1
+    ");
+    return $stmt->fetch() ?: null;
+  } catch (Throwable $e) {
+    return null;
+  }
+}
+
+function admin_build_youtube_status_summary($profile) {
+  if (!is_array($profile) || empty($profile['id'])) {
+    return [
+      'label' => 'Sem perfil',
+      'class' => 'warn',
+      'message' => 'Nenhum perfil ativo de canal do YouTube foi encontrado.',
+      'channel' => '',
+      'handle' => '',
+      'oauth_ready' => false,
+      'refresh_ready' => false,
+      'access_ready' => false,
+      'token_expired' => true,
+    ];
+  }
+
+  $hasClientId = trim((string) ($profile['client_id'] ?? '')) !== '';
+  $hasClientSecret = trim((string) ($profile['client_secret'] ?? '')) !== '';
+  $hasRedirectUri = trim((string) ($profile['redirect_uri'] ?? '')) !== '';
+  $hasRefreshToken = trim((string) ($profile['refresh_token'] ?? '')) !== '';
+  $hasAccessToken = trim((string) ($profile['access_token'] ?? '')) !== '';
+  $channelTitle = trim((string) ($profile['channel_title'] ?? ''));
+  $channelHandle = trim((string) ($profile['channel_custom_url'] ?? ($profile['handle'] ?? '')));
+  $tokenExpiresAt = (int) ($profile['token_expires_at'] ?? 0);
+  $tokenExpired = $tokenExpiresAt <= 0 ? true : ($tokenExpiresAt <= (time() + 120));
+
+  if (!$hasClientId || !$hasClientSecret || !$hasRedirectUri) {
+    return [
+      'label' => 'Config. incompleta',
+      'class' => 'warn',
+      'message' => 'Faltam credenciais OAuth no perfil selecionado.',
+      'channel' => $channelTitle,
+      'handle' => $channelHandle,
+      'oauth_ready' => false,
+      'refresh_ready' => $hasRefreshToken,
+      'access_ready' => $hasAccessToken,
+      'token_expired' => $tokenExpired,
+    ];
+  }
+
+  if (!$hasRefreshToken) {
+    return [
+      'label' => 'Precisa reconectar',
+      'class' => 'warn',
+      'message' => 'Esse perfil ainda nao tem refresh token valido do YouTube.',
+      'channel' => $channelTitle,
+      'handle' => $channelHandle,
+      'oauth_ready' => true,
+      'refresh_ready' => false,
+      'access_ready' => $hasAccessToken,
+      'token_expired' => $tokenExpired,
+    ];
+  }
+
+  return [
+    'label' => 'Conectado',
+    'class' => 'ok',
+    'message' => $tokenExpired
+      ? 'Perfil conectado. O access token local expirou, mas o sistema deve renovar sozinho no proximo uso.'
+      : 'Perfil conectado e pronto para usar no radar, no auto job e na publicacao.',
+    'channel' => $channelTitle,
+    'handle' => $channelHandle,
+    'oauth_ready' => true,
+    'refresh_ready' => true,
+    'access_ready' => $hasAccessToken,
+    'token_expired' => $tokenExpired,
+  ];
+}
+
 function admin_build_youtube_auth_url($clientId, $redirectUri, $state) {
   $clientId = trim((string) $clientId);
   $redirectUri = trim((string) $redirectUri);
@@ -89,6 +188,259 @@ function admin_build_youtube_auth_url($clientId, $redirectUri, $state) {
     'state' => $state,
   ];
   return 'https://accounts.google.com/o/oauth2/v2/auth?' . http_build_query($params, '', '&', PHP_QUERY_RFC3986);
+}
+
+function admin_current_absolute_url($path) {
+  $host = trim((string) ($_SERVER['HTTP_HOST'] ?? ''));
+  if ($host === '') {
+    return '';
+  }
+  $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+    || strtolower((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https';
+  $scheme = $https ? 'https' : 'http';
+  $normalizedPath = '/' . ltrim((string) $path, '/');
+  return $scheme . '://' . $host . $normalizedPath;
+}
+
+function admin_youtube_http_post_form($url, array $fields) {
+  $payload = http_build_query($fields, '', '&', PHP_QUERY_RFC3986);
+  if (function_exists('curl_init')) {
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+      CURLOPT_RETURNTRANSFER => true,
+      CURLOPT_POST => true,
+      CURLOPT_POSTFIELDS => $payload,
+      CURLOPT_HTTPHEADER => ['Content-Type: application/x-www-form-urlencoded'],
+      CURLOPT_TIMEOUT => 30,
+    ]);
+    $body = curl_exec($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error = curl_error($ch);
+    curl_close($ch);
+    if ($body === false) {
+      throw new RuntimeException('Falha HTTP ao falar com o Google: ' . $error);
+    }
+    return ['status' => $status, 'body' => (string) $body];
+  }
+
+  $context = stream_context_create([
+    'http' => [
+      'method' => 'POST',
+      'header' => "Content-Type: application/x-www-form-urlencoded\r\n",
+      'content' => $payload,
+      'timeout' => 30,
+      'ignore_errors' => true,
+    ],
+  ]);
+  $body = @file_get_contents($url, false, $context);
+  if ($body === false) {
+    throw new RuntimeException('Falha HTTP ao falar com o Google.');
+  }
+  $status = 0;
+  foreach ((array) ($http_response_header ?? []) as $headerLine) {
+    if (preg_match('~^HTTP/\S+\s+(\d{3})~', (string) $headerLine, $matches)) {
+      $status = (int) $matches[1];
+      break;
+    }
+  }
+  return ['status' => $status, 'body' => (string) $body];
+}
+
+function admin_youtube_http_get_json($url, array $headers = []) {
+  if (function_exists('curl_init')) {
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+      CURLOPT_RETURNTRANSFER => true,
+      CURLOPT_HTTPGET => true,
+      CURLOPT_TIMEOUT => 30,
+      CURLOPT_HTTPHEADER => $headers,
+    ]);
+    $body = curl_exec($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error = curl_error($ch);
+    curl_close($ch);
+    if ($body === false) {
+      throw new RuntimeException('Falha HTTP ao consultar o YouTube: ' . $error);
+    }
+    return ['status' => $status, 'body' => (string) $body];
+  }
+
+  $context = stream_context_create([
+    'http' => [
+      'method' => 'GET',
+      'header' => implode("\r\n", $headers) . "\r\n",
+      'timeout' => 30,
+      'ignore_errors' => true,
+    ],
+  ]);
+  $body = @file_get_contents($url, false, $context);
+  if ($body === false) {
+    throw new RuntimeException('Falha HTTP ao consultar o YouTube.');
+  }
+  $status = 0;
+  foreach ((array) ($http_response_header ?? []) as $headerLine) {
+    if (preg_match('~^HTTP/\S+\s+(\d{3})~', (string) $headerLine, $matches)) {
+      $status = (int) $matches[1];
+      break;
+    }
+  }
+  return ['status' => $status, 'body' => (string) $body];
+}
+
+function admin_fetch_youtube_profile_full(PDO $pdo, $profileId = 0) {
+  try {
+    if ((int) $profileId > 0) {
+      $stmt = $pdo->prepare("
+        SELECT *
+        FROM youtube_channel_profiles
+        WHERE id = ? AND is_active = 1
+        LIMIT 1
+      ");
+      $stmt->execute([(int) $profileId]);
+      $row = $stmt->fetch();
+      if ($row) {
+        return $row;
+      }
+    }
+
+    $stmt = $pdo->query("
+      SELECT *
+      FROM youtube_channel_profiles
+      WHERE is_active = 1
+      ORDER BY is_default DESC, updated_at DESC, id DESC
+      LIMIT 1
+    ");
+    return $stmt->fetch() ?: null;
+  } catch (Throwable $e) {
+    return null;
+  }
+}
+
+function admin_youtube_store_channel_snapshot(PDO $pdo, $profileId, $accessToken, $refreshToken, $tokenExpiresAt, array $channelItem) {
+  $snippet = is_array($channelItem['snippet'] ?? null) ? $channelItem['snippet'] : [];
+  $thumbnails = is_array($snippet['thumbnails'] ?? null) ? $snippet['thumbnails'] : [];
+  $thumbnailUrl = null;
+  foreach (['high', 'medium', 'default'] as $thumbKey) {
+    if (!empty($thumbnails[$thumbKey]['url'])) {
+      $thumbnailUrl = (string) $thumbnails[$thumbKey]['url'];
+      break;
+    }
+  }
+
+  $stmt = $pdo->prepare("
+    UPDATE youtube_channel_profiles
+    SET access_token = ?,
+        refresh_token = ?,
+        token_expires_at = ?,
+        oauth_state = '',
+        channel_id = ?,
+        channel_title = ?,
+        channel_custom_url = ?,
+        channel_thumbnail_url = ?
+    WHERE id = ?
+    LIMIT 1
+  ");
+  $stmt->execute([
+    $accessToken !== '' ? $accessToken : null,
+    $refreshToken !== '' ? $refreshToken : null,
+    $tokenExpiresAt ?: null,
+    trim((string) ($channelItem['id'] ?? '')) !== '' ? trim((string) ($channelItem['id'] ?? '')) : null,
+    trim((string) ($snippet['title'] ?? '')) !== '' ? trim((string) ($snippet['title'] ?? '')) : null,
+    trim((string) ($snippet['customUrl'] ?? '')) !== '' ? trim((string) ($snippet['customUrl'] ?? '')) : null,
+    $thumbnailUrl,
+    (int) $profileId,
+  ]);
+}
+
+function admin_youtube_test_auth(PDO $pdo, $profileId = 0) {
+  $profile = admin_fetch_youtube_profile_full($pdo, $profileId);
+  if (!$profile) {
+    throw new RuntimeException('Nenhum perfil ativo de canal do YouTube foi encontrado para testar.');
+  }
+
+  $clientId = trim((string) ($profile['client_id'] ?? ''));
+  $clientSecret = trim((string) ($profile['client_secret'] ?? ''));
+  if ($clientId === '' || $clientSecret === '') {
+    throw new RuntimeException('O perfil selecionado nao tem Client ID e Client Secret completos.');
+  }
+
+  $accessToken = trim((string) ($profile['access_token'] ?? ''));
+  $refreshToken = trim((string) ($profile['refresh_token'] ?? ''));
+  $tokenExpiresAt = (int) ($profile['token_expires_at'] ?? 0);
+  $shouldRefresh = ($accessToken === '') || ($tokenExpiresAt > 0 && $tokenExpiresAt <= (time() + 120));
+  $refreshed = false;
+
+  if ($shouldRefresh) {
+    if ($refreshToken === '') {
+      throw new RuntimeException('Esse perfil nao tem refresh token. Use "Reconectar YouTube".');
+    }
+    $tokenResponse = admin_youtube_http_post_form('https://oauth2.googleapis.com/token', [
+      'refresh_token' => $refreshToken,
+      'client_id' => $clientId,
+      'client_secret' => $clientSecret,
+      'grant_type' => 'refresh_token',
+    ]);
+    $tokenPayload = json_decode((string) $tokenResponse['body'], true);
+    if ((int) ($tokenResponse['status'] ?? 0) >= 400 || !is_array($tokenPayload)) {
+      $detail = is_array($tokenPayload) ? json_encode($tokenPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : (string) $tokenResponse['body'];
+      if (stripos((string) $detail, 'invalid_grant') !== false || stripos((string) $detail, 'expired or revoked') !== false) {
+        $clearStmt = $pdo->prepare("
+          UPDATE youtube_channel_profiles
+          SET access_token = NULL, refresh_token = NULL, token_expires_at = NULL, oauth_state = ''
+          WHERE id = ?
+          LIMIT 1
+        ");
+        $clearStmt->execute([(int) ($profile['id'] ?? 0)]);
+        throw new RuntimeException('O refresh token do YouTube expirou ou foi revogado. Use "Reconectar YouTube".');
+      }
+      throw new RuntimeException($detail !== '' ? $detail : 'Falha ao renovar o token do YouTube.');
+    }
+
+    $accessToken = trim((string) ($tokenPayload['access_token'] ?? ''));
+    $nextRefreshToken = trim((string) ($tokenPayload['refresh_token'] ?? ''));
+    if ($nextRefreshToken !== '') {
+      $refreshToken = $nextRefreshToken;
+    }
+    $expiresIn = (int) ($tokenPayload['expires_in'] ?? 0);
+    $tokenExpiresAt = $expiresIn > 0 ? (time() + $expiresIn) : 0;
+    $refreshed = true;
+  }
+
+  if ($accessToken === '') {
+    throw new RuntimeException('Nao foi possivel obter um access token valido para esse perfil.');
+  }
+
+  $channelResponse = admin_youtube_http_get_json(
+    'https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true',
+    ['Authorization: Bearer ' . $accessToken]
+  );
+  $channelPayload = json_decode((string) $channelResponse['body'], true);
+  if ((int) ($channelResponse['status'] ?? 0) >= 400 || !is_array($channelPayload)) {
+    $detail = is_array($channelPayload) ? json_encode($channelPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : (string) $channelResponse['body'];
+    throw new RuntimeException($detail !== '' ? $detail : 'Falha ao consultar o canal no YouTube.');
+  }
+
+  $channelItem = !empty($channelPayload['items'][0]) && is_array($channelPayload['items'][0]) ? $channelPayload['items'][0] : null;
+  if (!$channelItem) {
+    throw new RuntimeException('O YouTube nao retornou nenhum canal para a conta autenticada.');
+  }
+
+  admin_youtube_store_channel_snapshot(
+    $pdo,
+    (int) ($profile['id'] ?? 0),
+    $accessToken,
+    $refreshToken,
+    $tokenExpiresAt,
+    $channelItem
+  );
+
+  $snippet = is_array($channelItem['snippet'] ?? null) ? $channelItem['snippet'] : [];
+  return [
+    'profile_name' => (string) ($profile['name'] ?? 'Canal'),
+    'channel_title' => (string) ($snippet['title'] ?? ''),
+    'channel_custom_url' => (string) ($snippet['customUrl'] ?? ''),
+    'refreshed' => $refreshed,
+  ];
 }
 
 function admin_youtube_suggestions_for_mode($analysis, $mode) {
@@ -169,6 +521,9 @@ if (!empty($_GET['youtube_url'])) {
   $youtubeForm['url'] = trim((string) $_GET['youtube_url']);
   $_SESSION['admin_youtube_cuts_form'] = $youtubeForm;
 }
+$youtubeSelectedProfileStatus = admin_build_youtube_status_summary(
+  admin_fetch_youtube_profile_status($pdo, (int) ($youtubeForm['channel_profile_id'] ?? 0))
+);
 
 $generateTabUrl = admin_youtube_cuts_tab_url('gerar');
 $historyTabUrl = admin_youtube_cuts_tab_url('historico');
@@ -331,13 +686,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     $state = bin2hex(random_bytes(16));
+    $redirectUri = admin_current_absolute_url('/admin/youtube_oauth_callback.php');
     $authUrl = admin_build_youtube_auth_url(
       (string) ($profile['client_id'] ?? ''),
-      (string) ($profile['redirect_uri'] ?? ''),
+      $redirectUri,
       $state
     );
     if ($authUrl === '') {
-      admin_flash_set('error', 'Esse perfil nao tem Client ID ou Redirect URI configurados para o YouTube.');
+      admin_flash_set('error', 'Esse perfil nao tem Client ID configurado ou o site nao conseguiu montar a URL publica do callback.');
       header('Location: ' . $generateTabUrl);
       exit;
     }
@@ -352,6 +708,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     header('Location: ' . $authUrl);
+    exit;
+  }
+
+  if ($action === 'test_youtube_auth') {
+    $channelProfileId = max(0, (int) ($_POST['channel_profile_id'] ?? 0));
+    $_SESSION['admin_youtube_cuts_channel_profile_id'] = $channelProfileId;
+    if (!empty($_SESSION['admin_youtube_cuts_form']) && is_array($_SESSION['admin_youtube_cuts_form'])) {
+      $_SESSION['admin_youtube_cuts_form']['channel_profile_id'] = $channelProfileId;
+    }
+
+    try {
+      $result = admin_youtube_test_auth($pdo, $channelProfileId);
+      $channelLabel = trim((string) ($result['channel_title'] ?? ''));
+      $refreshLabel = !empty($result['refreshed']) ? ' Token renovado com sucesso.' : '';
+      admin_flash_set(
+        'success',
+        'Teste de autenticacao do YouTube OK para o perfil '
+        . (string) ($result['profile_name'] ?? 'Canal')
+        . ($channelLabel !== '' ? '. Canal: ' . $channelLabel . '.' : '.')
+        . $refreshLabel
+      );
+    } catch (Throwable $e) {
+      admin_flash_set('error', 'Falha no teste de autenticacao do YouTube: ' . $e->getMessage());
+    }
+
+    header('Location: ' . $generateTabUrl);
     exit;
   }
 
@@ -579,10 +961,31 @@ function admin_cuts_format_bytes($bytes) {
           </label>
           <button class="btn-link primary" type="submit" name="acao" value="load_trends">Carregar radar</button>
           <button class="btn-link" type="submit" name="acao" value="run_auto_cut_publish" data-confirm-auto-job>Rodar auto job</button>
+          <button class="btn-link" type="submit" name="acao" value="test_youtube_auth">Testar autenticacao</button>
           <button class="btn-link" type="submit" name="acao" value="reconnect_youtube">Reconectar YouTube</button>
         </form>
       </div>
     </div>
+    <article class="admin-side-card" style="margin-bottom:16px;">
+      <div class="admin-panel-head" style="padding:0; margin-bottom:10px;">
+        <div>
+          <strong>Status do canal selecionado</strong>
+          <p class="admin-card-subtitle"><?= h((string) ($youtubeSelectedProfileStatus['message'] ?? '')) ?></p>
+        </div>
+        <div class="admin-meta-row">
+          <span class="admin-status <?= h((string) ($youtubeSelectedProfileStatus['class'] ?? 'warn')) ?>"><?= h((string) ($youtubeSelectedProfileStatus['label'] ?? 'Pendente')) ?></span>
+        </div>
+      </div>
+      <div class="admin-meta-row">
+        <span class="admin-meta-chip"><?= h((string) (($youtubeSelectedProfileStatus['channel'] ?? '') !== '' ? $youtubeSelectedProfileStatus['channel'] : 'Canal ainda nao autenticado')) ?></span>
+        <?php if (!empty($youtubeSelectedProfileStatus['handle'])): ?>
+          <span class="admin-meta-chip admin-meta-chip-soft">@<?= h((string) $youtubeSelectedProfileStatus['handle']) ?></span>
+        <?php endif; ?>
+        <span class="admin-meta-chip admin-meta-chip-soft">OAuth <?= !empty($youtubeSelectedProfileStatus['oauth_ready']) ? 'ok' : 'pendente' ?></span>
+        <span class="admin-meta-chip admin-meta-chip-soft">Refresh token <?= !empty($youtubeSelectedProfileStatus['refresh_ready']) ? 'ok' : 'pendente' ?></span>
+        <span class="admin-meta-chip admin-meta-chip-soft">Access token <?= !empty($youtubeSelectedProfileStatus['access_ready']) ? (!empty($youtubeSelectedProfileStatus['token_expired']) ? 'expirado' : 'ativo') : 'vazio' ?></span>
+      </div>
+    </article>
 
     <?php if (is_array($youtubeTrendIdeas) && !empty($youtubeTrendIdeas['ideas'])): ?>
       <div class="admin-cut-grid">

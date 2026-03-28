@@ -757,6 +757,8 @@ def _build_story_canvas(
     *,
     product_image: Image.Image | None = None,
     show_placeholder: bool = True,
+    show_brand_label: bool = True,
+    vertical_shift: int = 0,
 ) -> dict[str, Any]:
     destination_url = _destination_url(offer)
     destination_host = _display_url(destination_url)
@@ -785,10 +787,11 @@ def _build_story_canvas(
     micro_font = _load_font(22)
     domain_font = _load_font(40, bold=True)
 
-    draw.text((80, 120), "ZERO PRECO", font=label_font, fill="#dbe7ff")
+    if show_brand_label:
+        draw.text((80, 120 + vertical_shift), "ZERO PRECO", font=label_font, fill="#dbe7ff")
 
     title_lines = _wrap_text(offer["titulo"], 23)[:3]
-    y = 250
+    y = 250 + vertical_shift
     for line in title_lines:
         draw.text((80, y), line, font=title_font, fill="#f4f7fb")
         y += 68
@@ -884,7 +887,7 @@ def _build_story_canvas(
         fill="#dbe7ff",
     )
 
-    product_top = max(780, info_y + 56)
+    product_top = max(780 + vertical_shift, info_y + 56)
     product_bottom = product_top + 520
     product_card_box = (80, product_top, 1000, product_bottom)
     draw.rounded_rectangle(product_card_box, radius=36, fill="#f8fbff")
@@ -911,16 +914,27 @@ def _build_story_canvas(
     draw.text((136, footer_top + 34), destination_label, font=cta_small_font, fill="#0b2d78")
     draw.text((136, footer_top + 78), destination_label_secondary, font=cta_font, fill="#0b2d78")
 
-    draw.text((664, footer_top - 8), "Grupo WhatsApp", font=cta_small_font, fill="#ffffff")
     qr_outer_box = (686, footer_top + 30, 880, footer_top + 224)
     qr_inner_box = (694, footer_top + 38, 872, footer_top + 216)
+    qr_label = "Grupo WhatsApp"
+    qr_label_bbox = draw.textbbox((0, 0), qr_label, font=cta_small_font)
+    qr_label_width = qr_label_bbox[2] - qr_label_bbox[0]
+    qr_label_x = qr_outer_box[0] + ((qr_outer_box[2] - qr_outer_box[0] - qr_label_width) / 2)
+    draw.text((qr_label_x, footer_top - 8), qr_label, font=cta_small_font, fill="#ffffff")
     draw.rounded_rectangle(qr_outer_box, radius=18, fill="#f7fbff", outline="#8fb9ff", width=3)
     if whatsapp_group_qr is not None:
         qr_image = ImageOps.fit(whatsapp_group_qr, (178, 178), method=Image.Resampling.LANCZOS)
-        image.paste(qr_image, (694, 1386))
+        qr_x = qr_inner_box[0] + ((qr_inner_box[2] - qr_inner_box[0] - qr_image.width) // 2)
+        qr_y = qr_inner_box[1] + ((qr_inner_box[3] - qr_inner_box[1] - qr_image.height) // 2)
+        image.paste(qr_image, (qr_x, qr_y))
     else:
         draw.rounded_rectangle(qr_inner_box, radius=18, fill="#d9e5ff")
-        draw.text((742, 1462), "QR", font=cta_font, fill="#0b2d78")
+        qr_placeholder_bbox = draw.textbbox((0, 0), "QR", font=cta_font)
+        qr_placeholder_width = qr_placeholder_bbox[2] - qr_placeholder_bbox[0]
+        qr_placeholder_height = qr_placeholder_bbox[3] - qr_placeholder_bbox[1]
+        qr_placeholder_x = qr_inner_box[0] + ((qr_inner_box[2] - qr_inner_box[0] - qr_placeholder_width) / 2)
+        qr_placeholder_y = qr_inner_box[1] + ((qr_inner_box[3] - qr_inner_box[1] - qr_placeholder_height) / 2) - 4
+        draw.text((qr_placeholder_x, qr_placeholder_y), "QR", font=cta_font, fill="#0b2d78")
 
     link_top = footer_top + 260
     draw.text((80, link_top), destination_host, font=domain_font, fill="#ffffff")
@@ -930,8 +944,6 @@ def _build_story_canvas(
         font=text_font,
         fill="#dbe7ff",
     )
-    draw.text((80, link_top + 152), "Use o link publicado junto da oferta.", font=micro_font, fill="#dbe7ff")
-    draw.text((80, link_top + 192), "Entre no grupo pelo QR ao lado.", font=micro_font, fill="#dbe7ff")
 
     return {
         "image": image,
@@ -1035,34 +1047,40 @@ def generate_story_video_asset(
 
 
 def generate_reel_asset(offer: dict[str, Any], *, duration_seconds: int = 6, fps: int = 24) -> dict[str, Any]:
-    story_asset = generate_story_asset(offer)
-    source_path = Path(story_asset["file_path"])
-    if not source_path.is_file():
-        raise ValueError("Arte base do reel nao foi gerada.")
+    stories_dir = ensure_stories_dir()
+    poster_filename = f"offer-{offer['id']}-{_slugify(offer['slug'])}-reel-poster.jpg"
+    poster_path = stories_dir / poster_filename
+    product_image = _fit_remote_product_image(offer.get("imagem_url"), (840, 470))
+    reel_canvas = _build_story_canvas(
+        offer,
+        product_image=product_image,
+        show_brand_label=False,
+        vertical_shift=-70,
+    )
+    base_image = reel_canvas["image"].convert("RGB")
+    base_image.save(poster_path, format="JPEG", quality=92, optimize=True)
 
-    filename = source_path.stem + "-reel.mp4"
-    destination = source_path.with_name(filename)
+    filename = f"offer-{offer['id']}-{_slugify(offer['slug'])}-reel.mp4"
+    destination = stories_dir / filename
     total_frames = max(1, duration_seconds * fps)
 
-    with Image.open(source_path) as source_image:
-        base_image = source_image.convert("RGB")
-        width, height = base_image.size
-        writer = imageio.get_writer(
-            str(destination),
-            fps=fps,
-            codec="libx264",
-            pixelformat="yuv420p",
-            macro_block_size=None,
-        )
-        try:
-            for frame_index in range(total_frames):
-                progress = frame_index / max(total_frames - 1, 1)
-                zoom = 1.0 + (0.035 * progress)
-                resized = base_image.resize((int(width * zoom), int(height * zoom)), Image.Resampling.LANCZOS)
-                frame = ImageOps.fit(resized, (width, height), method=Image.Resampling.LANCZOS, centering=(0.5, 0.4))
-                writer.append_data(np.asarray(frame))
-        finally:
-            writer.close()
+    width, height = base_image.size
+    writer = imageio.get_writer(
+        str(destination),
+        fps=fps,
+        codec="libx264",
+        pixelformat="yuv420p",
+        macro_block_size=None,
+    )
+    try:
+        for frame_index in range(total_frames):
+            progress = frame_index / max(total_frames - 1, 1)
+            zoom = 1.0 + (0.035 * progress)
+            resized = base_image.resize((int(width * zoom), int(height * zoom)), Image.Resampling.LANCZOS)
+            frame = ImageOps.fit(resized, (width, height), method=Image.Resampling.LANCZOS, centering=(0.5, 0.4))
+            writer.append_data(np.asarray(frame))
+    finally:
+        writer.close()
 
     return {
         "ok": True,
@@ -1071,8 +1089,8 @@ def generate_reel_asset(offer: dict[str, Any], *, duration_seconds: int = 6, fps
         "file_path": str(destination),
         "public_url": story_public_url(filename),
         "caption": _story_caption_for_offer(offer),
-        "destination_url": story_asset["destination_url"],
-        "poster_url": story_asset["public_url"],
+        "destination_url": reel_canvas["destination_url"],
+        "poster_url": story_public_url(poster_filename),
     }
 
 
