@@ -11,6 +11,7 @@ from app.main import (
     execute_import_run,
     execute_social_run,
     execute_youtube_auto_cut_publish,
+    execute_youtube_cut_private_test,
     execute_youtube_cuts_analyze,
     execute_youtube_cuts_process,
     execute_youtube_cut_publish,
@@ -20,6 +21,7 @@ from app.services.manual_file_import import preview_amazon_txt_file, preview_mer
 from app.services.manual_link_import import preview_manual_affiliate_links
 from app.services.normalize import normalize_offer
 from app.services.publish import publish_offer
+from app.services.shopee_video import build_shopee_video_package
 from app.services.store_maintenance import repair_mercadolivre_product_links
 from app.services.youtube_cuts import rerender_youtube_cut
 
@@ -71,6 +73,10 @@ def main() -> int:
     social_parser.add_argument("--limit", type=int, default=1)
     social_parser.add_argument("--offer-id", dest="offer_ids", action="append", type=int, default=[])
 
+    shopee_video_parser = subparsers.add_parser("shopee-video-package", help="Gera pacote profissional para Shopee Video.")
+    shopee_video_parser.add_argument("--draft-id", type=int, default=None)
+    shopee_video_parser.add_argument("--offer-id", type=int, default=None)
+
     import_parser = subparsers.add_parser("import", help="Roda importadores configurados.")
     import_parser.add_argument("--provider", dest="providers", action="append", default=[])
 
@@ -98,8 +104,16 @@ def main() -> int:
     yt_process_parser.add_argument("--limit", type=int, default=5)
     yt_process_parser.add_argument("--mode", default="short")
     yt_process_parser.add_argument("--selection-strategy", default="openai_heuristica")
+    yt_process_parser.add_argument("--risk-profile", default="default")
     yt_process_parser.add_argument("--channel-profile-id", type=int, default=None)
     yt_process_parser.add_argument("--no-burn-subtitles", action="store_true")
+
+    yt_private_test_parser = subparsers.add_parser("youtube-cut-private-test", help="Gera um short com preset conservador e sobe como privado para revisao.")
+    yt_private_test_parser.add_argument("--url", required=True)
+    yt_private_test_parser.add_argument("--limit", type=int, default=3)
+    yt_private_test_parser.add_argument("--selection-strategy", default="openai_heuristica")
+    yt_private_test_parser.add_argument("--channel-profile-id", type=int, default=None)
+    yt_private_test_parser.add_argument("--no-burn-subtitles", action="store_true")
 
     yt_publish_parser = subparsers.add_parser("youtube-cut-publish", help="Publica um corte gerado no YouTube.")
     yt_publish_parser.add_argument("--job-id", required=True)
@@ -142,6 +156,15 @@ def main() -> int:
                 offer_ids=args.offer_ids or None,
             )
             return _emit({"ok": True, "command": "social", "result": result})
+
+        if args.command == "shopee-video-package":
+            if args.draft_id is None and args.offer_id is None:
+                return _emit({"ok": False, "error": "Informe --draft-id ou --offer-id."}, 1)
+            result = build_shopee_video_package(
+                draft_id=args.draft_id,
+                offer_id=args.offer_id,
+            )
+            return _emit({"ok": True, "command": "shopee-video-package", "result": result})
 
         if args.command == "import":
             result = execute_import_run(args.providers or None)
@@ -199,10 +222,21 @@ def main() -> int:
                 limit=max(1, int(args.limit)),
                 mode=args.mode,
                 selection_strategy=args.selection_strategy,
+                risk_profile=args.risk_profile,
                 channel_profile_id=args.channel_profile_id,
                 burn_subtitles=not bool(args.no_burn_subtitles),
             )
             return _emit({"ok": True, "command": "youtube-cuts-process", "result": result})
+
+        if args.command == "youtube-cut-private-test":
+            result = execute_youtube_cut_private_test(
+                args.url,
+                limit=max(1, int(args.limit)),
+                selection_strategy=args.selection_strategy,
+                channel_profile_id=args.channel_profile_id,
+                burn_subtitles=not bool(args.no_burn_subtitles),
+            )
+            return _emit({"ok": True, "command": "youtube-cut-private-test", "result": result})
 
         if args.command == "youtube-cut-publish":
             result = execute_youtube_cut_publish(

@@ -108,6 +108,28 @@ def _editorial_profile_for_channel(channel_profile_name: str | None = None) -> d
         return SPORT_EDITORIAL_PROFILE
     return DEFAULT_EDITORIAL_PROFILE
 
+
+def _compact_profile_identity(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _requires_opening_speaker_gate(
+    channel_profile_name: str | None = None,
+    channel_preferences: dict[str, Any] | None = None,
+) -> bool:
+    preferences = channel_preferences or {}
+    identities = [
+        preferences.get("handle"),
+        preferences.get("channel_custom_url"),
+        preferences.get("name"),
+        preferences.get("channel_title"),
+        channel_profile_name,
+    ]
+    compact_values = {_compact_profile_identity(item) for item in identities if str(item or "").strip()}
+    if "zerocortespolitica" in compact_values:
+        return False
+    return False
+
 def _split_channel_terms(value: Any) -> list[str]:
     tokens = re.split(r"[\n,;|]+", str(value or ""))
     return _dedupe_preserve_order([token.strip() for token in tokens if str(token or "").strip()], limit=18)
@@ -624,6 +646,21 @@ def _normalize_cut_mode(mode: str | None) -> str:
 def _normalize_short_selection_strategy(value: str | None) -> str:
     normalized = (value or "openai_heuristica").strip().lower()
     return normalized if normalized in {"openai", "heuristica", "openai_heuristica"} else "openai_heuristica"
+
+
+def _normalize_cut_risk_profile(value: str | None) -> str:
+    normalized = (value or "default").strip().lower()
+    aliases = {
+        "padrao": "default",
+        "default": "default",
+        "normal": "default",
+        "conservative": "conservative",
+        "conservador": "conservative",
+        "risco_menor": "conservative",
+        "risk_lower": "conservative",
+        "risk_test": "conservative",
+    }
+    return aliases.get(normalized, "default")
 
 
 def _format_duration_label(seconds: float) -> str:
@@ -1221,6 +1258,32 @@ def _apply_short_series_strategy(selected: list[dict[str, Any]]) -> list[dict[st
         ranked.append(
             enriched
             | {
+                "editorial_role": "principal" if index == 0 else f"secundario_{index}",
+            }
+        )
+    return ranked
+
+
+def _mark_short_candidates_as_single(selected: list[dict[str, Any]], *, conservative: bool = False) -> list[dict[str, Any]]:
+    if not selected:
+        return []
+
+    note = (
+        "Preset conservador: manter contexto completo em um unico short para revisao manual antes de qualquer uso publico."
+        if conservative
+        else "Short unico: entregar contexto completo sem depender de outra parte."
+    )
+    ranked: list[dict[str, Any]] = []
+    for index, item in enumerate(selected):
+        ranked.append(
+            dict(item)
+            | {
+                "copy_title": str(item.get("title") or ""),
+                "series_part": 0,
+                "series_total": 0,
+                "series_label": "",
+                "series_mode": "single",
+                "packaging_notes": list(item.get("packaging_notes") or []) + [note],
                 "editorial_role": "principal" if index == 0 else f"secundario_{index}",
             }
         )
@@ -2300,6 +2363,7 @@ def _build_short_cut_candidates(
     *,
     limit: int = 5,
     editorial_profile: dict[str, Any] | None = None,
+    allow_series: bool = True,
 ) -> list[dict[str, Any]]:
     if not segments:
         raise ValueError("Nao encontrei transcricao suficiente para detectar cortes.")
@@ -2414,6 +2478,8 @@ def _build_short_cut_candidates(
         if len(selected) >= limit:
             break
 
+    if not allow_series:
+        return _mark_short_candidates_as_single(selected)
     return _apply_short_series_strategy(selected)
 
 
@@ -2540,11 +2606,103 @@ def _build_cut_candidates(
     limit: int = 5,
     mode: str = "short",
     editorial_profile: dict[str, Any] | None = None,
+    allow_series: bool = True,
 ) -> list[dict[str, Any]]:
     normalized_mode = _normalize_cut_mode(mode)
     if normalized_mode == "long":
         return _build_long_cut_candidates(segments, limit=max(1, min(limit, 3)), editorial_profile=editorial_profile)
-    return _build_short_cut_candidates(segments, limit=max(limit * 2, 8), editorial_profile=editorial_profile)
+    return _build_short_cut_candidates(
+        segments,
+        limit=max(limit * 2, 8),
+        editorial_profile=editorial_profile,
+        allow_series=allow_series,
+    )
+
+
+def _conservative_text_gate_notes(item: dict[str, Any]) -> list[str]:
+    notes: list[str] = []
+    duration = float(item.get("duration_seconds") or 0.0)
+    speech_coverage = float(item.get("speech_coverage") or 0.0)
+    max_pause = float(item.get("max_pause") or 0.0)
+    lead_pause = float(item.get("lead_pause") or 0.0)
+    words_per_second = float(item.get("words_per_second") or 0.0)
+    opening_score = int(item.get("opening_score") or 0)
+    if duration < 18 or duration > 34:
+        notes.append(f"Duracao fora da faixa conservadora ({duration:.1f}s).")
+    if speech_coverage < 0.84:
+        notes.append(f"Cobertura de fala baixa para preset conservador ({speech_coverage:.0%}).")
+    if max_pause > 1.10:
+        notes.append(f"Pausa maxima alta para preset conservador ({max_pause:.1f}s).")
+    if lead_pause > 0.35:
+        notes.append(f"Pausa inicial alta para preset conservador ({lead_pause:.1f}s).")
+    if words_per_second < 1.60:
+        notes.append(f"Ritmo de fala lento para preset conservador ({words_per_second:.2f} palavras/s).")
+    if int(opening_score or 0) < 56:
+        notes.append(f"Gancho inicial abaixo do alvo conservador ({opening_score}).")
+    if bool(item.get("contextless_open")):
+        notes.append("Abertura parece depender de contexto externo.")
+    return notes
+
+
+def _apply_conservative_text_profile(candidates: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+
+    passing: list[dict[str, Any]] = []
+    fallback: list[dict[str, Any]] = []
+    for item in candidates:
+        notes = _conservative_text_gate_notes(item)
+        enriched = dict(item)
+        enriched["risk_profile"] = "conservative"
+        enriched["risk_notes"] = list(item.get("risk_notes") or []) + notes
+        enriched["risk_text_gate_passed"] = not notes
+        if not notes:
+            passing.append(enriched)
+        else:
+            fallback.append(enriched)
+
+    target_count = max(limit, min(len(candidates), limit * 2))
+    if len(passing) >= target_count:
+        return passing[:target_count]
+    return (passing + fallback)[:target_count]
+
+
+def _conservative_visual_gate_notes(item: dict[str, Any]) -> list[str]:
+    notes: list[str] = []
+    duration = float(item.get("duration_seconds") or 0.0)
+    visual_score = int(item.get("opening_visual_score") or 0)
+    speech_score = int(item.get("speech_score") or 0)
+    max_pause = float(item.get("max_pause") or 0.0)
+    lead_pause = float(item.get("lead_pause") or 0.0)
+    if duration > 32:
+        notes.append(f"Duracao ainda longa para preset conservador ({duration:.1f}s).")
+    if not bool(item.get("opening_speaker_detected")):
+        notes.append("Abertura sem pessoa falando detectada.")
+    if visual_score < 60:
+        notes.append(f"Abertura visual abaixo do alvo conservador ({visual_score}).")
+    if speech_score < 58:
+        notes.append(f"Speech score abaixo do alvo conservador ({speech_score}).")
+    if max_pause > 1.00:
+        notes.append(f"Pausa maxima ainda alta ({max_pause:.1f}s).")
+    if lead_pause > 0.30:
+        notes.append(f"Pausa inicial ainda alta ({lead_pause:.1f}s).")
+    return notes
+
+
+def _conservative_candidate_priority(item: dict[str, Any]) -> tuple[int, int, int, int, float]:
+    conservative_bonus = 0
+    if bool(item.get("risk_text_gate_passed")):
+        conservative_bonus += 20
+    if bool(item.get("risk_visual_gate_passed")):
+        conservative_bonus += 30
+    conservative_bonus += max(0, 34 - int(round(float(item.get("duration_seconds") or 0.0))))
+    return (
+        conservative_bonus,
+        int(item.get("opening_visual_score") or 0),
+        int(item.get("speech_score") or 0),
+        int(item.get("score") or 0),
+        -abs(float(item.get("duration_seconds") or 0.0) - 24.0),
+    )
 
 
 def _passes_short_opening_gate(item: dict[str, Any], *, relaxed: bool = False) -> bool:
@@ -3669,6 +3827,7 @@ def _manual_short_crop_x(source_video: Path, framing: str) -> int:
 def rerender_youtube_cut(job_id: str, cut_id: int, *, framing: str = "auto") -> dict[str, Any]:
     manifest = load_youtube_cuts_manifest(job_id)
     mode = _normalize_cut_mode(str(manifest.get("mode") or "short"))
+    requires_opening_speaker_gate = bool(manifest.get("requires_opening_speaker_gate"))
     if mode != "short":
         raise ValueError("O override manual de enquadramento vale apenas para cortes em short.")
 
@@ -3719,8 +3878,8 @@ def rerender_youtube_cut(job_id: str, cut_id: int, *, framing: str = "auto") -> 
         opening_visual_score = int(visual_signal.get("opening_visual_score") or 50)
         opening_speaker_detected = bool(visual_signal.get("opening_speaker_detected"))
         opening_speaker_score = int(visual_signal.get("opening_speaker_score") or 0)
-        publish_allowed = bool(visual_signal.get("publish_allowed"))
-        publish_block_reason = str(visual_signal.get("publish_block_reason") or "").strip()
+        publish_allowed = bool(visual_signal.get("publish_allowed")) if requires_opening_speaker_gate else True
+        publish_block_reason = str(visual_signal.get("publish_block_reason") or "").strip() if requires_opening_speaker_gate else ""
     else:
         crop_x = _manual_short_crop_x(source_video, normalized_framing)
         opening_focus_zone = normalized_framing
@@ -3730,8 +3889,8 @@ def rerender_youtube_cut(job_id: str, cut_id: int, *, framing: str = "auto") -> 
         opening_focus_confidence = max(80, min(100, opening_speaker_score + 18)) if opening_speaker_score else 100
         opening_subject_signal = "manual" if opening_speaker_score <= 0 else ("forte" if opening_speaker_score >= SHORT_SPEAKER_STRONG_SCORE else "medio")
         opening_visual_score = int(max(int(cut.get("opening_visual_score") or 50), opening_speaker_score))
-        publish_allowed = opening_speaker_detected
-        publish_block_reason = "" if publish_allowed else "O enquadramento manual ainda nao mostrou uma pessoa falando no inicio do short."
+        publish_allowed = opening_speaker_detected if requires_opening_speaker_gate else True
+        publish_block_reason = "" if publish_allowed or not requires_opening_speaker_gate else "O enquadramento manual ainda nao mostrou uma pessoa falando no inicio do short."
 
     _generate_vertical_cut(
         source_video,
@@ -3753,6 +3912,7 @@ def rerender_youtube_cut(job_id: str, cut_id: int, *, framing: str = "auto") -> 
     cut["opening_speaker_score"] = opening_speaker_score
     cut["publish_allowed"] = publish_allowed
     cut["publish_block_reason"] = publish_block_reason
+    cut["requires_opening_speaker_gate"] = requires_opening_speaker_gate
     cut["hook_overlay_filename"] = overlay_filename
     packaging_notes = list(cut.get("packaging_notes") or [])
     packaging_notes.append(f"Enquadramento manual: {normalized_framing}.")
@@ -4022,6 +4182,7 @@ def process_youtube_video_for_cuts(
     limit: int = 5,
     mode: str = "short",
     selection_strategy: str = "openai_heuristica",
+    risk_profile: str = "default",
     channel_profile_id: int | None = None,
     channel_profile_name: str | None = None,
     channel_preferences: dict[str, Any] | None = None,
@@ -4032,9 +4193,11 @@ def process_youtube_video_for_cuts(
         _editorial_profile_for_channel(channel_profile_name),
         channel_preferences,
     )
+    requires_opening_speaker_gate = _requires_opening_speaker_gate(channel_profile_name, channel_preferences)
     video = phase_one["video"]
     normalized_mode = _normalize_cut_mode(mode)
     normalized_strategy = _normalize_short_selection_strategy(selection_strategy)
+    normalized_risk_profile = _normalize_cut_risk_profile(risk_profile)
     created_at = _utc_now()
     timestamp = created_at.strftime("%Y%m%d%H%M%S")
     job_id = f"{video['video_id']}-{timestamp}"
@@ -4064,6 +4227,7 @@ def process_youtube_video_for_cuts(
         limit=limit,
         mode=normalized_mode,
         editorial_profile=editorial_profile,
+        allow_series=not (normalized_mode == "short" and normalized_risk_profile == "conservative"),
     )
     if normalized_mode == "short" and normalized_strategy in {"openai", "openai_heuristica"}:
         try:
@@ -4081,6 +4245,9 @@ def process_youtube_video_for_cuts(
             cut_candidates = cut_candidates[:limit]
     elif normalized_mode == "short":
         cut_candidates = cut_candidates[:limit]
+
+    if normalized_mode == "short" and normalized_risk_profile == "conservative":
+        cut_candidates = _apply_conservative_text_profile(cut_candidates, limit=limit)
 
     if normalized_mode == "short":
         visually_scored_candidates: list[dict[str, Any]] = []
@@ -4110,8 +4277,15 @@ def process_youtube_video_for_cuts(
             if not bool(visual_signal.get("opening_speaker_detected")):
                 updated_item["visual_delta"] = int(updated_item.get("visual_delta") or 0) - 22
             updated_item["score"] = max(1, min(99, int(item.get("score") or 0) + int(updated_item.get("visual_delta") or 0)))
-            updated_item["publish_allowed"] = bool(visual_signal.get("publish_allowed"))
-            updated_item["publish_block_reason"] = str(visual_signal.get("publish_block_reason") or "").strip()
+            updated_item["publish_allowed"] = bool(visual_signal.get("publish_allowed")) if requires_opening_speaker_gate else True
+            updated_item["publish_block_reason"] = str(visual_signal.get("publish_block_reason") or "").strip() if requires_opening_speaker_gate else ""
+            updated_item["requires_opening_speaker_gate"] = requires_opening_speaker_gate
+            if normalized_risk_profile == "conservative":
+                visual_notes = _conservative_visual_gate_notes(updated_item)
+                updated_item["risk_visual_gate_passed"] = not visual_notes
+                updated_item["risk_notes"] = list(updated_item.get("risk_notes") or []) + visual_notes
+            else:
+                updated_item["risk_visual_gate_passed"] = True
             updated_item["packaging_notes"] = _dedupe_preserve_order(
                 list(item.get("packaging_notes") or [])
                 + [
@@ -4122,9 +4296,13 @@ def process_youtube_video_for_cuts(
                         f"com foco em {visual_signal.get('opening_focus_zone') or 'centro'} "
                         f"({int(visual_signal.get('opening_focus_confidence') or 0)}% de confianca)."
                     ),
-                    "Evitar publicar esse corte se o rosto nao aparecer logo no primeiro segundo.",
+                    ("Evitar publicar esse corte se o rosto nao aparecer logo no primeiro segundo." if requires_opening_speaker_gate else ""),
                 ]
-                + ([str(visual_signal.get("publish_block_reason") or "").strip()] if str(visual_signal.get("publish_block_reason") or "").strip() else [])
+                + (
+                    [str(visual_signal.get("publish_block_reason") or "").strip()]
+                    if requires_opening_speaker_gate and str(visual_signal.get("publish_block_reason") or "").strip()
+                    else []
+                )
             )
             visually_scored_candidates.append(updated_item)
         ranked_candidates = sorted(
@@ -4137,20 +4315,40 @@ def process_youtube_video_for_cuts(
             ),
             reverse=True,
         )
-        gated_candidates = [item for item in ranked_candidates if _passes_short_opening_gate(item)]
-        if len(gated_candidates) < limit:
-            relaxed_candidates = [item for item in ranked_candidates if _passes_short_opening_gate(item, relaxed=True)]
-            merged_candidates: list[dict[str, Any]] = []
+        if requires_opening_speaker_gate:
+            gated_candidates = [item for item in ranked_candidates if _passes_short_opening_gate(item)]
+            if len(gated_candidates) < limit:
+                relaxed_candidates = [item for item in ranked_candidates if _passes_short_opening_gate(item, relaxed=True)]
+                merged_candidates: list[dict[str, Any]] = []
+                seen_candidate_ids: set[int] = set()
+                for item in gated_candidates + relaxed_candidates + ranked_candidates:
+                    candidate_id = int(item.get("candidate_id") or 0)
+                    if candidate_id in seen_candidate_ids:
+                        continue
+                    seen_candidate_ids.add(candidate_id)
+                    merged_candidates.append(item)
+                cut_candidates = merged_candidates[:limit]
+            else:
+                cut_candidates = gated_candidates[:limit]
+        else:
+            cut_candidates = ranked_candidates[:limit]
+
+        if normalized_risk_profile == "conservative":
+            conservative_candidates = sorted(ranked_candidates, key=_conservative_candidate_priority, reverse=True)
+            strict_candidates = [item for item in conservative_candidates if bool(item.get("risk_text_gate_passed")) and bool(item.get("risk_visual_gate_passed"))]
+            if requires_opening_speaker_gate:
+                strict_candidates = [item for item in strict_candidates if bool(item.get("publish_allowed", True))]
+            relaxed_candidates = [item for item in conservative_candidates if item not in strict_candidates]
+            combined_candidates = strict_candidates + relaxed_candidates
+            deduped_candidates: list[dict[str, Any]] = []
             seen_candidate_ids: set[int] = set()
-            for item in gated_candidates + relaxed_candidates + ranked_candidates:
+            for item in combined_candidates:
                 candidate_id = int(item.get("candidate_id") or 0)
                 if candidate_id in seen_candidate_ids:
                     continue
                 seen_candidate_ids.add(candidate_id)
-                merged_candidates.append(item)
-            cut_candidates = merged_candidates[:limit]
-        else:
-            cut_candidates = gated_candidates[:limit]
+                deduped_candidates.append(item)
+            cut_candidates = _mark_short_candidates_as_single(deduped_candidates[:limit], conservative=True)
 
     _, latest_offer_lines = _build_latest_offer_footer(limit=1)
     generated_items = []
@@ -4232,6 +4430,7 @@ def process_youtube_video_for_cuts(
                 "series_label": str(item.get("series_label") or ""),
                 "subtitle_asset_url": f"/dashboard/api/youtube/cuts/assets/{job_id}/{subtitle_path.name}" if subtitle_path else None,
                 "subtitle_filename": subtitle_path.name if subtitle_path else None,
+                "requires_opening_speaker_gate": requires_opening_speaker_gate,
             }
         )
 
@@ -4243,8 +4442,11 @@ def process_youtube_video_for_cuts(
         "expires_at_utc": (created_at + YOUTUBE_CUTS_RETENTION).isoformat(),
         "target_channel_profile_id": int(channel_profile_id) if channel_profile_id else None,
         "target_channel_profile_name": str(channel_profile_name or "").strip(),
+        "target_channel_profile_handle": str((channel_preferences or {}).get("handle") or "").strip(),
+        "requires_opening_speaker_gate": requires_opening_speaker_gate,
         "mode": normalized_mode,
         "burn_subtitles": should_burn_subtitles,
+        "risk_profile": normalized_risk_profile,
         "selection_strategy": normalized_strategy if normalized_mode == "short" else "long_default",
         "strategy": {
             "profile": editorial_profile["name"],
@@ -4254,6 +4456,7 @@ def process_youtube_video_for_cuts(
             "preferred_terms": list(editorial_profile.get("preferred_terms") or []),
             "avoid_terms": list(editorial_profile.get("avoid_terms") or []),
             "viral_tone": str(editorial_profile.get("viral_tone") or ""),
+            "risk_profile": normalized_risk_profile,
         },
         "video": video | {"source_filename": source_video.name, "subtitle_filename": subtitle_file.name if subtitle_file else None},
         "transcript": {
@@ -4271,6 +4474,7 @@ def process_youtube_video_for_cuts(
                 "Fase 2: video baixado, transcricao base gerada e cortes montados.",
                 "Shorts saem em vertical com abertura forte e legenda dinamica com destaque em azul.",
                 "Shorts agora filtram trechos com abertura visual fraca ou gancho inicial morno sempre que houver opcoes melhores.",
+                ("Preset conservador ativo: priorizar shorts mais curtos, com fala mais continua, sem serie e para revisao manual privada." if normalized_mode == "short" and normalized_risk_profile == "conservative" else ""),
                 "Corte longo sai em horizontal com gancho visual nos primeiros segundos e thumbnail mais limpa.",
                 str(editorial_profile["notes_summary"]),
                 (f"Priorizar: {', '.join(editorial_profile.get('preferred_terms') or [])}" if editorial_profile.get("preferred_terms") else ""),

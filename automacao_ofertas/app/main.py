@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -261,10 +262,13 @@ class DashboardManualLinkItemPayload(BaseModel):
     url: str
     canonical_url: str | None = None
     image: str | None = None
+    image_urls: list[str] | None = None
     category: str | None = None
     coupon: str | None = None
     tags: str | None = None
     featured: int | None = None
+    video_url: str | None = None
+    video_urls: list[str] | None = None
     affiliate_detected: bool | None = None
     affiliate_code: str | None = None
     affiliate_status: str | None = None
@@ -316,6 +320,7 @@ class DashboardYoutubeCutsProcessPayload(BaseModel):
     limit: int = 5
     mode: str = "short"
     selection_strategy: str = "openai_heuristica"
+    risk_profile: str = "default"
     channel_profile_id: int | None = None
     burn_subtitles: bool = True
 
@@ -335,6 +340,7 @@ class DashboardYoutubeChannelPayload(BaseModel):
     name: str
     handle: str | None = None
     notes: str | None = None
+    source_channels: str | None = None
     avoid_terms: str | None = None
     preferred_terms: str | None = None
     viral_tone: str | None = None
@@ -416,6 +422,8 @@ class DashboardOfferUpdatePayload(BaseModel):
     url_afiliado: str
     cupom: str | None = None
     imagem_url: str | None = None
+    imagem_urls: list[str] | None = None
+    video_urls: list[str] | None = None
     categoria: str | None = None
     tags: str | None = None
     destaque: bool = False
@@ -445,6 +453,34 @@ def _bool_env(name: str, default: bool = False) -> bool:
 
 def _site_base_url() -> str:
     return (os.getenv("SITE_BASE_URL") or "https://zeropreco.com.br").rstrip("/")
+
+
+def _decode_json_url_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        candidates = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return []
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(decoded, list):
+            return []
+        candidates = decoded
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        url = str(candidate or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        normalized.append(url)
+    return normalized
 
 
 def _normalize_growth_target_payload(payload: DashboardGrowthTargetPayload, *, partial: bool = False) -> dict[str, Any]:
@@ -499,6 +535,7 @@ def _youtube_channel_profile_payload(payload: DashboardYoutubeChannelPayload, *,
         "name": normalized_name[:180],
         "handle": (payload.handle or "").strip().lstrip("@")[:180] or None,
         "notes": (payload.notes or "").strip()[:4000] or None,
+        "source_channels": (payload.source_channels or "").strip()[:12000] or None,
         "avoid_terms": (payload.avoid_terms or "").strip()[:4000] or None,
         "preferred_terms": (payload.preferred_terms or "").strip()[:4000] or None,
         "viral_tone": (payload.viral_tone or "").strip()[:1200] or None,
@@ -519,6 +556,7 @@ def _youtube_channel_public_profile(profile: dict[str, Any] | None) -> dict[str,
         "name": profile.get("name") or "",
         "handle": profile.get("handle") or "",
         "notes": profile.get("notes") or "",
+        "source_channels": profile.get("source_channels") or "",
         "avoid_terms": profile.get("avoid_terms") or "",
         "preferred_terms": profile.get("preferred_terms") or "",
         "viral_tone": profile.get("viral_tone") or "",
@@ -2692,6 +2730,7 @@ def execute_youtube_cuts_process(
     limit: int = 5,
     mode: str = "short",
     selection_strategy: str = "openai_heuristica",
+    risk_profile: str = "default",
     channel_profile_id: int | None = None,
     burn_subtitles: bool = True,
 ) -> dict[str, Any]:
@@ -2717,6 +2756,7 @@ def execute_youtube_cuts_process(
         limit=normalized_limit,
         mode=normalized_mode,
         selection_strategy=selection_strategy,
+        risk_profile=risk_profile,
         channel_profile_id=channel_profile_id or (profile or {}).get("id"),
         channel_profile_name=(profile or {}).get("name"),
         channel_preferences=profile or None,
@@ -2729,6 +2769,62 @@ def execute_youtube_cuts_process(
         draft["channel_profile_name"] = (profile or {}).get("name") or ""
         item["publish_draft"] = draft
     return result
+
+
+def execute_youtube_cut_private_test(
+    url: str,
+    *,
+    limit: int = 3,
+    selection_strategy: str = "openai_heuristica",
+    channel_profile_id: int | None = None,
+    burn_subtitles: bool = True,
+) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        profile = _resolve_youtube_channel_profile(db, channel_profile_id) if channel_profile_id is not None else get_default_youtube_channel_profile(db)
+    finally:
+        db.close()
+
+    process_result = execute_youtube_cuts_process(
+        url,
+        limit=max(1, min(int(limit or 3), 4)),
+        mode="short",
+        selection_strategy=selection_strategy,
+        risk_profile="conservative",
+        channel_profile_id=channel_profile_id or (profile or {}).get("id"),
+        burn_subtitles=burn_subtitles,
+    )
+    processed_cuts = list(process_result.get("cuts") or [])
+    requires_person_gate = _youtube_profile_requires_person_gate(profile)
+    if requires_person_gate and processed_cuts and not any(bool(item.get("publish_allowed", True)) for item in processed_cuts if isinstance(item, dict)):
+        processed_cuts = _try_left_framing_for_blocked_youtube_cuts(str(process_result.get("job_id") or ""), processed_cuts)
+        process_result["cuts"] = processed_cuts
+
+    selected_cut = _best_generated_youtube_cut(processed_cuts, require_person_gate=requires_person_gate)
+    publish_result = execute_youtube_cut_publish(
+        job_id=str(process_result.get("job_id") or ""),
+        cut_id=int(selected_cut.get("cut_id") or 0),
+        privacy_status="private",
+        mode="short",
+        channel_profile_id=channel_profile_id or (profile or {}).get("id"),
+    )
+    return {
+        "ok": True,
+        "risk_profile": "conservative",
+        "channel_profile_id": (profile or {}).get("id"),
+        "channel_profile_name": (profile or {}).get("name") or "",
+        "job_id": str(process_result.get("job_id") or ""),
+        "selected_cut": {
+            "cut_id": int(selected_cut.get("cut_id") or 0),
+            "title": str(selected_cut.get("copy_title") or selected_cut.get("title") or ""),
+            "duration_seconds": float(selected_cut.get("duration_seconds") or 0.0),
+            "score": int(selected_cut.get("score") or 0),
+            "publish_allowed": bool(selected_cut.get("publish_allowed", True)),
+            "risk_notes": list(selected_cut.get("risk_notes") or []),
+        },
+        "process_result": process_result,
+        "publish_result": publish_result,
+    }
 
 
 def execute_youtube_cut_publish(
@@ -2748,9 +2844,12 @@ def execute_youtube_cut_publish(
     normalized_privacy = (privacy_status or draft["privacy_status"]).strip().lower()
     normalized_publish_at = (publish_at or "").strip()
     normalized_mode = (mode or draft.get("mode") or "short").strip().lower()
-    if normalized_mode == "short" and not bool(draft.get("publish_allowed", True)):
-        raise ValueError(str(draft.get("publish_block_reason") or "Esse short nao mostrou uma pessoa falando no enquadramento inicial."))
     access_token, profile = _youtube_access_token_ready(channel_profile_id or draft.get("channel_profile_id"))
+    mismatch_error = _youtube_profile_channel_mismatch(profile)
+    if mismatch_error:
+        raise ValueError(mismatch_error)
+    if normalized_mode == "short" and _youtube_profile_requires_person_gate(profile) and not bool(draft.get("publish_allowed", True)):
+        raise ValueError(str(draft.get("publish_block_reason") or "Esse short nao mostrou uma pessoa falando no enquadramento inicial."))
     video_path = youtube_cut_video_path(job_id, cut_id)
     published = upload_youtube_short(
         access_token,
@@ -2855,15 +2954,56 @@ def _youtube_auto_cut_recent_source_ids(db, *, channel_profile_id: int, lookback
     return used_ids
 
 
-def _best_generated_youtube_cut(cuts: list[dict[str, Any]]) -> dict[str, Any]:
+def _compact_youtube_profile_identity(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _youtube_profile_requires_person_gate(profile: dict[str, Any] | None) -> bool:
+    if not isinstance(profile, dict):
+        return False
+    identities = [
+        profile.get("handle"),
+        profile.get("channel_custom_url"),
+        profile.get("name"),
+        profile.get("channel_title"),
+    ]
+    compact_values = {
+        _compact_youtube_profile_identity(item)
+        for item in identities
+        if str(item or "").strip()
+    }
+    if "zerocortespolitica" in compact_values:
+        return False
+    return False
+
+
+def _youtube_profile_channel_mismatch(profile: dict[str, Any] | None) -> str:
+    if not isinstance(profile, dict):
+        return ""
+    expected = _compact_youtube_profile_identity(profile.get("handle"))
+    actual = _compact_youtube_profile_identity(profile.get("channel_custom_url"))
+    if not expected or not actual:
+        return ""
+    if expected == actual:
+        return ""
+    return (
+        "O perfil selecionado esta autenticado no canal errado. "
+        f"Perfil espera @{str(profile.get('handle') or '').lstrip('@')}, "
+        f"mas o OAuth salvo aponta para @{str(profile.get('channel_custom_url') or '').lstrip('@')}. "
+        'Use "Reconectar YouTube" nesse perfil antes de publicar.'
+    )
+
+
+def _best_generated_youtube_cut(cuts: list[dict[str, Any]], *, require_person_gate: bool = True) -> dict[str, Any]:
     available = [item for item in cuts if isinstance(item, dict)]
     if not available:
         raise ValueError("Nenhum corte foi gerado para publicar automaticamente.")
-    publishable = [item for item in available if bool(item.get("publish_allowed", True))]
-    if publishable:
-        available = publishable
-    else:
-        raise ValueError("Nenhum corte gerado mostrou uma pessoa em quadro no inicio. Ajuste o enquadramento antes de publicar.")
+    if require_person_gate:
+        publishable = [item for item in available if bool(item.get("publish_allowed", True))]
+        if publishable:
+            available = publishable
+        else:
+            raise ValueError("Nenhum corte gerado mostrou uma pessoa em quadro no inicio. Ajuste o enquadramento antes de publicar.")
     return max(
         available,
         key=lambda item: (
@@ -2934,6 +3074,7 @@ def execute_youtube_auto_cut_publish(
             else _resolve_youtube_channel_profile(db)
         )
         profile_id = int(profile["id"])
+        requires_person_gate = _youtube_profile_requires_person_gate(profile)
         payload = {
             "channel_profile_id": profile_id,
             "channel_profile_name": profile.get("name") or "",
@@ -2994,10 +3135,10 @@ def execute_youtube_auto_cut_publish(
                     burn_subtitles=requested_burn_subtitles,
                 )
                 processed_cuts = list(process_result.get("cuts") or [])
-                if processed_cuts and not any(bool(item.get("publish_allowed", True)) for item in processed_cuts if isinstance(item, dict)):
+                if requires_person_gate and processed_cuts and not any(bool(item.get("publish_allowed", True)) for item in processed_cuts if isinstance(item, dict)):
                     processed_cuts = _try_left_framing_for_blocked_youtube_cuts(str(process_result.get("job_id") or ""), processed_cuts)
                     process_result["cuts"] = processed_cuts
-                selected_cut = _best_generated_youtube_cut(processed_cuts)
+                selected_cut = _best_generated_youtube_cut(processed_cuts, require_person_gate=requires_person_gate)
                 actual_burn_subtitles = bool(process_result.get("burn_subtitles"))
                 publish_result = execute_youtube_cut_publish(
                     job_id=str(process_result.get("job_id") or ""),
@@ -3161,6 +3302,8 @@ def dashboard_api_offers(q: str = "", limit: int = 10, page: int = 1, _: str = D
               url_afiliado,
               cupom,
               imagem_url,
+              imagem_urls_json,
+              video_urls_json,
               categoria,
               tags,
               destaque,
@@ -3185,6 +3328,8 @@ def dashboard_api_offers(q: str = "", limit: int = 10, page: int = 1, _: str = D
                 "avaliacao_total": int(row["avaliacao_total"]) if row["avaliacao_total"] is not None else None,
                 "destaque": bool(row["destaque"]),
                 "ativo": bool(row["ativo"]),
+                "imagem_urls": _decode_json_url_list(row["imagem_urls_json"]),
+                "video_urls": _decode_json_url_list(row["video_urls_json"]),
                 "offer_url": f"{_site_base_url()}/oferta.php?slug={row['slug']}",
                 "store_url": f"{_site_base_url()}/oferta.php?slug={row['slug']}&go=1",
             }
@@ -3308,6 +3453,8 @@ def dashboard_api_offer_update(offer_id: int, payload: DashboardOfferUpdatePaylo
                   url_afiliado,
                   cupom,
                   imagem_url,
+                  imagem_urls_json,
+                  video_urls_json,
                   categoria,
                   tags,
                   destaque,
@@ -3332,6 +3479,8 @@ def dashboard_api_offer_update(offer_id: int, payload: DashboardOfferUpdatePaylo
             "avaliacao_total": int(row["avaliacao_total"]) if row["avaliacao_total"] is not None else None,
             "destaque": bool(row["destaque"]),
             "ativo": bool(row["ativo"]),
+            "imagem_urls": _decode_json_url_list(row["imagem_urls_json"]),
+            "video_urls": _decode_json_url_list(row["video_urls_json"]),
             "offer_url": f"{_site_base_url()}/oferta.php?slug={row['slug']}",
             "store_url": f"{_site_base_url()}/oferta.php?slug={row['slug']}&go=1",
         }
@@ -3545,11 +3694,14 @@ def dashboard_api_manual_links_run(payload: DashboardManualLinksPayload, _: str 
                     "url": item.url or item.canonical_url or "",
                     "canonical_url": item.canonical_url or item.url or "",
                     "image": item.image or "",
+                    "image_urls": item.image_urls or ([item.image] if item.image else []),
                     "category": item.category or "ofertas",
                     "coupon": item.coupon or None,
                     "tags": item.tags or f"{(item.provider or 'manual').strip().lower()},manual",
                     "featured": int(item.featured or 0),
                     "affiliate_tag": item.affiliate_code or "",
+                    "video_url": item.video_url or "",
+                    "video_urls": item.video_urls or ([item.video_url] if item.video_url else []),
                 }
             )
             processed_items.append(raw | {"store": store})
@@ -3634,6 +3786,7 @@ def dashboard_api_youtube_cuts_process(payload: DashboardYoutubeCutsProcessPaylo
             limit=limit,
             mode=mode,
             selection_strategy=payload.selection_strategy,
+            risk_profile=payload.risk_profile,
             channel_profile_id=payload.channel_profile_id or (profile or {}).get("id"),
             channel_profile_name=(profile or {}).get("name"),
             channel_preferences=profile or None,

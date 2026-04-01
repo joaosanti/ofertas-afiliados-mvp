@@ -24,8 +24,20 @@ function admin_offer_video_upload_dir() {
   return $dir;
 }
 
+function admin_offer_image_upload_dir() {
+  $dir = dirname(__DIR__) . '/uploads/ofertas_imagens';
+  if (!is_dir($dir)) {
+    @mkdir($dir, 0775, true);
+  }
+  return $dir;
+}
+
 function admin_offer_video_public_url($filename) {
   return admin_request_public_base_url() . '/uploads/ofertas_videos/' . rawurlencode((string) $filename);
+}
+
+function admin_offer_image_public_url($filename) {
+  return admin_request_public_base_url() . '/uploads/ofertas_imagens/' . rawurlencode((string) $filename);
 }
 
 function admin_offer_video_save_upload($file) {
@@ -58,6 +70,73 @@ function admin_offer_video_save_upload($file) {
   return admin_offer_video_public_url($filename);
 }
 
+function admin_offer_gallery_text_to_urls($value) {
+  $lines = preg_split('~[\r\n,;]+~', (string) $value);
+  $urls = [];
+  foreach ($lines as $line) {
+    $url = trim((string) $line);
+    if ($url === '' || !preg_match('~^https?://~i', $url)) {
+      continue;
+    }
+    if (in_array($url, $urls, true)) {
+      continue;
+    }
+    $urls[] = $url;
+  }
+  return $urls;
+}
+
+function admin_offer_gallery_urls_to_text($urls) {
+  return implode("\n", admin_shopee_video_decode_url_list($urls));
+}
+
+function admin_offer_image_save_uploads($files) {
+  $saved = [];
+  if (!is_array($files) || !isset($files['tmp_name'])) {
+    return $saved;
+  }
+
+  $tmpNames = is_array($files['tmp_name']) ? $files['tmp_name'] : [$files['tmp_name']];
+  $names = is_array($files['name'] ?? null) ? $files['name'] : [($files['name'] ?? 'imagem.jpg')];
+  $errors = is_array($files['error'] ?? null) ? $files['error'] : [($files['error'] ?? UPLOAD_ERR_NO_FILE)];
+  $sizes = is_array($files['size'] ?? null) ? $files['size'] : [($files['size'] ?? 0)];
+
+  $allowedExtensions = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
+  $maxSize = 12 * 1024 * 1024;
+
+  foreach ($tmpNames as $index => $tmpName) {
+    $tmpName = (string) $tmpName;
+    if ($tmpName === '' || !is_uploaded_file($tmpName)) {
+      continue;
+    }
+
+    $errorCode = (int) ($errors[$index] ?? UPLOAD_ERR_OK);
+    if ($errorCode !== UPLOAD_ERR_OK) {
+      throw new RuntimeException('Falha no upload das imagens.');
+    }
+
+    $originalName = (string) ($names[$index] ?? 'imagem.jpg');
+    $extension = strtolower((string) pathinfo($originalName, PATHINFO_EXTENSION));
+    if (!in_array($extension, $allowedExtensions, true)) {
+      throw new RuntimeException('Use imagens JPG, JPEG, PNG, WEBP ou GIF.');
+    }
+
+    $size = (int) ($sizes[$index] ?? 0);
+    if ($size <= 0 || $size > $maxSize) {
+      throw new RuntimeException('Cada imagem precisa ter ate 12 MB.');
+    }
+
+    $filename = 'oferta-img-' . date('Ymd-His') . '-' . bin2hex(random_bytes(4)) . '-' . $index . '.' . $extension;
+    $targetPath = admin_offer_image_upload_dir() . '/' . $filename;
+    if (!move_uploaded_file($tmpName, $targetPath)) {
+      throw new RuntimeException('Nao consegui salvar uma das imagens enviadas.');
+    }
+    $saved[] = admin_offer_image_public_url($filename);
+  }
+
+  return $saved;
+}
+
 $oferta = [
   'id' => 0,
   'titulo' => '',
@@ -77,6 +156,7 @@ $oferta = [
   'url_afiliado' => '',
   'cupom' => '',
   'imagem_url' => '',
+  'imagem_urls_json' => '',
   'video_url' => '',
   'categoria' => 'geral',
   'tags' => '',
@@ -97,6 +177,8 @@ if ($id > 0) {
   $oferta['expira_em'] = $row['expira_em'] ? str_replace(' ', 'T', substr((string) $row['expira_em'], 0, 16)) : '';
   $oferta['video_url'] = tag_url_decode($row['tags'] ?? '', 'offer_video_url:');
 }
+
+$galleryUrls = admin_shopee_video_offer_gallery_urls($oferta);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   admin_csrf_check_or_die();
@@ -119,6 +201,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $urlAfiliado = trim((string) ($_POST['url_afiliado'] ?? ''));
   $cupom = substr(trim((string) ($_POST['cupom'] ?? '')), 0, 60);
   $imagemUrl = trim((string) ($_POST['imagem_url'] ?? ''));
+  $imagemUrlsTexto = trim((string) ($_POST['imagem_urls_texto'] ?? ''));
+  $galleryUrls = admin_offer_gallery_text_to_urls($imagemUrlsTexto);
   $videoUrl = trim((string) ($_POST['video_url'] ?? ''));
   $categoria = substr(trim((string) ($_POST['categoria'] ?? 'geral')), 0, 80);
   $tagsInput = substr(trim((string) ($_POST['tags'] ?? '')), 0, 255);
@@ -136,6 +220,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
   if ($erro === '') {
     try {
+      $uploadedImageUrls = admin_offer_image_save_uploads($_FILES['imagem_arquivos'] ?? null);
+      foreach ($uploadedImageUrls as $uploadedImageUrl) {
+        if (!in_array($uploadedImageUrl, $galleryUrls, true)) {
+          $galleryUrls[] = $uploadedImageUrl;
+        }
+      }
+      if ($imagemUrl !== '' && !in_array($imagemUrl, $galleryUrls, true)) {
+        array_unshift($galleryUrls, $imagemUrl);
+      }
+      if ($imagemUrl === '' && !empty($galleryUrls)) {
+        $imagemUrl = (string) $galleryUrls[0];
+      }
       $uploadedVideoUrl = admin_offer_video_save_upload($_FILES['video_arquivo'] ?? null);
       if ($uploadedVideoUrl !== '') {
         $videoUrl = $uploadedVideoUrl;
@@ -169,6 +265,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $promocaoTexto = ($promocaoTexto !== '') ? $promocaoTexto : null;
     $cupom = ($cupom !== '') ? $cupom : null;
     $imagemUrl = ($imagemUrl !== '') ? $imagemUrl : null;
+    $imagemUrlsJson = !empty($galleryUrls) ? json_encode(array_values($galleryUrls), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : null;
     $tagsProcessed = tag_url_upsert($tagsInput, 'offer_video_url:', $videoUrl);
     if (strlen($tagsProcessed) > 255) {
       $erro = 'As tags ficaram grandes demais. Remova algumas tags antes de salvar o video.';
@@ -180,19 +277,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($erro === '') {
       if ($idPost > 0) {
         $sql = 'UPDATE ofertas
-                SET slug=?, titulo=?, descricao=?, preco=?, preco_antigo=?, desconto_percentual=?, preco_pix=?, preco_outros_meios=?, parcelas_texto=?, frete_texto=?, avaliacao_nota=?, avaliacao_total=?, promocao_texto=?, loja=?, url_afiliado=?, cupom=?, imagem_url=?, categoria=?, tags=?, destaque=?, ativo=?, expira_em=?
+                SET slug=?, titulo=?, descricao=?, preco=?, preco_antigo=?, desconto_percentual=?, preco_pix=?, preco_outros_meios=?, parcelas_texto=?, frete_texto=?, avaliacao_nota=?, avaliacao_total=?, promocao_texto=?, loja=?, url_afiliado=?, cupom=?, imagem_url=?, imagem_urls_json=?, categoria=?, tags=?, destaque=?, ativo=?, expira_em=?
                 WHERE id=?';
         $pdo->prepare($sql)->execute([
-          $slug, $titulo, $descricao, $preco, $precoAntigo, $descontoPercentual, $precoPix, $precoOutrosMeios, $parcelasTexto, $freteTexto, $avaliacaoNota, $avaliacaoTotal, $promocaoTexto, $loja, $urlAfiliado, $cupom, $imagemUrl, $categoria, $tags, $destaque, $ativo, $expiraEm, $idPost,
+          $slug, $titulo, $descricao, $preco, $precoAntigo, $descontoPercentual, $precoPix, $precoOutrosMeios, $parcelasTexto, $freteTexto, $avaliacaoNota, $avaliacaoTotal, $promocaoTexto, $loja, $urlAfiliado, $cupom, $imagemUrl, $imagemUrlsJson, $categoria, $tags, $destaque, $ativo, $expiraEm, $idPost,
         ]);
       } else {
         $creatorId = $currentAdmin ? (int) ($currentAdmin['id'] ?? 0) : null;
         $creatorLogin = $currentAdmin ? admin_current_login_name() : null;
         $sql = 'INSERT INTO ofertas
-                (slug, titulo, descricao, preco, preco_antigo, desconto_percentual, preco_pix, preco_outros_meios, parcelas_texto, frete_texto, avaliacao_nota, avaliacao_total, promocao_texto, loja, url_afiliado, cupom, imagem_url, categoria, tags, destaque, ativo, criado_por_admin_id, criado_por_login, expira_em)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)';
+                (slug, titulo, descricao, preco, preco_antigo, desconto_percentual, preco_pix, preco_outros_meios, parcelas_texto, frete_texto, avaliacao_nota, avaliacao_total, promocao_texto, loja, url_afiliado, cupom, imagem_url, imagem_urls_json, categoria, tags, destaque, ativo, criado_por_admin_id, criado_por_login, expira_em)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)';
         $pdo->prepare($sql)->execute([
-          $slug, $titulo, $descricao, $preco, $precoAntigo, $descontoPercentual, $precoPix, $precoOutrosMeios, $parcelasTexto, $freteTexto, $avaliacaoNota, $avaliacaoTotal, $promocaoTexto, $loja, $urlAfiliado, $cupom, $imagemUrl, $categoria, $tags, $destaque, $ativo, $creatorId, $creatorLogin, $expiraEm,
+          $slug, $titulo, $descricao, $preco, $precoAntigo, $descontoPercentual, $precoPix, $precoOutrosMeios, $parcelasTexto, $freteTexto, $avaliacaoNota, $avaliacaoTotal, $promocaoTexto, $loja, $urlAfiliado, $cupom, $imagemUrl, $imagemUrlsJson, $categoria, $tags, $destaque, $ativo, $creatorId, $creatorLogin, $expiraEm,
         ]);
         $idPost = (int) $pdo->lastInsertId();
       }
@@ -225,6 +322,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     'url_afiliado' => $urlAfiliado,
     'cupom' => $cupom ?? '',
     'imagem_url' => $imagemUrl ?? '',
+    'imagem_urls_json' => !empty($galleryUrls) ? json_encode(array_values($galleryUrls), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : '',
     'video_url' => $videoUrl,
     'categoria' => $categoria,
     'tags' => $tagsInput ?? '',
@@ -239,6 +337,8 @@ $videoPreviewUrl = trim((string) ($oferta['video_url'] ?? ''));
 if ($videoPreviewUrl === '') {
   $videoPreviewUrl = tag_url_decode($oferta['tags'] ?? '', 'shopee_video_url:');
 }
+$imageGalleryUrls = admin_shopee_video_offer_gallery_urls($oferta);
+$imageGalleryText = admin_offer_gallery_urls_to_text($imageGalleryUrls);
 ?>
 <!doctype html>
 <html lang="pt-br">
@@ -364,6 +464,16 @@ if ($videoPreviewUrl === '') {
             <input id="imagem_url" type="url" name="imagem_url" value="<?= h((string) $oferta['imagem_url']) ?>">
           </div>
           <div class="admin-field is-full">
+            <label for="imagem_urls_texto">Galeria de imagens</label>
+            <textarea id="imagem_urls_texto" name="imagem_urls_texto" rows="4" placeholder="Uma URL por linha ou envie arquivos abaixo."><?= h($imageGalleryText) ?></textarea>
+            <div class="admin-help" style="margin-top:8px;">A primeira imagem da galeria vira a capa principal quando o campo Imagem URL estiver vazio.</div>
+          </div>
+          <div class="admin-field is-full">
+            <label for="imagem_arquivos">Upload de imagens</label>
+            <input id="imagem_arquivos" type="file" name="imagem_arquivos[]" accept="image/jpeg,image/png,image/webp,image/gif,.jpg,.jpeg,.png,.webp,.gif" multiple>
+            <div class="admin-help" style="margin-top:8px;">Envie varias imagens do produto. Elas entram na galeria e ajudam o gerador de video.</div>
+          </div>
+          <div class="admin-field is-full">
             <label for="video_url">Video URL</label>
             <input id="video_url" type="url" name="video_url" value="<?= h((string) ($oferta['video_url'] ?? '')) ?>" placeholder="https://...mp4 ou video publico da Shopee">
           </div>
@@ -440,6 +550,22 @@ if ($videoPreviewUrl === '') {
         </div>
       <?php endif; ?>
 
+      <?php if (!empty($imageGalleryUrls)): ?>
+        <div class="admin-side-card">
+          <strong>Galeria vinculada</strong>
+          <div class="admin-meta-row" style="margin-top:10px;">
+            <span class="admin-meta-chip"><?= count($imageGalleryUrls) ?> imagem(ns)</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:12px;">
+            <?php foreach (array_slice($imageGalleryUrls, 0, 12) as $galleryImageUrl): ?>
+              <a href="<?= h((string) $galleryImageUrl) ?>" target="_blank" rel="noopener">
+                <img src="<?= h((string) $galleryImageUrl) ?>" alt="Imagem da galeria" style="width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:14px;border:1px solid rgba(15,23,42,.1);">
+              </a>
+            <?php endforeach; ?>
+          </div>
+        </div>
+      <?php endif; ?>
+
       <div>
         <span class="admin-kicker">Preview rapido</span>
         <h3 class="admin-card-title" style="margin-top:10px;"><?= h((string) ($oferta['titulo'] ?: 'Titulo da oferta')) ?></h3>
@@ -484,6 +610,13 @@ if ($videoPreviewUrl === '') {
         <div class="admin-side-card">
           <strong>Video vinculado</strong>
           <div class="admin-url-box"><?= h($videoPreviewUrl) ?></div>
+        </div>
+      <?php endif; ?>
+
+      <?php if (!empty($imageGalleryUrls)): ?>
+        <div class="admin-side-card">
+          <strong>URLs da galeria</strong>
+          <div class="admin-url-box"><?= nl2br(h($imageGalleryText)) ?></div>
         </div>
       <?php endif; ?>
 

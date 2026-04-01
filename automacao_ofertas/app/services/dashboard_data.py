@@ -314,6 +314,8 @@ def ensure_offer_columns(db) -> None:
         "avaliacao_nota": "ALTER TABLE ofertas ADD COLUMN avaliacao_nota DECIMAL(4,2) NULL AFTER frete_texto",
         "avaliacao_total": "ALTER TABLE ofertas ADD COLUMN avaliacao_total INT NULL AFTER avaliacao_nota",
         "promocao_texto": "ALTER TABLE ofertas ADD COLUMN promocao_texto VARCHAR(255) NULL AFTER avaliacao_total",
+        "imagem_urls_json": "ALTER TABLE ofertas ADD COLUMN imagem_urls_json MEDIUMTEXT NULL AFTER imagem_url",
+        "video_urls_json": "ALTER TABLE ofertas ADD COLUMN video_urls_json MEDIUMTEXT NULL AFTER imagem_urls_json",
     }
     existing = {str(row["Field"]) for row in db.execute(text("SHOW COLUMNS FROM ofertas")).mappings().all()}
     changed = False

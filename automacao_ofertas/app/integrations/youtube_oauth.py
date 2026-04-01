@@ -242,6 +242,48 @@ SPORTS_VIRAL_TERMS = {
     "rivalidade",
 }
 
+COMEDY_PRIORITY_TERMS = {
+    "humor",
+    "comedia",
+    "meme",
+    "memes",
+    "zoacao",
+    "zoeira",
+    "react",
+    "reacao",
+    "pov",
+    "piada",
+    "engracado",
+    "vergonha alheia",
+    "gafe",
+    "pegadinha",
+}
+
+GAMES_PRIORITY_TERMS = {
+    "game",
+    "games",
+    "gameplay",
+    "jogo",
+    "jogos",
+    "rage",
+    "clutch",
+    "noob",
+    "boss",
+    "bug",
+    "fail",
+    "highlight",
+    "partida",
+    "desafio",
+    "fps",
+    "minecraft",
+    "free fire",
+    "fortnite",
+    "gta",
+    "valorant",
+    "cs",
+    "fc",
+}
+
 DEFAULT_TREND_PROFILE = {
     "name": "economia_geopolitica",
     "query": "podcast guerra politica geopolitica governo",
@@ -294,9 +336,49 @@ SPORT_TREND_PROFILE = {
     "not_found_error": "Nao encontrei videos de futebol com potencial de corte entre os canais inscritos recentemente.",
 }
 
+COMEDY_TREND_PROFILE = {
+    "name": "comedia_reacts_memes",
+    "query": "humor comedia meme react zoeira vergonha alheia",
+    "query_label": "comedia + react/meme",
+    "primary_terms": COMEDY_PRIORITY_TERMS,
+    "subscriptions_only": True,
+    "blocked_terms": {"tragedia", "morte", "acidente grave"},
+    "max_channels": 80,
+    "recent_hours": 120,
+    "uploads_per_channel": 8,
+    "max_top_videos": 40,
+    "per_channel_cap": 3,
+    "minimum_primary_hits": 0,
+    "minimum_cut_score": 56,
+    "minimum_duration_seconds": 60,
+    "not_found_error": "Nao encontrei videos fortes de comedia entre os canais configurados recentemente.",
+}
+
+GAMES_TREND_PROFILE = {
+    "name": "games_reacao_gameplay",
+    "query": "gameplay react rage clutch fail highlight",
+    "query_label": "games + gameplay/reacao",
+    "primary_terms": GAMES_PRIORITY_TERMS,
+    "subscriptions_only": True,
+    "blocked_terms": {"review sem gameplay", "analise tecnica fria"},
+    "max_channels": 100,
+    "recent_hours": 120,
+    "uploads_per_channel": 10,
+    "max_top_videos": 48,
+    "per_channel_cap": 3,
+    "minimum_primary_hits": 0,
+    "minimum_cut_score": 58,
+    "minimum_duration_seconds": 120,
+    "not_found_error": "Nao encontrei videos fortes de games entre os canais configurados recentemente.",
+}
+
 
 def _trend_profile_for_channel(channel_profile_name: str | None = None) -> dict[str, Any]:
     lowered = _normalize_search_text(channel_profile_name or "")
+    if any(keyword in lowered for keyword in ["comedia", "humor", "meme", "zoeira", "piada"]):
+        return COMEDY_TREND_PROFILE
+    if any(keyword in lowered for keyword in ["games", "game", "gameplay", "jogo", "jogos", "gamer"]):
+        return GAMES_TREND_PROFILE
     if any(keyword in lowered for keyword in ["esporte", "futebol", "bola", "rodada", "g4", "libertadores", "brasileirao", "brasileirão"]):
         return SPORT_TREND_PROFILE
     if "zero cortes" in lowered:
@@ -309,6 +391,38 @@ def _split_channel_terms(value: Any) -> list[str]:
     return [str(token or "").strip() for token in tokens if str(token or "").strip()]
 
 
+def _split_channel_sources(value: Any) -> list[str]:
+    entries: list[str] = []
+    for token in re.split(r"[\n,;|]+", str(value or "")):
+        cleaned = re.sub(r"\s+", " ", str(token or "").strip())
+        if cleaned and cleaned not in entries:
+            entries.append(cleaned)
+    return entries
+
+
+def _parse_channel_source_entry(entry: str) -> dict[str, str]:
+    raw = re.sub(r"\s+", " ", str(entry or "").strip())
+    if not raw:
+        return {"lookup": "", "value": "", "label": ""}
+    if raw.startswith("@"):
+        return {"lookup": "handle", "value": raw.lstrip("@"), "label": raw}
+    channel_match = re.search(r"/channel/(UC[\w-]{20,})", raw, flags=re.IGNORECASE)
+    if channel_match:
+        channel_id = str(channel_match.group(1) or "").strip()
+        return {"lookup": "id", "value": channel_id, "label": raw}
+    handle_match = re.search(r"/@([\w\.-]+)", raw, flags=re.IGNORECASE)
+    if handle_match:
+        handle = str(handle_match.group(1) or "").strip()
+        return {"lookup": "handle", "value": handle, "label": raw}
+    legacy_match = re.search(r"/(?:c|user)/([^/?#]+)", raw, flags=re.IGNORECASE)
+    if legacy_match:
+        slug = str(legacy_match.group(1) or "").strip()
+        return {"lookup": "query", "value": slug, "label": raw}
+    if re.fullmatch(r"UC[\w-]{20,}", raw, flags=re.IGNORECASE):
+        return {"lookup": "id", "value": raw, "label": raw}
+    return {"lookup": "query", "value": raw, "label": raw}
+
+
 def _trend_profile_with_preferences(
     trend_profile: dict[str, Any],
     channel_preferences: dict[str, Any] | None = None,
@@ -317,12 +431,14 @@ def _trend_profile_with_preferences(
     preferences = channel_preferences or {}
     preferred_terms = _split_channel_terms(preferences.get("preferred_terms"))
     avoid_terms = _split_channel_terms(preferences.get("avoid_terms"))
+    source_channels = _split_channel_sources(preferences.get("source_channels"))
     viral_tone = re.sub(r"\s+", " ", str(preferences.get("viral_tone") or "")).strip()
     blocked_terms = set(profile.get("blocked_terms") or set())
     blocked_terms.update(term.lower() for term in avoid_terms if term)
     viral_terms = [term.lower() for term in _split_channel_terms(viral_tone) if term]
     profile["preferred_terms"] = preferred_terms
     profile["avoid_terms"] = avoid_terms
+    profile["source_channels"] = source_channels
     profile["viral_tone"] = viral_tone
     profile["viral_terms"] = viral_terms
     profile["blocked_terms"] = blocked_terms
@@ -692,6 +808,96 @@ def _fetch_subscribed_channels(access_token: str, *, max_results: int = 20) -> l
     return channels
 
 
+def _resolve_manual_source_channels(
+    access_token: str,
+    source_entries: list[str],
+    *,
+    max_channels: int = 50,
+) -> list[dict[str, Any]]:
+    resolved: list[dict[str, Any]] = []
+    seen_channel_ids: set[str] = set()
+
+    for entry in source_entries[: max(1, min(int(max_channels or 50), 200))]:
+        reference = _parse_channel_source_entry(entry)
+        lookup = str(reference.get("lookup") or "").strip()
+        value = str(reference.get("value") or "").strip()
+        if not lookup or not value:
+            continue
+
+        channel_rows: list[dict[str, Any]] = []
+        if lookup == "id":
+            payload = _youtube_api_get(
+                access_token,
+                "/channels",
+                params={
+                    "part": "snippet,contentDetails",
+                    "id": value,
+                    "maxResults": "1",
+                },
+            )
+            channel_rows = list(payload.get("items") or [])
+        else:
+            search_payload = _youtube_api_get(
+                access_token,
+                "/search",
+                params={
+                    "part": "snippet",
+                    "type": "channel",
+                    "q": value,
+                    "maxResults": "5",
+                },
+            )
+            candidate_ids = []
+            for item in search_payload.get("items") or []:
+                channel_id = str((((item.get("id") or {}).get("channelId")) or "")).strip()
+                if channel_id and channel_id not in candidate_ids:
+                    candidate_ids.append(channel_id)
+            if candidate_ids:
+                payload = _youtube_api_get(
+                    access_token,
+                    "/channels",
+                    params={
+                        "part": "snippet,contentDetails",
+                        "id": ",".join(candidate_ids[:5]),
+                        "maxResults": str(min(len(candidate_ids), 5)),
+                    },
+                )
+                channel_rows = list(payload.get("items") or [])
+
+        chosen: dict[str, Any] | None = None
+        normalized_query = _normalize_search_text(value)
+        for row in channel_rows:
+            snippet = row.get("snippet") or {}
+            title = _normalize_search_text(str(snippet.get("title") or ""))
+            custom_url = _normalize_search_text(str(snippet.get("customUrl") or "")).lstrip("@")
+            if lookup == "handle" and custom_url and custom_url == normalized_query.lstrip("@"):
+                chosen = row
+                break
+            if title and normalized_query and normalized_query in title:
+                chosen = row
+                break
+        if chosen is None and channel_rows:
+            chosen = channel_rows[0]
+        if not chosen:
+            continue
+
+        snippet = chosen.get("snippet") or {}
+        channel_id = str(chosen.get("id") or "").strip()
+        if not channel_id or channel_id in seen_channel_ids:
+            continue
+        seen_channel_ids.add(channel_id)
+        resolved.append(
+            {
+                "channel_id": channel_id,
+                "title": str(snippet.get("title") or "").strip(),
+                "custom_url": str(snippet.get("customUrl") or "").strip(),
+                "description": str(snippet.get("description") or "").strip(),
+                "source_label": str(reference.get("label") or value).strip(),
+            }
+        )
+    return resolved
+
+
 def _fetch_uploads_playlists(access_token: str, channel_ids: list[str]) -> list[dict[str, Any]]:
     if not channel_ids:
         return []
@@ -770,6 +976,68 @@ def _fetch_recent_uploads_from_subscriptions(
     return collected
 
 
+def _fetch_recent_uploads_from_channel_list(
+    access_token: str,
+    *,
+    source_entries: list[str],
+    recent_hours: int = 48,
+    uploads_per_channel: int = 4,
+    exclude_channel_id: str = "",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    resolved_sources = _resolve_manual_source_channels(
+        access_token,
+        source_entries,
+        max_channels=len(source_entries) or 1,
+    )
+    playlist_sources = _fetch_uploads_playlists(access_token, [str(item.get("channel_id") or "") for item in resolved_sources])
+    label_map = {
+        str(item.get("channel_id") or "").strip(): item
+        for item in resolved_sources
+        if str(item.get("channel_id") or "").strip()
+    }
+    since = datetime.now(timezone.utc) - timedelta(hours=max(1, int(recent_hours or 48)))
+    collected: list[dict[str, Any]] = []
+
+    for source in playlist_sources:
+        channel_id = str(source.get("channel_id") or "").strip()
+        if exclude_channel_id and channel_id == exclude_channel_id:
+            continue
+        payload = _youtube_api_get(
+            access_token,
+            "/playlistItems",
+            params={
+                "part": "snippet,contentDetails",
+                "playlistId": str(source.get("uploads_playlist_id") or ""),
+                "maxResults": str(max(1, min(int(uploads_per_channel or 4), 12))),
+            },
+        )
+        for item in payload.get("items") or []:
+            snippet = item.get("snippet") or {}
+            resource = snippet.get("resourceId") or {}
+            video_id = str(resource.get("videoId") or (item.get("contentDetails") or {}).get("videoId") or "").strip()
+            if not video_id:
+                continue
+            published_raw = str(snippet.get("publishedAt") or "").strip()
+            try:
+                published_at = datetime.fromisoformat(published_raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if published_at < since:
+                continue
+            resolved_source = label_map.get(channel_id, {})
+            collected.append(
+                {
+                    "video_id": video_id,
+                    "channel_id": channel_id,
+                    "channel_title": str(source.get("channel_title") or resolved_source.get("title") or ""),
+                    "published_at": published_raw,
+                    "source_type": "manual_channel_list",
+                    "source_label": str(resolved_source.get("source_label") or ""),
+                }
+            )
+    return collected, resolved_sources
+
+
 def _diversify_ranked_videos(ranked_videos: list[dict[str, Any]], *, limit: int, per_channel_cap: int = 2) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     per_channel_counts: dict[str, int] = {}
@@ -800,7 +1068,8 @@ def _diversify_ranked_videos(ranked_videos: list[dict[str, Any]], *, limit: int,
 
 
 def _radar_source_priority(item: dict[str, Any]) -> int:
-    return 1 if str(item.get("source_type") or "").strip() == "subscription_channel" else 0
+    source_type = str(item.get("source_type") or "").strip()
+    return 1 if source_type in {"subscription_channel", "manual_channel_list"} else 0
 
 
 def _radar_sort_key(item: dict[str, Any]) -> tuple[int, int, int, int]:
@@ -993,14 +1262,29 @@ def build_channel_trend_ideas(
     subscriptions_only = bool(trend_profile.get("subscriptions_only", True))
     own_channel_payload = fetch_recent_channel_uploads(access_token, max_results=1)
     own_channel = own_channel_payload.get("channel") or {}
-    recent_candidates = _fetch_recent_uploads_from_subscriptions(
-        access_token,
-        max_channels=int(trend_profile.get("max_channels") or 24),
-        recent_hours=int(trend_profile.get("recent_hours") or 48),
-        uploads_per_channel=int(trend_profile.get("uploads_per_channel") or 4),
-        exclude_channel_id=str(own_channel.get("id") or ""),
-    )
+    configured_source_channels = list(trend_profile.get("source_channels") or [])
+    resolved_source_channels: list[dict[str, Any]] = []
+    source_mode = "subscriptions_recent_48h"
+    if configured_source_channels:
+        recent_candidates, resolved_source_channels = _fetch_recent_uploads_from_channel_list(
+            access_token,
+            source_entries=configured_source_channels,
+            recent_hours=int(trend_profile.get("recent_hours") or 48),
+            uploads_per_channel=int(trend_profile.get("uploads_per_channel") or 4),
+            exclude_channel_id=str(own_channel.get("id") or ""),
+        )
+        source_mode = "manual_channel_list"
+    else:
+        recent_candidates = _fetch_recent_uploads_from_subscriptions(
+            access_token,
+            max_channels=int(trend_profile.get("max_channels") or 24),
+            recent_hours=int(trend_profile.get("recent_hours") or 48),
+            uploads_per_channel=int(trend_profile.get("uploads_per_channel") or 4),
+            exclude_channel_id=str(own_channel.get("id") or ""),
+        )
     if not recent_candidates:
+        if configured_source_channels:
+            raise ValueError("Nao encontrei videos recentes nos canais configurados para esse perfil.")
         raise ValueError(
             f"Nao encontrei videos recentes dos canais inscritos nas ultimas {int(trend_profile.get('recent_hours') or 48)} horas."
         )
@@ -1083,6 +1367,8 @@ def build_channel_trend_ideas(
         per_channel_cap=int(trend_profile.get("per_channel_cap") or 2),
     )
     if not top_videos:
+        if configured_source_channels:
+            raise ValueError("Nao encontrei videos com potencial de corte na lista de canais configurada para esse perfil.")
         raise ValueError(str(trend_profile.get("not_found_error") or "Nao encontrei videos com potencial de corte entre os canais inscritos recentemente."))
 
     grouped: dict[str, dict[str, Any]] = {}
@@ -1096,7 +1382,7 @@ def build_channel_trend_ideas(
                 "seed_url": f"https://www.youtube.com/channel/{channel_id}" if channel_id.startswith("UC") else "",
                 "seed_published_at": "",
                 "query": str(trend_profile.get("query_label") or ""),
-                "idea_type": "subscription_channels_recent_48h",
+                "idea_type": "manual_channel_list_recent_uploads" if source_mode == "manual_channel_list" else "subscription_channels_recent_48h",
                 "videos": [],
             },
         )
@@ -1106,7 +1392,7 @@ def build_channel_trend_ideas(
     return {
         "ok": True,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "channel": own_channel | {"source_mode": "subscriptions_recent_48h"},
+        "channel": own_channel | {"source_mode": source_mode},
         "trend_profile": {
             "name": str(trend_profile.get("name") or ""),
             "query": str(trend_profile.get("query_label") or ""),
@@ -1114,6 +1400,9 @@ def build_channel_trend_ideas(
             "avoid_terms": list(trend_profile.get("avoid_terms") or []),
             "viral_tone": str(trend_profile.get("viral_tone") or ""),
             "subscriptions_only": subscriptions_only,
+            "source_channels": configured_source_channels,
+            "resolved_source_channels": resolved_source_channels,
+            "source_mode": source_mode,
             "sort_priority": "views_then_cut_score",
         },
         "recent_uploads": top_videos[:24],

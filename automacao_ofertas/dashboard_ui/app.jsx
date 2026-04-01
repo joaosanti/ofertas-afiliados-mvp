@@ -196,6 +196,52 @@ function commerceMetaChips(item) {
   return commerceMetaLines(item).map((line) => (line.length > 56 ? `${line.slice(0, 55)}...` : line));
 }
 
+function importPreviewExtraImages(item) {
+  const primary = String(item?.image || "").trim();
+  const gallery = Array.isArray(item?.image_urls) ? item.image_urls : [];
+  const extras = [];
+  for (const rawUrl of gallery) {
+    const url = String(rawUrl || "").trim();
+    if (!url || url === primary || extras.includes(url)) continue;
+    extras.push(url);
+  }
+  return extras.slice(0, 6);
+}
+
+function renderImportPreviewGallery(item) {
+  const extras = importPreviewExtraImages(item);
+  if (!extras.length) return null;
+  return (
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+      {extras.map((url, index) => (
+        <a key={`${url}-${index}`} href={url} target="_blank" rel="noreferrer" title={`Imagem extra ${index + 1}`}>
+          <img
+            src={url}
+            alt={`Imagem extra ${index + 1}`}
+            style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 12, border: "1px solid rgba(15,23,42,.12)" }}
+          />
+        </a>
+      ))}
+    </div>
+  );
+}
+
+function importGalleryStatusChip(item) {
+  const provider = String(item?.provider || item?.store || "").toLowerCase();
+  const imageCount = Array.isArray(item?.image_urls) ? item.image_urls.length : 0;
+  if (!provider.includes("shopee")) return null;
+  if (imageCount > 1) return `galeria profunda ok (${imageCount})`;
+  if (imageCount === 1) return "1 imagem só";
+  return "sem imagem detectada";
+}
+
+function hasDeepImportGallery(item) {
+  const imageCount = Array.isArray(item?.image_urls)
+    ? item.image_urls.filter((url) => String(url || "").trim()).length
+    : 0;
+  return imageCount > 1;
+}
+
 function whatsappCaptionForItem(item) {
     const lines = [];
 
@@ -416,6 +462,7 @@ function App() {
   const [toast, setToast] = useState(null);
   const [importPreview, setImportPreview] = useState(null);
   const [manualLinkPreview, setManualLinkPreview] = useState(null);
+  const [manualLinkDeepGalleryOnly, setManualLinkDeepGalleryOnly] = useState(false);
   const [manualLinkStatus, setManualLinkStatus] = useState(null);
   const [mlRelinkText, setMlRelinkText] = useState("");
   const [mlRelinkPreview, setMlRelinkPreview] = useState(null);
@@ -448,6 +495,7 @@ function App() {
   const [fileImportProvider, setFileImportProvider] = useState("shopee");
   const [fileImportFile, setFileImportFile] = useState(null);
   const [fileImportPreview, setFileImportPreview] = useState(null);
+  const [fileImportDeepGalleryOnly, setFileImportDeepGalleryOnly] = useState(false);
   const [fileImportLoading, setFileImportLoading] = useState(false);
   const [productQuery, setProductQuery] = useState("");
   const [productResults, setProductResults] = useState([]);
@@ -692,6 +740,28 @@ function App() {
   const hasInvalidSelectedFileMl = useMemo(
     () => (fileImportPreview?.items || []).some((item) => item.selected && item.provider === "mercadolivre" && Number(item.price || 0) <= 0),
     [fileImportPreview]
+  );
+  const manualLinkDeepGalleryCount = useMemo(
+    () => (manualLinkPreview?.items || []).filter((item) => hasDeepImportGallery(item)).length,
+    [manualLinkPreview]
+  );
+  const visibleManualLinkPreviewItems = useMemo(
+    () => (manualLinkPreview?.items || []).flatMap((item, originalIndex) => {
+      if (manualLinkDeepGalleryOnly && !hasDeepImportGallery(item)) return [];
+      return [{ item, originalIndex }];
+    }),
+    [manualLinkDeepGalleryOnly, manualLinkPreview]
+  );
+  const fileImportDeepGalleryCount = useMemo(
+    () => (fileImportPreview?.items || []).filter((item) => hasDeepImportGallery(item)).length,
+    [fileImportPreview]
+  );
+  const visibleFileImportPreviewItems = useMemo(
+    () => (fileImportPreview?.items || []).flatMap((item, originalIndex) => {
+      if (fileImportDeepGalleryOnly && !hasDeepImportGallery(item)) return [];
+      return [{ item, originalIndex }];
+    }),
+    [fileImportDeepGalleryOnly, fileImportPreview]
   );
   const siteBaseUrl = snapshot?.site_base_url || "";
 
@@ -970,6 +1040,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ links }),
       });
+      setManualLinkDeepGalleryOnly(false);
       setManualLinkPreview({
         ...data,
         items: (data.items || []).map((item) => ({ ...item, selected: defaultPreviewSelection(item) })),
@@ -1045,6 +1116,7 @@ function App() {
         method: "POST",
         body,
       });
+      setFileImportDeepGalleryOnly(false);
       setFileImportPreview({
         ...data,
         items: (data.items || []).map((item) => ({ ...item, selected: defaultPreviewSelection(item) })),
@@ -2907,9 +2979,27 @@ function App() {
                 {!fileImportPreview?.items?.length ? (
                   <div className="empty-state">Nenhum arquivo analisado ainda.</div>
                 ) : (
+                  <>
+                    <div className="provider-actions" style={{ marginTop: 0, marginBottom: 12 }}>
+                      <button
+                        className={`button ${fileImportDeepGalleryOnly ? "is-primary" : "is-ghost"}`}
+                        onClick={() => setFileImportDeepGalleryOnly((current) => !current)}
+                        disabled={!fileImportDeepGalleryCount}
+                      >
+                        {fileImportDeepGalleryOnly ? "Mostrando so galeria profunda" : `Mostrar so galeria profunda (${fileImportDeepGalleryCount})`}
+                      </button>
+                      {fileImportDeepGalleryOnly ? (
+                        <button className="button is-secondary" onClick={() => setFileImportDeepGalleryOnly(false)}>
+                          Mostrar todos
+                        </button>
+                      ) : null}
+                    </div>
+                    {!visibleFileImportPreviewItems.length ? (
+                      <div className="empty-state">Nenhum item deste arquivo trouxe galeria profunda.</div>
+                    ) : (
                   <div className="preview-grid">
-                    {fileImportPreview.items.map((item, index) => (
-                      <div className="surface" key={`${item.item_id || item.url || item.title}-${index}`}>
+                    {visibleFileImportPreviewItems.map(({ item, originalIndex }, index) => (
+                      <div className="surface" key={`${item.item_id || item.url || item.title}-${originalIndex}-${index}`}>
                         <div className="panel-head" style={{ marginBottom: 12 }}>
                           <div>
                             <h4>{item.store || item.provider || "Marketplace"}</h4>
@@ -2921,7 +3011,7 @@ function App() {
                               checked={Boolean(item.selected)}
                               onChange={(e) => setFileImportPreview((current) => {
                                 if (!current?.items?.length) return current;
-                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, selected: e.target.checked } : entry);
+                                const items = current.items.map((entry, itemIndex) => itemIndex === originalIndex ? { ...entry, selected: e.target.checked } : entry);
                                 return { ...current, items };
                               })}
                             />
@@ -2936,7 +3026,7 @@ function App() {
                               value={item.title || ""}
                               onChange={(e) => setFileImportPreview((current) => {
                                 if (!current?.items?.length) return current;
-                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, title: e.target.value } : entry);
+                                const items = current.items.map((entry, itemIndex) => itemIndex === originalIndex ? { ...entry, title: e.target.value } : entry);
                                 return { ...current, items };
                               })}
                             />
@@ -2952,7 +3042,7 @@ function App() {
                               value={item.price ?? 0}
                               onChange={(e) => setFileImportPreview((current) => {
                                 if (!current?.items?.length) return current;
-                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? applyPreviewFieldUpdate(entry, "price", e.target.value) : entry);
+                                const items = current.items.map((entry, itemIndex) => itemIndex === originalIndex ? applyPreviewFieldUpdate(entry, "price", e.target.value) : entry);
                                 return { ...current, items };
                               })}
                             />
@@ -2964,7 +3054,7 @@ function App() {
                               value={item.category || ""}
                               onChange={(e) => setFileImportPreview((current) => {
                                 if (!current?.items?.length) return current;
-                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, category: e.target.value } : entry);
+                                const items = current.items.map((entry, itemIndex) => itemIndex === originalIndex ? { ...entry, category: e.target.value } : entry);
                                 return { ...current, items };
                               })}
                             />
@@ -2976,7 +3066,7 @@ function App() {
                               value={item.coupon || ""}
                               onChange={(e) => setFileImportPreview((current) => {
                                 if (!current?.items?.length) return current;
-                                const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, coupon: e.target.value } : entry);
+                                const items = current.items.map((entry, itemIndex) => itemIndex === originalIndex ? { ...entry, coupon: e.target.value } : entry);
                                 return { ...current, items };
                               })}
                             />
@@ -2989,7 +3079,7 @@ function App() {
                             value={item.description || ""}
                             onChange={(e) => setFileImportPreview((current) => {
                               if (!current?.items?.length) return current;
-                              const items = current.items.map((entry, itemIndex) => itemIndex === index ? { ...entry, description: e.target.value } : entry);
+                              const items = current.items.map((entry, itemIndex) => itemIndex === originalIndex ? { ...entry, description: e.target.value } : entry);
                               return { ...current, items };
                             })}
                           />
@@ -2998,7 +3088,10 @@ function App() {
                           {item.image ? <a className="tiny-button is-soft" href={item.image} target="_blank" rel="noreferrer">Abrir imagem</a> : null}
                           {item.video_url ? <a className="tiny-button is-soft" href={item.video_url} target="_blank" rel="noreferrer">Abrir video</a> : null}
                           {item.url ? <span className="meta-chip">link ok</span> : null}
+                          {(item.image_urls || []).length ? <span className="meta-chip">{(item.image_urls || []).length} imagem(ns)</span> : null}
+                          {importGalleryStatusChip(item) ? <span className="meta-chip">{importGalleryStatusChip(item)}</span> : null}
                           {item.video_url ? <span className="meta-chip">video existente</span> : null}
+                          {(item.video_urls || []).length > 1 ? <span className="meta-chip">{(item.video_urls || []).length} videos detectados</span> : null}
                           {item.provider === "mercadolivre" ? (
                             <span className="meta-chip">{item.affiliate_detected ? "link afiliado oficial" : "link ML sem afiliado oficial"}</span>
                           ) : null}
@@ -3009,9 +3102,12 @@ function App() {
                           {item.affiliate_warning ? <span className="meta-chip">{item.affiliate_warning}</span> : null}
                           {item.file_warning ? <span className="meta-chip">{item.file_warning}</span> : null}
                         </div>
+                        {renderImportPreviewGallery(item)}
                       </div>
                     ))}
                   </div>
+                    )}
+                  </>
                 )}
               </div>
 
@@ -3090,9 +3186,27 @@ function App() {
                 {!manualLinkPreview?.items?.length ? (
                   <div className="empty-state">Nenhum link manual analisado ainda.</div>
                 ) : (
+                  <>
+                    <div className="provider-actions" style={{ marginTop: 0, marginBottom: 12 }}>
+                      <button
+                        className={`button ${manualLinkDeepGalleryOnly ? "is-primary" : "is-ghost"}`}
+                        onClick={() => setManualLinkDeepGalleryOnly((current) => !current)}
+                        disabled={!manualLinkDeepGalleryCount}
+                      >
+                        {manualLinkDeepGalleryOnly ? "Mostrando so galeria profunda" : `Mostrar so galeria profunda (${manualLinkDeepGalleryCount})`}
+                      </button>
+                      {manualLinkDeepGalleryOnly ? (
+                        <button className="button is-secondary" onClick={() => setManualLinkDeepGalleryOnly(false)}>
+                          Mostrar todos
+                        </button>
+                      ) : null}
+                    </div>
+                    {!visibleManualLinkPreviewItems.length ? (
+                      <div className="empty-state">Nenhum link deste lote trouxe galeria profunda.</div>
+                    ) : (
                   <div className="preview-grid">
-                    {manualLinkPreview.items.map((item, index) => (
-                      <div className="surface" key={`${item.url || item.title}-${index}`}>
+                    {visibleManualLinkPreviewItems.map(({ item, originalIndex }, index) => (
+                      <div className="surface" key={`${item.url || item.title}-${originalIndex}-${index}`}>
                         <div className="panel-head" style={{ marginBottom: 12 }}>
                           <div>
                             <h4>{item.store || item.provider || "Marketplace"}</h4>
@@ -3102,7 +3216,7 @@ function App() {
                             <input
                               type="checkbox"
                               checked={Boolean(item.selected)}
-                              onChange={(e) => updateManualPreviewItem(index, "selected", e.target.checked)}
+                              onChange={(e) => updateManualPreviewItem(originalIndex, "selected", e.target.checked)}
                             />
                             Importar
                           </label>
@@ -3110,36 +3224,39 @@ function App() {
                         <div className="field-grid">
                           <div className="field" style={{ gridColumn: "1 / -1" }}>
                             <label>Titulo</label>
-                            <input type="text" value={item.title || ""} onChange={(e) => updateManualPreviewItem(index, "title", e.target.value)} />
+                            <input type="text" value={item.title || ""} onChange={(e) => updateManualPreviewItem(originalIndex, "title", e.target.value)} />
                           </div>
                         </div>
                         <div className="field-grid" style={{ marginTop: 12 }}>
                           <div className="field">
                             <label>Preco</label>
-                            <input type="number" min="0" step="0.01" value={item.price ?? 0} onChange={(e) => updateManualPreviewItem(index, "price", e.target.value)} />
+                            <input type="number" min="0" step="0.01" value={item.price ?? 0} onChange={(e) => updateManualPreviewItem(originalIndex, "price", e.target.value)} />
                           </div>
                           <div className="field">
                             <label>Preco antigo</label>
-                            <input type="number" min="0" step="0.01" value={item.old_price ?? ""} onChange={(e) => updateManualPreviewItem(index, "old_price", e.target.value)} />
+                            <input type="number" min="0" step="0.01" value={item.old_price ?? ""} onChange={(e) => updateManualPreviewItem(originalIndex, "old_price", e.target.value)} />
                           </div>
                           <div className="field">
                             <label>Categoria</label>
-                            <input type="text" value={item.category || ""} onChange={(e) => updateManualPreviewItem(index, "category", e.target.value)} />
+                            <input type="text" value={item.category || ""} onChange={(e) => updateManualPreviewItem(originalIndex, "category", e.target.value)} />
                           </div>
                           <div className="field">
                             <label>Cupom</label>
-                            <input type="text" value={item.coupon || ""} onChange={(e) => updateManualPreviewItem(index, "coupon", e.target.value)} />
+                            <input type="text" value={item.coupon || ""} onChange={(e) => updateManualPreviewItem(originalIndex, "coupon", e.target.value)} />
                           </div>
                         </div>
                         <div className="field" style={{ marginTop: 12 }}>
                           <label>Descricao</label>
-                          <textarea rows="3" value={item.description || ""} onChange={(e) => updateManualPreviewItem(index, "description", e.target.value)} />
+                          <textarea rows="3" value={item.description || ""} onChange={(e) => updateManualPreviewItem(originalIndex, "description", e.target.value)} />
                         </div>
                         <div className="offer-meta" style={{ marginTop: 12 }}>
                           {item.image ? <a className="tiny-button is-soft" href={item.image} target="_blank" rel="noreferrer">Abrir imagem</a> : null}
                           {item.video_url ? <a className="tiny-button is-soft" href={item.video_url} target="_blank" rel="noreferrer">Abrir video</a> : null}
                           {item.canonical_url ? <a className="tiny-button is-soft" href={item.canonical_url} target="_blank" rel="noreferrer">Abrir produto</a> : null}
+                          {(item.image_urls || []).length ? <span className="meta-chip">{(item.image_urls || []).length} imagem(ns)</span> : null}
+                          {importGalleryStatusChip(item) ? <span className="meta-chip">{importGalleryStatusChip(item)}</span> : null}
                           {item.video_url ? <span className="meta-chip">video existente</span> : null}
+                          {(item.video_urls || []).length > 1 ? <span className="meta-chip">{(item.video_urls || []).length} videos detectados</span> : null}
                           {item.provider === "mercadolivre" ? (
                             <span className="meta-chip">{item.affiliate_detected ? "link afiliado oficial" : "link ML sem afiliado oficial"}</span>
                           ) : null}
@@ -3148,9 +3265,12 @@ function App() {
                           ) : null}
                           {item.affiliate_warning ? <span className="meta-chip">{item.affiliate_warning}</span> : null}
                         </div>
+                        {renderImportPreviewGallery(item)}
                       </div>
                     ))}
                   </div>
+                    )}
+                  </>
                 )}
               </div>
 

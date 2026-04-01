@@ -18,6 +18,8 @@ class NormalizedOffer(BaseModel):
     url_afiliado: str
     cupom: str | None = None
     imagem_url: str | None = None
+    imagem_urls: list[str] | None = None
+    video_urls: list[str] | None = None
     categoria: str = "ofertas"
     tags: str | None = None
     destaque: int = 0

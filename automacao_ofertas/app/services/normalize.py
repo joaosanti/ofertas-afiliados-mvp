@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from base64 import urlsafe_b64encode
@@ -244,14 +245,61 @@ def _tag_url(tags: str | None, prefix: str, url: str | None) -> str | None:
     return ",".join(dict.fromkeys(base_tags)) or None
 
 
+def _normalize_url_list(value: object) -> list[str]:
+    candidates: list[str] = []
+    if isinstance(value, str):
+        raw = repair_text(value)
+        if not raw:
+            return []
+        if raw.startswith("[") and raw.endswith("]"):
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError:
+                decoded = None
+            if isinstance(decoded, list):
+                value = decoded
+            else:
+                value = [raw]
+        else:
+            value = [raw]
+
+    if isinstance(value, (list, tuple, set)):
+        candidates.extend(repair_text(str(item)) for item in value)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate.startswith(("http://", "https://")):
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    return normalized
+
+
 def normalize_offer(raw: dict, store: str, affiliate_tag: str | None = None) -> NormalizedOffer:
     clean_store = repair_text(store)
     clean_url = repair_text(raw.get("url", "#"))
     social_url = repair_text(raw.get("social_url"))
     raw_tags = repair_text(raw.get("tags"))
+    raw_image_url = repair_text(raw.get("image"))
     raw_video_url = repair_text(raw.get("video_url"))
+    image_urls = _normalize_url_list(raw.get("image_urls"))
+    video_urls = _normalize_url_list(raw.get("video_urls"))
     requires_manual_review = bool(raw.get("price_missing_review"))
     primary_url = clean_url
+
+    if raw_image_url and raw_image_url not in image_urls:
+        image_urls.insert(0, raw_image_url)
+    elif not raw_image_url and image_urls:
+        raw_image_url = image_urls[0]
+
+    if raw_video_url and raw_video_url not in video_urls:
+        video_urls.insert(0, raw_video_url)
+    elif not raw_video_url and video_urls:
+        raw_video_url = video_urls[0]
+
     if clean_store.strip().lower() == "mercado livre":
         if social_url and not _is_meli_profile_or_list_social_url(social_url):
             raw_tags = ",".join(part for part in [raw_tags, social_url] if part)
@@ -290,7 +338,9 @@ def normalize_offer(raw: dict, store: str, affiliate_tag: str | None = None) -> 
             raw.get("product_id"),
         ),
         cupom=repair_text(raw.get("coupon")) or None,
-        imagem_url=repair_text(raw.get("image")) or None,
+        imagem_url=raw_image_url or None,
+        imagem_urls=image_urls or None,
+        video_urls=video_urls or None,
         categoria=repair_text(raw.get("category", "ofertas")),
         tags=ensure_tags(raw_tags, clean_store, affiliate_tag),
         destaque=int(raw.get("featured", 0)),

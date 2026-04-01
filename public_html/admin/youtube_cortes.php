@@ -18,9 +18,32 @@ $youtubeForm = $_SESSION['admin_youtube_cuts_form'] ?? [
   'url' => '',
   'mode' => 'short',
   'selection_strategy' => 'openai_heuristica',
+  'risk_profile' => 'default',
   'channel_profile_id' => $selectedChannelProfileId,
   'burn_subtitles' => true,
 ];
+
+function admin_youtube_reset_profile_view_state($channelProfileId = 0) {
+  $normalizedProfileId = max(0, (int) $channelProfileId);
+  $freshForm = [
+    'url' => '',
+    'mode' => 'short',
+    'selection_strategy' => 'openai_heuristica',
+    'risk_profile' => 'default',
+    'channel_profile_id' => $normalizedProfileId,
+    'burn_subtitles' => true,
+  ];
+
+  $_SESSION['admin_youtube_cuts_analysis'] = null;
+  $_SESSION['admin_youtube_cuts_process'] = null;
+  $_SESSION['admin_youtube_cuts_last_publish'] = null;
+  $_SESSION['admin_youtube_trend_ideas'] = null;
+  $_SESSION['admin_youtube_cuts_pending_job'] = null;
+  $_SESSION['admin_youtube_cuts_form'] = $freshForm;
+  $_SESSION['admin_youtube_cuts_channel_profile_id'] = $normalizedProfileId;
+
+  return $freshForm;
+}
 
 function admin_youtube_cuts_tab_url($tab, $params = []) {
   $normalizedTab = in_array($tab, ['gerar', 'historico'], true) ? $tab : 'gerar';
@@ -471,6 +494,10 @@ function admin_compact_youtube_process_result($result) {
       'score' => (int) ($item['score'] ?? 0),
       'duration_label' => (string) ($item['duration_label'] ?? ''),
       'video_filename' => (string) ($item['video_filename'] ?? ''),
+      'risk_profile' => (string) ($item['risk_profile'] ?? $result['risk_profile'] ?? 'default'),
+      'risk_notes' => array_values(array_filter((array) ($item['risk_notes'] ?? []), static function ($value) {
+        return is_string($value) && $value !== '';
+      })),
       'first_frame_text' => (string) ($item['first_frame_text'] ?? ''),
       'title_variants' => array_values(array_filter((array) ($item['title_variants'] ?? []), static function ($value) {
         return is_string($value) && $value !== '';
@@ -495,9 +522,29 @@ function admin_compact_youtube_process_result($result) {
   return [
     'job_id' => (string) ($result['job_id'] ?? ''),
     'mode' => (string) ($result['mode'] ?? 'short'),
+    'risk_profile' => (string) ($result['risk_profile'] ?? 'default'),
+    'target_channel_profile_id' => (int) ($result['target_channel_profile_id'] ?? 0),
     'target_channel_profile_name' => (string) ($result['target_channel_profile_name'] ?? ''),
     'cuts' => $cuts,
   ];
+}
+
+function admin_youtube_cuts_read_manifest($jobId) {
+  $manifestPath = admin_youtube_cuts_asset_path($jobId, 'manifest.json');
+  if (!$manifestPath || !is_file($manifestPath)) {
+    $runtimeDir = admin_youtube_cuts_runtime_dir();
+    $safeJobId = preg_replace('/[^A-Za-z0-9_-]+/', '', (string) $jobId);
+    if (!$runtimeDir || $safeJobId === '') {
+      return null;
+    }
+    $candidate = $runtimeDir . DIRECTORY_SEPARATOR . $safeJobId . DIRECTORY_SEPARATOR . 'manifest.json';
+    if (!is_file($candidate)) {
+      return null;
+    }
+    $manifestPath = $candidate;
+  }
+  $decoded = json_decode((string) @file_get_contents($manifestPath), true);
+  return is_array($decoded) ? $decoded : null;
 }
 
 function admin_youtube_publish_schedule_defaults() {
@@ -508,9 +555,25 @@ function admin_youtube_publish_schedule_defaults() {
   ];
 }
 
-function admin_youtube_cut_person_status($cut, $mode = 'short') {
+function admin_youtube_profile_requires_person_gate($profileName = '', $profileHandle = '') {
+  $values = [
+    strtolower(preg_replace('~[^a-z0-9]+~', '', (string) $profileName)),
+    strtolower(preg_replace('~[^a-z0-9]+~', '', ltrim((string) $profileHandle, '@'))),
+  ];
+  foreach ($values as $value) {
+    if ($value === 'zerocortespolitica' || strpos($value, 'zerocortespolitica') === 0) {
+      return false;
+    }
+  }
+  return false;
+}
+
+function admin_youtube_cut_person_status($cut, $mode = 'short', $profileName = '', $profileHandle = '') {
   $normalizedMode = trim((string) $mode);
   if ($normalizedMode !== 'short') {
+    return null;
+  }
+  if (!admin_youtube_profile_requires_person_gate($profileName, $profileHandle)) {
     return null;
   }
 
@@ -549,6 +612,15 @@ if (!$selectedChannelProfileId && $youtubeProfiles) {
 }
 if (isset($_GET['channel_profile_id'])) {
   $requestedChannelProfileId = max(0, (int) ($_GET['channel_profile_id'] ?? 0));
+  $previousChannelProfileId = (int) ($_SESSION['admin_youtube_cuts_channel_profile_id'] ?? 0);
+  if ($requestedChannelProfileId !== $previousChannelProfileId) {
+    $youtubeForm = admin_youtube_reset_profile_view_state($requestedChannelProfileId);
+    $youtubeCutAnalysis = null;
+    $youtubeCutsProcess = null;
+    $youtubeLastPublish = null;
+    $youtubeTrendIdeas = null;
+    $pendingYoutubeJob = null;
+  }
   $selectedChannelProfileId = $requestedChannelProfileId;
   $youtubeForm['channel_profile_id'] = $requestedChannelProfileId;
   $_SESSION['admin_youtube_cuts_channel_profile_id'] = $requestedChannelProfileId;
@@ -582,16 +654,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   admin_csrf_check_or_die();
   $action = (string) ($_POST['acao'] ?? '');
 
-  if (in_array($action, ['analyze_video', 'generate_cuts'], true)) {
+  if (in_array($action, ['analyze_video', 'generate_cuts', 'run_private_test'], true)) {
     $youtubeUrl = trim((string) ($_POST['youtube_url'] ?? ''));
     $youtubeMode = trim((string) ($_POST['youtube_mode'] ?? 'short'));
     $youtubeStrategy = trim((string) ($_POST['selection_strategy'] ?? 'openai_heuristica'));
+    $youtubeRiskProfile = trim((string) ($_POST['risk_profile'] ?? 'default'));
+    if (!in_array($youtubeRiskProfile, ['default', 'conservative'], true)) {
+      $youtubeRiskProfile = 'default';
+    }
     $channelProfileId = max(0, (int) ($_POST['channel_profile_id'] ?? 0));
     $burnSubtitles = isset($_POST['burn_subtitles']);
     $_SESSION['admin_youtube_cuts_form'] = [
       'url' => $youtubeUrl,
       'mode' => $youtubeMode,
       'selection_strategy' => $youtubeStrategy,
+      'risk_profile' => $youtubeRiskProfile,
       'channel_profile_id' => $channelProfileId,
       'burn_subtitles' => $burnSubtitles,
     ];
@@ -622,6 +699,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       exit;
     }
 
+    if ($action === 'run_private_test') {
+      $args = [
+        'youtube-cut-private-test',
+        '--url', $youtubeUrl,
+        '--limit', '3',
+        '--selection-strategy', $youtubeStrategy,
+      ];
+      if ($channelProfileId > 0) {
+        $args[] = '--channel-profile-id';
+        $args[] = (string) $channelProfileId;
+      }
+      if (!$burnSubtitles) {
+        $args[] = '--no-burn-subtitles';
+      }
+      $jobStart = admin_start_python_job_async(
+        $args,
+        ['kind' => 'private_test', 'target_tab' => 'historico']
+      );
+      if (!empty($jobStart['ok'])) {
+        $_SESSION['admin_youtube_cuts_pending_job'] = [
+          'job_id' => (string) ($jobStart['job_id'] ?? ''),
+          'kind' => 'private_test',
+          'target_tab' => 'historico',
+        ];
+        admin_flash_set('success', 'Teste privado iniciado com preset de risco menor. Aguarde a geracao e o envio privado.');
+      } else {
+        admin_flash_set('error', (string) ($jobStart['error'] ?? 'Falha ao iniciar o teste privado do YouTube.'));
+      }
+      header('Location: ' . $generateTabUrl);
+      exit;
+    }
+
     $args = [
       'youtube-cuts-process',
       '--url', $youtubeUrl,
@@ -629,6 +738,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       '--mode', $youtubeMode,
       '--selection-strategy', $youtubeStrategy,
     ];
+    if ($youtubeMode === 'short') {
+      $args[] = '--risk-profile';
+      $args[] = $youtubeRiskProfile;
+    }
     if ($channelProfileId > 0) {
       $args[] = '--channel-profile-id';
       $args[] = (string) $channelProfileId;
@@ -780,6 +893,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $cutId = max(1, (int) ($_POST['cut_id'] ?? 0));
     $mode = trim((string) ($_POST['mode'] ?? 'short'));
     $channelProfileId = max(0, (int) ($_POST['channel_profile_id'] ?? 0));
+    if ($channelProfileId <= 0 && $jobId !== '') {
+      $manifest = admin_youtube_cuts_read_manifest($jobId);
+      $channelProfileId = max(0, (int) (($manifest['target_channel_profile_id'] ?? 0)));
+    }
     $privacyStatus = trim((string) ($_POST['privacy_status'] ?? 'private'));
     if (!in_array($privacyStatus, ['public', 'private', 'scheduled'], true)) {
       $privacyStatus = 'public';
@@ -961,6 +1078,7 @@ function admin_cuts_format_bytes($bytes) {
         <h1>Biblioteca de cortes gerados</h1>
       </div>
       <div class="admin-hero-actions">
+        <a class="btn-link" href="/admin/youtube_canais.php">Perfis de canal</a>
         <a class="btn-link primary" href="/admin/social.php">Voltar ao social</a>
         <form method="post">
           <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
@@ -974,6 +1092,7 @@ function admin_cuts_format_bytes($bytes) {
   <nav class="admin-subnav" aria-label="Submenu YouTube cortes">
     <a class="admin-subnav-link <?= $youtubeTab === 'gerar' ? 'is-active' : '' ?>" href="<?= h($generateTabUrl) ?>">Gerar cortes</a>
     <a class="admin-subnav-link <?= $youtubeTab === 'historico' ? 'is-active' : '' ?>" href="<?= h($historyTabUrl) ?>">Jobs e historico</a>
+    <a class="admin-subnav-link" href="/admin/youtube_canais.php">Cadastro de canais</a>
   </nav>
 
   <?php if ($youtubeTab === 'gerar'): ?>
@@ -983,11 +1102,11 @@ function admin_cuts_format_bytes($bytes) {
         <h2 class="admin-section-title">Radar de videos para cortar</h2>
       </div>
       <div class="admin-card-actions admin-radar-actions">
-        <form method="post" class="admin-inline-form admin-inline-form-radar">
+        <form method="post" class="admin-inline-form admin-inline-form-radar" data-current-tab="<?= h((string) $youtubeTab) ?>">
           <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
           <label class="admin-inline-form-field" for="radar_channel_profile_id">
             <span>Canal do radar</span>
-            <select id="radar_channel_profile_id" name="channel_profile_id">
+            <select id="radar_channel_profile_id" name="channel_profile_id" data-profile-switch-url="/admin/youtube_cortes.php">
               <option value="0">Padrao configurado</option>
               <?php foreach ($youtubeProfiles as $profile): ?>
                 <?php $profileId = (int) ($profile['id'] ?? 0); ?>
@@ -1124,6 +1243,13 @@ function admin_cuts_format_bytes($bytes) {
           </select>
         </div>
         <div class="admin-field">
+          <label for="risk_profile">Perfil de risco</label>
+          <select id="risk_profile" name="risk_profile">
+            <option value="default" <?= ($youtubeForm['risk_profile'] ?? 'default') === 'default' ? 'selected' : '' ?>>Padrao</option>
+            <option value="conservative" <?= ($youtubeForm['risk_profile'] ?? '') === 'conservative' ? 'selected' : '' ?>>Risco menor</option>
+          </select>
+        </div>
+        <div class="admin-field">
           <label for="channel_profile_id">Canal do YouTube</label>
           <select id="channel_profile_id" name="channel_profile_id">
             <option value="0">Padrao configurado</option>
@@ -1152,6 +1278,7 @@ function admin_cuts_format_bytes($bytes) {
       <div class="admin-form-actions">
         <button class="btn-link primary" type="submit" name="acao" value="analyze_video">Analisar video</button>
         <button class="btn" type="submit" name="acao" value="generate_cuts">Gerar cortes</button>
+        <button class="btn" type="submit" name="acao" value="run_private_test">Teste privado risco menor</button>
       </div>
     </form>
   </section>
@@ -1220,12 +1347,14 @@ function admin_cuts_format_bytes($bytes) {
               : '';
             $mode = (string) ($item['mode'] ?? $youtubeCutsProcess['mode'] ?? 'short');
             $draft = is_array($item['publish_draft'] ?? null) ? $item['publish_draft'] : [];
-            $channelProfileId = (int) (($draft['channel_profile_id'] ?? 0));
+            $channelProfileId = (int) (($draft['channel_profile_id'] ?? 0) ?: ($youtubeCutsProcess['target_channel_profile_id'] ?? 0));
             $titleVariants = array_slice((array) ($item['title_variants'] ?? []), 0, 3);
             $packagingNotes = array_slice((array) ($item['packaging_notes'] ?? []), 0, 3);
+            $riskNotes = array_slice((array) ($item['risk_notes'] ?? []), 0, 2);
             $cropOverride = (string) ($item['crop_override'] ?? 'auto');
-            $personStatus = admin_youtube_cut_person_status($item, $mode);
-            $publishBlocked = $mode === 'short' && !empty($personStatus) && (string) ($personStatus['label'] ?? '') === 'Nao publicar';
+            $profileNameForPersonGate = (string) (($draft['channel_profile_name'] ?? '') !== '' ? $draft['channel_profile_name'] : ($youtubeCutsProcess['target_channel_profile_name'] ?? ''));
+            $personStatus = admin_youtube_cut_person_status($item, $mode, $profileNameForPersonGate, '');
+            $publishBlocked = $mode === 'short' && admin_youtube_profile_requires_person_gate($profileNameForPersonGate, '') && !empty($personStatus) && (string) ($personStatus['label'] ?? '') === 'Nao publicar';
           ?>
           <article class="admin-side-card">
             <?php if ($videoUrl !== ''): ?>
@@ -1256,6 +1385,9 @@ function admin_cuts_format_bytes($bytes) {
               <?php if (!empty($draft['channel_profile_name'])): ?>
                 <span class="admin-meta-chip admin-meta-chip-soft"><?= h((string) $draft['channel_profile_name']) ?></span>
               <?php endif; ?>
+              <?php if (($item['risk_profile'] ?? ($youtubeCutsProcess['risk_profile'] ?? 'default')) === 'conservative'): ?>
+                <span class="admin-meta-chip admin-meta-chip-soft">risco menor</span>
+              <?php endif; ?>
             </div>
             <?php if (!empty($item['hook'])): ?>
               <div class="admin-card-subtitle"><?= h((string) $item['hook']) ?></div>
@@ -1274,6 +1406,11 @@ function admin_cuts_format_bytes($bytes) {
             <?php if ($packagingNotes): ?>
               <div class="admin-help" style="margin-top:8px;">
                 <?= h(implode(' • ', array_map(static fn($value) => (string) $value, $packagingNotes))) ?>
+              </div>
+            <?php endif; ?>
+            <?php if ($riskNotes): ?>
+              <div class="admin-help" style="margin-top:8px;">
+                Revisao de risco: <?= h(implode(' • ', array_map(static fn($value) => (string) $value, $riskNotes))) ?>
               </div>
             <?php endif; ?>
             <?php if ($mode === 'short'): ?>
@@ -1460,8 +1597,9 @@ function admin_cuts_format_bytes($bytes) {
                     ? '/admin/youtube_corte_arquivo.php?job=' . rawurlencode($jobId) . '&file=' . rawurlencode($subtitleFilename) . '&download=1'
                     : '';
                   $cutMode = (string) ($cut['mode'] ?? $job['mode'] ?? 'short');
-                  $personStatus = admin_youtube_cut_person_status($cut, $cutMode);
-                  $publishBlocked = $cutMode === 'short' && !empty($personStatus) && (string) ($personStatus['label'] ?? '') === 'Nao publicar';
+                  $profileNameForPersonGate = (string) ($job['target_channel_profile_name'] ?? '');
+                  $personStatus = admin_youtube_cut_person_status($cut, $cutMode, $profileNameForPersonGate, '');
+                  $publishBlocked = $cutMode === 'short' && admin_youtube_profile_requires_person_gate($profileNameForPersonGate, '') && !empty($personStatus) && (string) ($personStatus['label'] ?? '') === 'Nao publicar';
                 ?>
                 <article class="admin-side-card">
                   <video class="admin-cut-video" controls preload="metadata" src="<?= h($streamUrl) ?>"></video>
@@ -1662,7 +1800,19 @@ function admin_cuts_format_bytes($bytes) {
     const radarForm = document.querySelector('.admin-inline-form-radar');
     const autoJobButton = radarForm?.querySelector('[data-confirm-auto-job]');
     const channelSelect = radarForm?.querySelector('#radar_channel_profile_id');
-    if (!radarForm || !autoJobButton || !channelSelect) {
+    if (!radarForm || !channelSelect) {
+      return;
+    }
+
+    channelSelect.addEventListener('change', function () {
+      const targetUrl = channelSelect.dataset.profileSwitchUrl || '/admin/youtube_cortes.php';
+      const nextUrl = new URL(targetUrl, window.location.origin);
+      nextUrl.searchParams.set('tab', radarForm.dataset.currentTab || 'gerar');
+      nextUrl.searchParams.set('channel_profile_id', channelSelect.value || '0');
+      window.location.href = nextUrl.toString();
+    });
+
+    if (!autoJobButton) {
       return;
     }
 

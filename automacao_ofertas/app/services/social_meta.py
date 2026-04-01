@@ -1,6 +1,9 @@
 import html
+import json
+import math
 import os
 import re
+import shutil
 import time
 from base64 import urlsafe_b64decode
 from hashlib import sha1
@@ -24,6 +27,50 @@ ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 META_REFRESH_WINDOW_SECONDS = 7 * 24 * 60 * 60
 
 
+def _prefer_system_ffmpeg_for_imageio() -> None:
+    binary = shutil.which("ffmpeg")
+    if binary and os.environ.get("IMAGEIO_FFMPEG_EXE") != binary:
+        os.environ["IMAGEIO_FFMPEG_EXE"] = binary
+
+
+def _story_video_codec_candidates() -> list[str]:
+    return ["libx264", "mpeg4"]
+
+
+def _story_video_output_params(*, codec: str) -> list[str]:
+    params = [
+        "-threads",
+        "1",
+        "-movflags",
+        "+faststart",
+    ]
+    if codec == "libx264":
+        params.extend(
+            [
+                "-preset",
+                "veryfast",
+                "-crf",
+                "24",
+            ]
+        )
+    elif codec == "mpeg4":
+        params.extend(
+            [
+                "-q:v",
+                "5",
+            ]
+        )
+    return params
+
+
+def _close_imageio_writer_safely(writer: Any) -> str | None:
+    try:
+        writer.close()
+    except Exception as exc:  # noqa: BLE001
+        return str(exc)
+    return None
+
+
 SELECT_TOP_OFFERS_SQL = text(
     """
     SELECT
@@ -45,6 +92,8 @@ SELECT_TOP_OFFERS_SQL = text(
       o.url_afiliado,
       o.cupom,
       o.imagem_url,
+      o.imagem_urls_json,
+      o.video_urls_json,
       o.categoria,
       o.tags,
       o.destaque,
@@ -70,7 +119,7 @@ SELECT_TOP_OFFERS_SQL = text(
         OR o.loja LIKE :search_like
         OR o.categoria LIKE :search_like
       )
-    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.desconto_percentual, o.preco_pix, o.preco_outros_meios, o.parcelas_texto, o.frete_texto, o.avaliacao_nota, o.avaliacao_total, o.promocao_texto, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.categoria, o.tags, o.destaque, o.criado_em, o.atualizado_em
+    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.desconto_percentual, o.preco_pix, o.preco_outros_meios, o.parcelas_texto, o.frete_texto, o.avaliacao_nota, o.avaliacao_total, o.promocao_texto, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.imagem_urls_json, o.video_urls_json, o.categoria, o.tags, o.destaque, o.criado_em, o.atualizado_em
     ORDER BY o.criado_em DESC, o.id DESC
     LIMIT :limit
     OFFSET :offset
@@ -98,6 +147,8 @@ SELECT_OFFERS_BY_IDS_SQL = text(
       o.url_afiliado,
       o.cupom,
       o.imagem_url,
+      o.imagem_urls_json,
+      o.video_urls_json,
       o.categoria,
       o.tags,
       o.destaque,
@@ -113,7 +164,7 @@ SELECT_OFFERS_BY_IDS_SQL = text(
       AND o.imagem_url IS NOT NULL
       AND o.imagem_url <> ''
       AND o.id IN :offer_ids
-    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.desconto_percentual, o.preco_pix, o.preco_outros_meios, o.parcelas_texto, o.frete_texto, o.avaliacao_nota, o.avaliacao_total, o.promocao_texto, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.categoria, o.tags, o.destaque, o.criado_em, o.atualizado_em
+    GROUP BY o.id, o.slug, o.titulo, o.descricao, o.preco, o.preco_antigo, o.desconto_percentual, o.preco_pix, o.preco_outros_meios, o.parcelas_texto, o.frete_texto, o.avaliacao_nota, o.avaliacao_total, o.promocao_texto, o.loja, o.url_afiliado, o.cupom, o.imagem_url, o.imagem_urls_json, o.video_urls_json, o.categoria, o.tags, o.destaque, o.criado_em, o.atualizado_em
     ORDER BY o.criado_em DESC, o.id DESC
     """
 ).bindparams(bindparam("offer_ids", expanding=True))
@@ -741,6 +792,209 @@ def _fit_remote_product_image(url: str, size: tuple[int, int]) -> Image.Image | 
         return None
 
 
+def _decode_offer_url_list(value: Any) -> list[str]:
+    candidates: list[Any] = []
+    if isinstance(value, list):
+        candidates = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return []
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, list):
+            candidates = decoded
+        else:
+            candidates = [raw]
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        url = str(candidate or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        normalized.append(url)
+    return normalized
+
+
+def _offer_image_gallery_urls(offer: dict[str, Any], *, limit: int = 6) -> list[str]:
+    gallery = _decode_offer_url_list(offer.get("imagem_urls") or offer.get("image_urls") or offer.get("imagem_urls_json"))
+    primary = str(offer.get("imagem_url") or offer.get("image_url") or "").strip()
+    if primary and primary not in gallery:
+        gallery.insert(0, primary)
+    if not gallery and primary:
+        gallery = [primary]
+    return gallery[: max(1, limit)]
+
+
+def _clean_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _render_reel_frame(base_image: Image.Image, progress: float) -> Image.Image:
+    width, height = base_image.size
+    zoom = 1.0 + (0.04 * max(0.0, min(progress, 1.0)))
+    resized = base_image.resize((int(width * zoom), int(height * zoom)), Image.Resampling.LANCZOS)
+    return ImageOps.fit(resized, (width, height), method=Image.Resampling.LANCZOS, centering=(0.5, 0.4))
+
+
+def _default_reel_creative(offer: dict[str, Any]) -> dict[str, Any]:
+    title = _truncate_text(str(offer.get("titulo") or "Oferta"), 72)
+    price = _money(offer.get("preco"))
+    discount = _offer_discount_percent(offer)
+    pix_price = offer.get("preco_pix")
+    installments = str(offer.get("parcelas_texto") or "").strip()
+    shipping = str(offer.get("frete_texto") or "").strip()
+    detail = ""
+    if pix_price not in (None, "", 0, 0.0):
+        detail = f"No Pix: {_money(pix_price)}"
+    elif installments:
+        detail = installments
+    elif shipping:
+        detail = shipping
+    else:
+        detail = "Confira os detalhes no link da oferta."
+    price_line = price + (f" | {discount}% OFF" if discount > 0 else "")
+    return {
+        "scene_overlays": [
+            {"eyebrow": "ACHADO", "headline": title, "subline": price, "sticker": "OFERTA"},
+            {"eyebrow": "DESTAQUE", "headline": price_line, "subline": detail, "sticker": "PROMO"},
+            {"eyebrow": "CTA", "headline": "Confira a oferta completa", "subline": "Abra o link e veja o valor atualizado.", "sticker": "VER AGORA"},
+        ]
+    }
+
+
+def _scene_animation_alpha(progress: float) -> float:
+    enter = min(1.0, max(0.0, progress / 0.18))
+    exit = min(1.0, max(0.0, (1.0 - progress) / 0.14))
+    return max(0.0, min(enter, exit))
+
+
+def _draw_overlay_text(
+    draw: ImageDraw.ImageDraw,
+    *,
+    x: int,
+    y: int,
+    text: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    fill: tuple[int, int, int, int],
+    shadow_fill: tuple[int, int, int, int],
+    line_spacing: int = 10,
+) -> int:
+    current_y = y
+    for line in _wrap_text(_clean_text(text), 22):
+        if not line:
+            continue
+        draw.text((x + 3, current_y + 3), line, font=font, fill=shadow_fill)
+        draw.text((x, current_y), line, font=font, fill=fill)
+        bbox = draw.textbbox((x, current_y), line, font=font)
+        current_y = bbox[3] + line_spacing
+    return current_y
+
+
+def _apply_reel_overlay(
+    frame: Image.Image,
+    offer: dict[str, Any],
+    scene: dict[str, Any],
+    *,
+    scene_progress: float,
+    scene_index: int,
+    total_scenes: int,
+) -> Image.Image:
+    alpha_factor = _scene_animation_alpha(scene_progress)
+    if alpha_factor <= 0:
+        return frame
+
+    overlay = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    width, height = frame.size
+
+    top_panel = (54, 82, width - 54, 540)
+    bottom_panel = (54, height - 280, width - 54, height - 92)
+    panel_fill = (8, 24, 66, int(165 * alpha_factor))
+    panel_outline = (142, 186, 255, int(185 * alpha_factor))
+    draw.rounded_rectangle(top_panel, radius=36, fill=panel_fill, outline=panel_outline, width=3)
+    draw.rounded_rectangle(bottom_panel, radius=34, fill=(255, 255, 255, int(215 * alpha_factor)))
+
+    badge_fill = (255, 210, 82, int(240 * alpha_factor))
+    badge_box = (82, 108, 360, 164)
+    draw.rounded_rectangle(badge_box, radius=20, fill=badge_fill)
+    badge_font = _load_font(24, bold=True)
+    draw.text((104, 122), _truncate_text(str(scene.get("eyebrow") or _category_label(offer.get("categoria") or "")), 22), font=badge_font, fill=(33, 47, 74, int(255 * alpha_factor)))
+
+    sticker_text = _truncate_text(str(scene.get("sticker") or "OFERTA"), 20)
+    sticker_font = _load_font(22, bold=True)
+    sticker_bbox = draw.textbbox((0, 0), sticker_text, font=sticker_font)
+    sticker_width = (sticker_bbox[2] - sticker_bbox[0]) + 42
+    sticker_box = (width - 82 - sticker_width, 108, width - 82, 164)
+    draw.rounded_rectangle(sticker_box, radius=20, fill=(255, 255, 255, int(228 * alpha_factor)))
+    draw.text((sticker_box[0] + 21, 122), sticker_text, font=sticker_font, fill=(11, 45, 120, int(255 * alpha_factor)))
+
+    enter_offset = int((1.0 - alpha_factor) * 34)
+    headline_font = _load_font(52, bold=True)
+    subline_font = _load_font(28, bold=False)
+    current_y = _draw_overlay_text(
+        draw,
+        x=82,
+        y=194 + enter_offset,
+        text=str(scene.get("headline") or ""),
+        font=headline_font,
+        fill=(255, 255, 255, int(255 * alpha_factor)),
+        shadow_fill=(0, 0, 0, int(120 * alpha_factor)),
+        line_spacing=14,
+    )
+    _draw_overlay_text(
+        draw,
+        x=82,
+        y=current_y + 4,
+        text=str(scene.get("subline") or ""),
+        font=subline_font,
+        fill=(225, 236, 255, int(245 * alpha_factor)),
+        shadow_fill=(0, 0, 0, int(110 * alpha_factor)),
+        line_spacing=8,
+    )
+
+    progress_text = f"{scene_index + 1}/{max(1, total_scenes)}"
+    progress_font = _load_font(24, bold=True)
+    draw.text((86, height - 244), progress_text, font=progress_font, fill=(11, 45, 120, int(230 * alpha_factor)))
+    cta_font = _load_font(34, bold=True)
+    cta_line = _truncate_text(str(scene.get("headline") if scene_index == total_scenes - 1 else scene.get("subline") or "Abra o link da oferta"), 48)
+    draw.text((86, height - 200), cta_line, font=cta_font, fill=(11, 45, 120, int(255 * alpha_factor)))
+
+    if scene_index == total_scenes - 1:
+        pulse = 0.86 + (0.14 * ((math.sin(scene_progress * math.pi * 2.0) + 1.0) / 2.0))
+        brand_label = _truncate_text(str(scene.get("brand") or os.getenv("SHOPEE_VIDEO_BRAND_NAME") or "ZERO PRECO"), 18)
+        button_label = _truncate_text(str(scene.get("button_label") or "ABRIR AGORA"), 18)
+        button_width = int(320 * pulse)
+        button_height = 86
+        button_x1 = width - 86 - button_width
+        button_y1 = height - 242
+        button_x2 = width - 86
+        button_y2 = button_y1 + button_height
+        draw.rounded_rectangle((button_x1, button_y1, button_x2, button_y2), radius=26, fill=(34, 98, 255, int(245 * alpha_factor)))
+        draw.rounded_rectangle((button_x1, button_y1, button_x2, button_y2), radius=26, outline=(255, 255, 255, int(220 * alpha_factor)), width=3)
+        button_font = _load_font(28, bold=True)
+        brand_font = _load_font(20, bold=True)
+        draw.text((button_x1 + 28, button_y1 + 17), button_label, font=button_font, fill=(255, 255, 255, int(255 * alpha_factor)))
+        draw.text((button_x1 + 28, button_y1 + 49), brand_label, font=brand_font, fill=(220, 235, 255, int(245 * alpha_factor)))
+
+    bar_x1 = 86
+    bar_x2 = width - 86
+    bar_y1 = height - 132
+    bar_y2 = height - 112
+    draw.rounded_rectangle((bar_x1, bar_y1, bar_x2, bar_y2), radius=10, fill=(210, 224, 255, int(255 * alpha_factor)))
+    filled_ratio = min(1.0, max(0.12, (scene_index + scene_progress) / max(1, total_scenes)))
+    filled_x2 = int(bar_x1 + ((bar_x2 - bar_x1) * filled_ratio))
+    draw.rounded_rectangle((bar_x1, bar_y1, filled_x2, bar_y2), radius=10, fill=(34, 98, 255, int(255 * alpha_factor)))
+
+    return Image.alpha_composite(frame.convert("RGBA"), overlay).convert("RGB")
+
+
 def _fit_local_product_image(path: Path, size: tuple[int, int]) -> Image.Image | None:
     if not path.is_file():
         return None
@@ -998,41 +1252,66 @@ def generate_story_video_asset(
     filename = Path(poster_asset["filename"]).stem + "-story-video.mp4"
     destination = ensure_stories_dir() / filename
 
-    reader = imageio.get_reader(str(source_path))
-    metadata = reader.get_meta_data() or {}
+    _prefer_system_ffmpeg_for_imageio()
+
+    metadata_reader = imageio.get_reader(str(source_path))
+    try:
+        metadata = metadata_reader.get_meta_data() or {}
+    finally:
+        metadata_reader.close()
     fps = float(metadata.get("fps") or 24)
     if fps <= 0:
         fps = 24
     fps = min(max(fps, 12), 30)
     max_frames = max(1, int(fps * max_duration_seconds))
-    writer = imageio.get_writer(
-        str(destination),
-        fps=fps,
-        codec="libx264",
-        pixelformat="yuv420p",
-        macro_block_size=None,
-    )
 
     rendered_frames = 0
-    try:
-        for frame_data in reader:
-            frame_image = Image.fromarray(frame_data).convert("RGB")
-            fitted = ImageOps.fit(frame_image, product_size, method=Image.Resampling.LANCZOS)
-            canvas = base_image.copy()
-            canvas.paste(fitted, (x1, y1), mask)
-            frame_draw = ImageDraw.Draw(canvas)
-            frame_draw.rounded_rectangle(product_inner_box, radius=border_radius, outline="#d7e4ff", width=4)
-            writer.append_data(np.asarray(canvas))
-            rendered_frames += 1
-            if rendered_frames >= max_frames:
-                break
-    finally:
-        writer.close()
-        reader.close()
-
-    if rendered_frames <= 0:
+    selected_codec = ""
+    errors: list[str] = []
+    for codec in _story_video_codec_candidates():
         destination.unlink(missing_ok=True)
-        raise ValueError("Nao foi possivel renderizar frames do video para o story.")
+        reader = imageio.get_reader(str(source_path))
+        writer = imageio.get_writer(
+            str(destination),
+            fps=fps,
+            codec=codec,
+            pixelformat="yuv420p",
+            macro_block_size=None,
+            ffmpeg_log_level="warning",
+            output_params=_story_video_output_params(codec=codec),
+        )
+        rendered_frames = 0
+        write_error = ""
+        try:
+            for frame_data in reader:
+                frame_image = Image.fromarray(frame_data).convert("RGB")
+                fitted = ImageOps.fit(frame_image, product_size, method=Image.Resampling.LANCZOS)
+                canvas = base_image.copy()
+                canvas.paste(fitted, (x1, y1), mask)
+                frame_draw = ImageDraw.Draw(canvas)
+                frame_draw.rounded_rectangle(product_inner_box, radius=border_radius, outline="#d7e4ff", width=4)
+                writer.append_data(np.asarray(canvas))
+                rendered_frames += 1
+                if rendered_frames >= max_frames:
+                    break
+        except Exception as exc:  # noqa: BLE001
+            write_error = str(exc)
+        finally:
+            close_error = _close_imageio_writer_safely(writer)
+            reader.close()
+        if close_error:
+            write_error = close_error if write_error == "" else f"{write_error} | close: {close_error}"
+        if write_error:
+            errors.append(f"{codec}: {write_error}")
+        if rendered_frames > 0 and destination.is_file():
+            selected_codec = codec
+            break
+
+    if rendered_frames <= 0 or not destination.is_file():
+        destination.unlink(missing_ok=True)
+        details = " | ".join(errors[:3]).strip()
+        suffix = f" Detalhes: {details}" if details else ""
+        raise ValueError(f"Nao foi possivel renderizar frames do video para o story.{suffix}")
 
     return {
         "ok": True,
@@ -1043,44 +1322,118 @@ def generate_story_video_asset(
         "caption": _story_caption_for_offer(offer),
         "destination_url": story_canvas["destination_url"],
         "poster_url": poster_asset["public_url"],
+        "video_codec": selected_codec,
     }
 
 
-def generate_reel_asset(offer: dict[str, Any], *, duration_seconds: int = 6, fps: int = 24) -> dict[str, Any]:
+def generate_reel_asset(
+    offer: dict[str, Any],
+    *,
+    duration_seconds: float = 6,
+    fps: int = 24,
+    creative: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     stories_dir = ensure_stories_dir()
     poster_filename = f"offer-{offer['id']}-{_slugify(offer['slug'])}-reel-poster.jpg"
     poster_path = stories_dir / poster_filename
-    product_image = _fit_remote_product_image(offer.get("imagem_url"), (840, 470))
-    reel_canvas = _build_story_canvas(
-        offer,
-        product_image=product_image,
-        show_brand_label=False,
-        vertical_shift=-70,
-    )
-    base_image = reel_canvas["image"].convert("RGB")
+    gallery_urls = _offer_image_gallery_urls(offer)
+    reel_frames: list[Image.Image] = []
+    for image_url in gallery_urls:
+        product_image = _fit_remote_product_image(image_url, (840, 470))
+        if product_image is None:
+            continue
+        reel_canvas = _build_story_canvas(
+            offer,
+            product_image=product_image,
+            show_brand_label=False,
+            vertical_shift=-70,
+        )
+        reel_frames.append(reel_canvas["image"].convert("RGB"))
+
+    if not reel_frames:
+        fallback_image = _fit_remote_product_image(offer.get("imagem_url"), (840, 470))
+        reel_canvas = _build_story_canvas(
+            offer,
+            product_image=fallback_image,
+            show_brand_label=False,
+            vertical_shift=-70,
+        )
+        reel_frames.append(reel_canvas["image"].convert("RGB"))
+
+    base_image = reel_frames[0]
     base_image.save(poster_path, format="JPEG", quality=92, optimize=True)
 
     filename = f"offer-{offer['id']}-{_slugify(offer['slug'])}-reel.mp4"
     destination = stories_dir / filename
-    total_frames = max(1, duration_seconds * fps)
+    normalized_duration = max(1.5, float(duration_seconds or 0))
+    total_frames = max(1, int(round(normalized_duration * fps)))
+    resolved_creative = creative or _default_reel_creative(offer)
+    scenes = list(resolved_creative.get("scene_overlays") or []) or list(_default_reel_creative(offer).get("scene_overlays") or [])
 
-    width, height = base_image.size
-    writer = imageio.get_writer(
-        str(destination),
-        fps=fps,
-        codec="libx264",
-        pixelformat="yuv420p",
-        macro_block_size=None,
-    )
-    try:
-        for frame_index in range(total_frames):
-            progress = frame_index / max(total_frames - 1, 1)
-            zoom = 1.0 + (0.035 * progress)
-            resized = base_image.resize((int(width * zoom), int(height * zoom)), Image.Resampling.LANCZOS)
-            frame = ImageOps.fit(resized, (width, height), method=Image.Resampling.LANCZOS, centering=(0.5, 0.4))
-            writer.append_data(np.asarray(frame))
-    finally:
-        writer.close()
+    _prefer_system_ffmpeg_for_imageio()
+
+    selected_codec = ""
+    errors: list[str] = []
+    for codec in _story_video_codec_candidates():
+        destination.unlink(missing_ok=True)
+        writer = imageio.get_writer(
+            str(destination),
+            fps=fps,
+            codec=codec,
+            pixelformat="yuv420p",
+            macro_block_size=None,
+            ffmpeg_log_level="warning",
+            output_params=_story_video_output_params(codec=codec),
+        )
+        write_error = ""
+        try:
+            for frame_index in range(total_frames):
+                if len(reel_frames) == 1:
+                    progress = frame_index / max(total_frames - 1, 1)
+                    frame = _render_reel_frame(reel_frames[0], progress)
+                    current_scene_index = min(int(progress * len(scenes)), len(scenes) - 1)
+                    scene = scenes[current_scene_index]
+                    scene_progress = (progress * len(scenes)) % 1.0
+                else:
+                    timeline = (frame_index / max(total_frames - 1, 1)) * len(reel_frames)
+                    segment_index = min(int(timeline), len(reel_frames) - 1)
+                    segment_progress = timeline - segment_index
+                    current_frame = _render_reel_frame(reel_frames[segment_index], segment_progress)
+                    transition_start = 0.72
+                    if segment_index < len(reel_frames) - 1 and segment_progress >= transition_start:
+                        blend = min(1.0, (segment_progress - transition_start) / (1.0 - transition_start))
+                        next_frame = _render_reel_frame(reel_frames[segment_index + 1], max(0.0, segment_progress - transition_start))
+                        frame = Image.blend(current_frame, next_frame, blend)
+                    else:
+                        frame = current_frame
+                    current_scene_index = min(segment_index, len(scenes) - 1)
+                    scene = scenes[current_scene_index]
+                    scene_progress = segment_progress
+                frame = _apply_reel_overlay(
+                    frame,
+                    offer,
+                    scene,
+                    scene_progress=scene_progress,
+                    scene_index=current_scene_index,
+                    total_scenes=len(scenes),
+                )
+                writer.append_data(np.asarray(frame))
+        except Exception as exc:  # noqa: BLE001
+            write_error = str(exc)
+        finally:
+            close_error = _close_imageio_writer_safely(writer)
+        if close_error:
+            write_error = close_error if write_error == "" else f"{write_error} | close: {close_error}"
+        if write_error:
+            errors.append(f"{codec}: {write_error}")
+        if destination.is_file():
+            selected_codec = codec
+            break
+
+    if not destination.is_file():
+        details = " | ".join(errors[:3]).strip()
+        suffix = f" Detalhes: {details}" if details else ""
+        raise ValueError(f"Nao foi possivel gerar o reel em video.{suffix}")
 
     return {
         "ok": True,
@@ -1089,8 +1442,12 @@ def generate_reel_asset(offer: dict[str, Any], *, duration_seconds: int = 6, fps
         "file_path": str(destination),
         "public_url": story_public_url(filename),
         "caption": _story_caption_for_offer(offer),
-        "destination_url": reel_canvas["destination_url"],
+        "destination_url": _destination_url(offer),
         "poster_url": story_public_url(poster_filename),
+        "gallery_count": len(reel_frames),
+        "scene_count": len(scenes),
+        "video_codec": selected_codec,
+        "duration_seconds": round(normalized_duration, 2),
     }
 
 

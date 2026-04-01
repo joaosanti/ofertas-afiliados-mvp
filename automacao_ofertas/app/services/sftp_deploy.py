@@ -263,6 +263,8 @@ def _should_ignore_relative_path(
         return True
 
     filename = parts[-1]
+    if filename == ".admin_schema_bootstrap.json":
+        return True
     return filename.startswith("tmp_") or filename.endswith(".tmp")
 
 

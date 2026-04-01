@@ -22,6 +22,25 @@ function admin_youtube_cuts_compact_process_result_payload($result) {
       'score' => (int) ($item['score'] ?? 0),
       'duration_label' => (string) ($item['duration_label'] ?? ''),
       'video_filename' => (string) ($item['video_filename'] ?? ''),
+      'risk_profile' => (string) ($item['risk_profile'] ?? $result['risk_profile'] ?? 'default'),
+      'risk_notes' => array_values(array_filter((array) ($item['risk_notes'] ?? []), static function ($value) {
+        return is_string($value) && $value !== '';
+      })),
+      'first_frame_text' => (string) ($item['first_frame_text'] ?? ''),
+      'title_variants' => array_values(array_filter((array) ($item['title_variants'] ?? []), static function ($value) {
+        return is_string($value) && $value !== '';
+      })),
+      'packaging_notes' => array_values(array_filter((array) ($item['packaging_notes'] ?? []), static function ($value) {
+        return is_string($value) && $value !== '';
+      })),
+      'opening_score' => (int) ($item['opening_score'] ?? 0),
+      'opening_visual_score' => (int) ($item['opening_visual_score'] ?? 0),
+      'opening_speaker_score' => (int) ($item['opening_speaker_score'] ?? 0),
+      'opening_focus_zone' => (string) ($item['opening_focus_zone'] ?? ''),
+      'opening_speaker_detected' => !empty($item['opening_speaker_detected']),
+      'publish_allowed' => !array_key_exists('publish_allowed', $item) || !empty($item['publish_allowed']),
+      'publish_block_reason' => (string) ($item['publish_block_reason'] ?? ''),
+      'crop_override' => (string) ($item['crop_override'] ?? 'auto'),
       'publish_draft' => is_array($item['publish_draft'] ?? null) ? [
         'channel_profile_id' => (int) (($item['publish_draft']['channel_profile_id'] ?? 0)),
         'channel_profile_name' => (string) (($item['publish_draft']['channel_profile_name'] ?? '')),
@@ -31,6 +50,8 @@ function admin_youtube_cuts_compact_process_result_payload($result) {
   return [
     'job_id' => (string) ($result['job_id'] ?? ''),
     'mode' => (string) ($result['mode'] ?? 'short'),
+    'risk_profile' => (string) ($result['risk_profile'] ?? 'default'),
+    'target_channel_profile_id' => (int) ($result['target_channel_profile_id'] ?? 0),
     'target_channel_profile_name' => (string) ($result['target_channel_profile_name'] ?? ''),
     'cuts' => $cuts,
   ];
@@ -54,6 +75,14 @@ function admin_youtube_cuts_progress_snapshot($kind, $elapsedSeconds) {
       ['after' => 24, 'percent' => 56, 'label' => 'Analisando e gerando os cortes'],
       ['after' => 52, 'percent' => 76, 'label' => 'Escolhendo o melhor corte gerado'],
       ['after' => 70, 'percent' => 92, 'label' => 'Publicando o video no YouTube'],
+    ];
+  } elseif ($kind === 'private_test') {
+    $stages = [
+      ['after' => 0, 'percent' => 10, 'label' => 'Preparando teste privado'],
+      ['after' => 4, 'percent' => 26, 'label' => 'Baixando video do YouTube'],
+      ['after' => 12, 'percent' => 46, 'label' => 'Filtrando cortes com preset de risco menor'],
+      ['after' => 30, 'percent' => 70, 'label' => 'Renderizando o melhor corte'],
+      ['after' => 52, 'percent' => 90, 'label' => 'Enviando video privado ao YouTube'],
     ];
   } else {
     $stages = [
@@ -120,6 +149,16 @@ if ($response['status'] === 'success' && $payload) {
   } elseif ($kind === 'generate_cuts') {
     $_SESSION['admin_youtube_cuts_process'] = admin_youtube_cuts_compact_process_result_payload($payload['result'] ?? null);
     admin_flash_set('success', 'Cortes gerados com sucesso. Agora voce pode revisar e publicar no YouTube.');
+    $targetTab = 'historico';
+  } elseif ($kind === 'private_test') {
+    $result = is_array($payload['result'] ?? null) ? $payload['result'] : [];
+    $_SESSION['admin_youtube_cuts_process'] = admin_youtube_cuts_compact_process_result_payload($result['process_result'] ?? null);
+    $_SESSION['admin_youtube_cuts_last_publish'] = is_array($result['publish_result'] ?? null) ? $result['publish_result'] : null;
+    $youtubeUrl = (string) (($result['publish_result'] ?? [])['youtube_url'] ?? '');
+    admin_flash_set(
+      'success',
+      $youtubeUrl !== '' ? "Teste privado concluido com sucesso. Link: {$youtubeUrl}" : 'Teste privado concluido com sucesso no YouTube.'
+    );
     $targetTab = 'historico';
   } elseif ($kind === 'auto_cut_publish') {
     $_SESSION['admin_youtube_cuts_last_publish'] = is_array($payload['result'] ?? null) ? $payload['result'] : null;

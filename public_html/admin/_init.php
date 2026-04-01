@@ -21,7 +21,7 @@ function admin_schema_bootstrap_marker_path() {
 }
 
 function admin_schema_bootstrap_version() {
-  return '20260324_1';
+  return '20260331_3';
 }
 
 function admin_schema_bootstrap_should_skip() {
@@ -144,6 +144,12 @@ function admin_bootstrap_schema() {
     if (!isset($offerColumns['promocao_texto'])) {
       $pdo->exec("ALTER TABLE ofertas ADD COLUMN promocao_texto VARCHAR(255) NULL AFTER avaliacao_total");
     }
+    if (!isset($offerColumns['imagem_urls_json'])) {
+      $pdo->exec("ALTER TABLE ofertas ADD COLUMN imagem_urls_json MEDIUMTEXT NULL AFTER imagem_url");
+    }
+    if (!isset($offerColumns['video_urls_json'])) {
+      $pdo->exec("ALTER TABLE ofertas ADD COLUMN video_urls_json MEDIUMTEXT NULL AFTER imagem_urls_json");
+    }
     if (!isset($offerColumns['criado_por_admin_id'])) {
       $pdo->exec("ALTER TABLE ofertas ADD COLUMN criado_por_admin_id INT NULL AFTER ativo");
       $pdo->exec("ALTER TABLE ofertas ADD INDEX ix_ofertas_criado_por_admin_id (criado_por_admin_id)");
@@ -163,6 +169,65 @@ function admin_bootstrap_schema() {
            OR criado_por_login = ''
       ");
       $stmt->execute([(int) $owner['id'], (string) $owner['login_name']]);
+    }
+
+    $pdo->exec("
+      CREATE TABLE IF NOT EXISTS shopee_video_drafts (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        oferta_id INT NOT NULL,
+        status VARCHAR(40) NOT NULL DEFAULT 'manual_ready',
+        publish_mode VARCHAR(20) NOT NULL DEFAULT 'manual',
+        title_snapshot VARCHAR(255) NOT NULL,
+        price_snapshot DECIMAL(10,2) NOT NULL DEFAULT 0,
+        caption TEXT NULL,
+        affiliate_url TEXT NOT NULL,
+        offer_url TEXT NULL,
+        video_source_url TEXT NULL,
+        image_url TEXT NULL,
+        notes TEXT NULL,
+        creative_payload_json MEDIUMTEXT NULL,
+        package_payload_json MEDIUMTEXT NULL,
+        package_status VARCHAR(40) NOT NULL DEFAULT 'not_started',
+        package_job_id VARCHAR(140) NULL,
+        package_error TEXT NULL,
+        package_generated_at DATETIME NULL,
+        api_status VARCHAR(40) NOT NULL DEFAULT 'not_supported',
+        api_response_json MEDIUMTEXT NULL,
+        last_error TEXT NULL,
+        created_by_admin_id INT NULL,
+        created_by_login VARCHAR(180) NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        published_at DATETIME NULL,
+        UNIQUE KEY ux_shopee_video_drafts_oferta_id (oferta_id),
+        KEY ix_shopee_video_drafts_status (status),
+        KEY ix_shopee_video_drafts_publish_mode (publish_mode),
+        CONSTRAINT fk_shopee_video_drafts_oferta FOREIGN KEY (oferta_id) REFERENCES ofertas(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+
+    $draftColumns = [];
+    foreach ($pdo->query("SHOW COLUMNS FROM shopee_video_drafts") as $column) {
+      $draftColumns[(string) $column['Field']] = true;
+    }
+    if (!isset($draftColumns['creative_payload_json'])) {
+      $pdo->exec("ALTER TABLE shopee_video_drafts ADD COLUMN creative_payload_json MEDIUMTEXT NULL AFTER notes");
+    }
+    if (!isset($draftColumns['package_payload_json'])) {
+      $pdo->exec("ALTER TABLE shopee_video_drafts ADD COLUMN package_payload_json MEDIUMTEXT NULL AFTER creative_payload_json");
+    }
+    if (!isset($draftColumns['package_status'])) {
+      $pdo->exec("ALTER TABLE shopee_video_drafts ADD COLUMN package_status VARCHAR(40) NOT NULL DEFAULT 'not_started' AFTER package_payload_json");
+      $pdo->exec("ALTER TABLE shopee_video_drafts ADD INDEX ix_shopee_video_drafts_package_status (package_status)");
+    }
+    if (!isset($draftColumns['package_job_id'])) {
+      $pdo->exec("ALTER TABLE shopee_video_drafts ADD COLUMN package_job_id VARCHAR(140) NULL AFTER package_status");
+    }
+    if (!isset($draftColumns['package_error'])) {
+      $pdo->exec("ALTER TABLE shopee_video_drafts ADD COLUMN package_error TEXT NULL AFTER package_job_id");
+    }
+    if (!isset($draftColumns['package_generated_at'])) {
+      $pdo->exec("ALTER TABLE shopee_video_drafts ADD COLUMN package_generated_at DATETIME NULL AFTER package_error");
     }
 
     admin_purge_zero_price_offers($pdo);
@@ -230,6 +295,7 @@ function admin_primary_nav_items() {
     ['id' => 'nova_oferta', 'label' => '+ Nova oferta', 'href' => '/admin/oferta_editar.php'],
     ['id' => 'importar', 'label' => 'Importar', 'href' => '/admin/importar.php'],
     ['id' => 'social', 'label' => 'Social', 'href' => '/admin/social.php'],
+    ['id' => 'shopee_video', 'label' => 'Shopee Video', 'href' => '/admin/shopee_video.php'],
     ['id' => 'youtube_cortes', 'label' => 'YouTube cortes', 'href' => '/admin/youtube_cortes.php'],
     ['id' => 'site', 'label' => 'Ver site', 'href' => '/'],
     ['id' => 'logout', 'label' => 'Sair', 'href' => '/admin/logout.php'],
@@ -1145,5 +1211,1007 @@ function admin_fetch_social_candidates(PDO $pdo, $search = '', $store = '', $lim
     'limit' => $limit,
     'pages' => $pages,
   ];
+}
+
+function admin_shopee_video_offer_video_url($offer) {
+  $manualVideo = trim((string) tag_url_decode($offer['tags'] ?? '', 'offer_video_url:'));
+  if ($manualVideo !== '') {
+    return $manualVideo;
+  }
+  return trim((string) tag_url_decode($offer['tags'] ?? '', 'shopee_video_url:'));
+}
+
+function admin_env_value($key, $default = '') {
+  $name = trim((string) $key);
+  if ($name === '') {
+    return $default;
+  }
+
+  $runtimeValue = getenv($name);
+  if ($runtimeValue !== false && trim((string) $runtimeValue) !== '') {
+    return trim((string) $runtimeValue);
+  }
+
+  static $parsedFiles = null;
+  if ($parsedFiles === null) {
+    $parsedFiles = [];
+    $paths = [
+      dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'automacao_ofertas' . DIRECTORY_SEPARATOR . '.env',
+      dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . '.env',
+    ];
+    foreach ($paths as $path) {
+      if (!is_file($path)) {
+        continue;
+      }
+      $rows = @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+      if (!is_array($rows)) {
+        continue;
+      }
+      foreach ($rows as $row) {
+        $line = trim((string) $row);
+        if ($line === '' || str_starts_with($line, '#') || !str_contains($line, '=')) {
+          continue;
+        }
+        [$envKey, $envValue] = explode('=', $line, 2);
+        $envKey = trim((string) $envKey);
+        if ($envKey === '' || isset($parsedFiles[$envKey])) {
+          continue;
+        }
+        $envValue = trim((string) $envValue);
+        if ((str_starts_with($envValue, '"') && str_ends_with($envValue, '"')) || (str_starts_with($envValue, "'") && str_ends_with($envValue, "'"))) {
+          $envValue = substr($envValue, 1, -1);
+        }
+        $parsedFiles[$envKey] = $envValue;
+      }
+    }
+  }
+
+  return array_key_exists($name, $parsedFiles) ? (string) $parsedFiles[$name] : $default;
+}
+
+function admin_shopee_video_api_snapshot() {
+  $credential = trim((string) (admin_env_value('SHOPEE_API_KEY') ?: admin_env_value('SHOPEE_APP_ID') ?: admin_env_value('SHOPEE_PARTNER_ID') ?: ''));
+  $secret = trim((string) (admin_env_value('SHOPEE_API_SECRET') ?: admin_env_value('SHOPEE_SECRET_KEY') ?: ''));
+  return [
+    'catalog_api_configured' => $credential !== '' && $secret !== '',
+    'publish_api_supported' => false,
+    'publish_api_status' => 'not_confirmed_public',
+    'publish_api_message' => 'Nao ha endpoint publico confirmado para publicar no feed do Shopee Video.',
+  ];
+}
+
+function admin_shopee_video_json_decode($value) {
+  $raw = trim((string) $value);
+  if ($raw === '') {
+    return null;
+  }
+  $decoded = json_decode($raw, true);
+  return is_array($decoded) ? $decoded : null;
+}
+
+function admin_shopee_video_decode_url_list($value) {
+  if (is_array($value)) {
+    $rawItems = $value;
+  } else {
+    $decoded = admin_shopee_video_json_decode($value);
+    if (is_array($decoded)) {
+      $rawItems = $decoded;
+    } else {
+      $raw = trim((string) $value);
+      $rawItems = $raw !== '' ? [$raw] : [];
+    }
+  }
+
+  $urls = [];
+  foreach ($rawItems as $item) {
+    $url = trim((string) $item);
+    if ($url === '' || !preg_match('~^https?://~i', $url)) {
+      continue;
+    }
+    if (in_array($url, $urls, true)) {
+      continue;
+    }
+    $urls[] = $url;
+  }
+  return $urls;
+}
+
+function admin_shopee_video_offer_gallery_urls($offer) {
+  $gallery = admin_shopee_video_decode_url_list($offer['imagem_urls_json'] ?? ($offer['image_urls'] ?? []));
+  $primary = trim((string) ($offer['imagem_url'] ?? ($offer['image_url'] ?? '')));
+  if ($primary !== '' && !in_array($primary, $gallery, true)) {
+    array_unshift($gallery, $primary);
+  }
+  return $gallery;
+}
+
+function admin_shopee_video_offer_video_gallery_urls($offer) {
+  $gallery = admin_shopee_video_decode_url_list($offer['video_urls_json'] ?? ($offer['video_urls'] ?? []));
+  $primary = trim((string) ($offer['video_url'] ?? ($offer['video_source_url'] ?? '')));
+  if ($primary !== '' && !in_array($primary, $gallery, true)) {
+    array_unshift($gallery, $primary);
+  }
+  return $gallery;
+}
+
+function admin_shopee_video_money($value) {
+  return 'R$ ' . number_format((float) $value, 2, ',', '.');
+}
+
+function admin_shopee_video_discount_percent($offer) {
+  if (isset($offer['desconto_percentual']) && $offer['desconto_percentual'] !== null && $offer['desconto_percentual'] !== '') {
+    return max(0, (int) round((float) $offer['desconto_percentual']));
+  }
+  $price = (float) ($offer['preco'] ?? 0);
+  $oldPrice = (float) ($offer['preco_antigo'] ?? 0);
+  if ($price <= 0 || $oldPrice <= $price) {
+    return 0;
+  }
+  return max(0, (int) round((($oldPrice - $price) / $oldPrice) * 100));
+}
+
+function admin_shopee_video_category_hashtags($category) {
+  $normalized = strtolower(trim((string) $category));
+  $map = [
+    'celular' => ['#celular', '#smartphone'],
+    'fone' => ['#fonebluetooth', '#fone'],
+    'beleza' => ['#beleza', '#autocuidado'],
+    'casa' => ['#achadinhosdecasa', '#utilidadesdomesticas'],
+    'cozinha' => ['#cozinha', '#utilidadesdomesticas'],
+    'moda' => ['#moda', '#look'],
+    'eletron' => ['#eletronicos', '#gadget'],
+    'gamer' => ['#setupgamer', '#gamer'],
+  ];
+  foreach ($map as $keyword => $hashtags) {
+    if ($normalized !== '' && str_contains($normalized, $keyword)) {
+      return $hashtags;
+    }
+  }
+  return ['#achadinhos', '#promocao'];
+}
+
+function admin_shopee_video_build_creative_payload($offer) {
+  $title = trim((string) ($offer['titulo'] ?? $offer['title_snapshot'] ?? 'Oferta Shopee'));
+  $price = admin_shopee_video_money($offer['preco'] ?? 0);
+  $oldPriceValue = isset($offer['preco_antigo']) ? (float) $offer['preco_antigo'] : 0.0;
+  $oldPrice = $oldPriceValue > 0 ? admin_shopee_video_money($oldPriceValue) : '';
+  $pixPriceValue = isset($offer['preco_pix']) ? (float) $offer['preco_pix'] : 0.0;
+  $pixPrice = $pixPriceValue > 0 ? admin_shopee_video_money($pixPriceValue) : '';
+  $coupon = trim((string) ($offer['cupom'] ?? ''));
+  $shipping = trim((string) ($offer['frete_texto'] ?? ''));
+  $installments = trim((string) ($offer['parcelas_texto'] ?? ''));
+  $category = trim((string) ($offer['categoria'] ?? 'Achadinhos'));
+  $discount = admin_shopee_video_discount_percent($offer);
+
+  $angle = 'achadinho util do dia';
+  if ($coupon !== '') {
+    $angle = 'cupom e acao imediata';
+  } elseif ($discount >= 35) {
+    $angle = 'desconto agressivo';
+  } elseif ($pixPrice !== '') {
+    $angle = 'preco no pix';
+  } elseif ($shipping !== '') {
+    $angle = 'beneficio de frete';
+  }
+
+  $hook = 'Achadinho da Shopee que vale a pena abrir agora';
+  $coverText = 'ACHADO ' . $price;
+  if ($coupon !== '') {
+    $hook = 'Achado com cupom na Shopee: ' . $title;
+    $coverText = 'CUPOM + ' . $price;
+  } elseif ($discount >= 35) {
+    $hook = 'Olha esse achado na Shopee com ' . $discount . '% off';
+    $coverText = $discount . '% OFF';
+  } elseif ($pixPrice !== '') {
+    $hook = 'Esse produto ficou com preco forte no Pix';
+    $coverText = 'NO PIX ' . $pixPrice;
+  }
+
+  $cta = $coupon !== ''
+    ? 'Clique no link e teste o cupom ' . $coupon . '.'
+    : 'Clique no link e confira o preco atualizado.';
+
+  $valuePoints = [];
+  $valuePoints[] = $title;
+  if ($oldPrice !== '' && $oldPriceValue > (float) ($offer['preco'] ?? 0)) {
+    $valuePoints[] = 'Antes ' . $oldPrice . ', agora ' . $price . '.';
+  } else {
+    $valuePoints[] = 'Preco atual em destaque: ' . $price . '.';
+  }
+  if ($pixPrice !== '') {
+    $valuePoints[] = 'No Pix pode ficar por ' . $pixPrice . '.';
+  }
+  if ($installments !== '') {
+    $valuePoints[] = $installments;
+  }
+  if ($shipping !== '') {
+    $valuePoints[] = $shipping;
+  }
+  if ($coupon !== '') {
+    $valuePoints[] = 'Cupom visivel: ' . $coupon . '.';
+  }
+
+  $hashtags = array_values(array_unique(array_filter(array_merge(
+    ['#shopee', '#shopeevideo', '#ofertas', '#achadinhos'],
+    admin_shopee_video_category_hashtags($category)
+  ))));
+
+  $captionLines = [
+    $hook,
+    'Produto: ' . $title,
+    'Preco destaque: ' . $price,
+  ];
+  if ($oldPrice !== '' && $oldPriceValue > (float) ($offer['preco'] ?? 0)) {
+    $captionLines[] = 'Preco anterior: ' . $oldPrice;
+  }
+  if ($pixPrice !== '') {
+    $captionLines[] = 'Preco no Pix: ' . $pixPrice;
+  }
+  if ($installments !== '') {
+    $captionLines[] = 'Parcelamento: ' . $installments;
+  }
+  if ($shipping !== '') {
+    $captionLines[] = 'Frete: ' . $shipping;
+  }
+  if ($coupon !== '') {
+    $captionLines[] = 'Cupom: ' . $coupon;
+  }
+  $captionLines[] = 'Confira os detalhes no link do video.';
+  $captionLines[] = $cta;
+  $captionLines[] = implode(' ', $hashtags);
+
+  return [
+    'angle' => $angle,
+    'hook' => $hook,
+    'cover_text' => $coverText,
+    'cta_text' => $cta,
+    'duration_seconds' => 8,
+    'value_points' => $valuePoints,
+    'hashtags' => $hashtags,
+    'caption' => implode("\n", array_values(array_filter($captionLines, static function ($line) {
+      return trim((string) $line) !== '';
+    }))),
+    'shot_plan' => [
+      [
+        'segment' => '0-2s',
+        'goal' => 'gancho inicial',
+        'overlay' => $hook,
+        'direction' => 'Abrir com texto grande e close do produto.',
+      ],
+      [
+        'segment' => '2-5s',
+        'goal' => 'prova de oferta',
+        'overlay' => $price . ($discount > 0 ? ' | ' . $discount . '% OFF' : ''),
+        'direction' => 'Mostrar preco, beneficio principal e movimento rapido.',
+      ],
+      [
+        'segment' => '5-8s',
+        'goal' => 'fechamento com CTA',
+        'overlay' => $cta,
+        'direction' => 'Encerrar com chamada para abrir o link.',
+      ],
+    ],
+    'edit_notes' => array_values(array_filter([
+      'Usar video vertical 9:16.',
+      'Gancho forte no primeiro segundo com texto em caixa alta.',
+      'Cortes curtos e ritmo rapido, sem pausas longas.',
+      'Mostrar preco e beneficio principal antes dos 4 segundos.',
+      'Deixar a CTA visivel no fechamento.',
+      $coupon !== '' ? 'Reforcar o cupom ' . $coupon . ' no frame final.' : '',
+      $discount >= 35 ? 'Destacar o desconto com selo grande.' : '',
+    ])),
+    'publish_checklist' => [
+      'Confirmar se o produto exibido e o produto marcado sao o mesmo item.',
+      'Revisar preco e cupom antes de publicar.',
+      'Checar se o link de afiliado esta correto.',
+      'Manter titulo curto e direto no app da Shopee.',
+      'Publicar na vertical com capa legivel.',
+    ],
+  ];
+}
+
+function admin_shopee_video_status_label($status) {
+  $map = [
+    'manual_ready' => 'Pronto manual',
+    'needs_video' => 'Sem video',
+    'api_blocked' => 'API bloqueada',
+    'published' => 'Publicado',
+    'error' => 'Erro',
+    'archived' => 'Arquivado',
+  ];
+  $normalized = trim((string) $status);
+  return $map[$normalized] ?? ($normalized !== '' ? $normalized : 'Pendente');
+}
+
+function admin_shopee_video_status_class($status) {
+  $normalized = trim((string) $status);
+  if (in_array($normalized, ['manual_ready', 'published'], true)) {
+    return 'ok';
+  }
+  if (in_array($normalized, ['needs_video', 'api_blocked'], true)) {
+    return 'warn';
+  }
+  if (in_array($normalized, ['error', 'archived'], true)) {
+    return 'off';
+  }
+  return 'warn';
+}
+
+function admin_shopee_video_package_status_label($status) {
+  $map = [
+    'not_started' => 'Pacote pendente',
+    'ready' => 'Pacote pronto',
+    'partial' => 'Pacote parcial',
+    'stale' => 'Pacote desatualizado',
+    'error' => 'Pacote com erro',
+  ];
+  $normalized = trim((string) $status);
+  return $map[$normalized] ?? ($normalized !== '' ? $normalized : 'Pacote pendente');
+}
+
+function admin_shopee_video_package_status_class($status) {
+  $normalized = trim((string) $status);
+  if ($normalized === 'ready') {
+    return 'ok';
+  }
+  if (in_array($normalized, ['not_started', 'stale', 'partial'], true)) {
+    return 'warn';
+  }
+  if ($normalized === 'error') {
+    return 'off';
+  }
+  return 'warn';
+}
+
+function admin_shopee_video_default_caption($offer) {
+  $creative = admin_shopee_video_build_creative_payload($offer);
+  return (string) ($creative['caption'] ?? 'Confira os detalhes no link do video.');
+}
+
+function admin_fetch_shopee_video_candidates(PDO $pdo, $search = '', $limit = 24, $page = 1, $onlyWithVideo = true) {
+  $limit = max(1, min((int) $limit, 60));
+  $page = max(1, (int) $page);
+  $where = [
+    "o.loja = 'Shopee'",
+    'o.ativo = 1',
+    '(o.expira_em IS NULL OR o.expira_em > NOW())',
+    "o.imagem_url IS NOT NULL",
+    "o.imagem_url <> ''",
+  ];
+  $params = [];
+
+  if ($search !== '') {
+    $like = '%' . $search . '%';
+    $where[] = '(o.titulo LIKE ? OR o.categoria LIKE ? OR o.tags LIKE ? OR o.loja LIKE ?)';
+    array_push($params, $like, $like, $like, $like);
+  }
+
+  if ($onlyWithVideo) {
+    $where[] = "(o.tags LIKE '%shopee_video_url:%' OR o.tags LIKE '%offer_video_url:%')";
+  }
+
+  $sql = "
+    SELECT
+      o.*,
+      COUNT(c.id) AS clicks
+    FROM ofertas o
+    LEFT JOIN cliques c
+      ON c.oferta_id = o.id
+      AND c.criado_em >= NOW() - INTERVAL 30 DAY
+    WHERE " . implode(' AND ', $where) . "
+    GROUP BY o.id
+    ORDER BY o.atualizado_em DESC, o.criado_em DESC, o.id DESC
+  ";
+
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($params);
+  $rows = $stmt->fetchAll() ?: [];
+
+  $eligibleRows = [];
+  foreach ($rows as $row) {
+    if (!admin_affiliate_is_acceptable(admin_affiliate_audit($row['loja'] ?? '', $row['url_afiliado'] ?? ''))) {
+      continue;
+    }
+    $videoUrl = admin_shopee_video_offer_video_url($row);
+    if ($onlyWithVideo && $videoUrl === '') {
+      continue;
+    }
+    $row['video_url'] = $videoUrl;
+    $row['has_video'] = $videoUrl !== '';
+    $row['image_gallery_urls'] = admin_shopee_video_offer_gallery_urls($row);
+    $row['video_gallery_urls'] = admin_shopee_video_offer_video_gallery_urls($row);
+    $eligibleRows[] = $row;
+  }
+
+  $total = count($eligibleRows);
+  $pages = max(1, (int) ceil($total / max(1, $limit)));
+  $page = min($page, $pages);
+  $offset = ($page - 1) * $limit;
+
+  return [
+    'items' => array_slice($eligibleRows, $offset, $limit),
+    'total' => $total,
+    'page' => $page,
+    'limit' => $limit,
+    'pages' => $pages,
+    'total_visible' => $total,
+  ];
+}
+
+function admin_fetch_shopee_video_drafts(PDO $pdo, $status = '', $limit = 30) {
+  $limit = max(1, min((int) $limit, 100));
+  try {
+    $sql = "
+      SELECT
+        d.*,
+        o.slug,
+        o.loja,
+        o.categoria,
+        o.preco,
+        o.preco_antigo,
+        o.cupom,
+        o.imagem_url,
+        o.imagem_urls_json,
+        o.url_afiliado,
+        o.video_urls_json,
+        o.tags
+      FROM shopee_video_drafts d
+      INNER JOIN ofertas o
+        ON o.id = d.oferta_id
+    ";
+    $params = [];
+    if ($status !== '') {
+      $sql .= " WHERE d.status = ? ";
+      $params[] = $status;
+    }
+    $sql .= " ORDER BY d.updated_at DESC, d.id DESC LIMIT {$limit}";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll() ?: [];
+    foreach ($rows as &$row) {
+      $row['status_label'] = admin_shopee_video_status_label($row['status'] ?? '');
+      $row['status_class'] = admin_shopee_video_status_class($row['status'] ?? '');
+      $row['creative_payload'] = admin_shopee_video_json_decode($row['creative_payload_json'] ?? '');
+      $row['package_payload'] = admin_shopee_video_json_decode($row['package_payload_json'] ?? '');
+      $row['image_gallery_urls'] = admin_shopee_video_offer_gallery_urls($row);
+      $row['video_gallery_urls'] = admin_shopee_video_offer_video_gallery_urls($row);
+      $row['package_status_label'] = admin_shopee_video_package_status_label($row['package_status'] ?? '');
+      $row['package_status_class'] = admin_shopee_video_package_status_class($row['package_status'] ?? '');
+    }
+    unset($row);
+    return $rows;
+  } catch (Throwable $e) {
+    return [];
+  }
+}
+
+function admin_upsert_shopee_video_draft(PDO $pdo, $offerId, $mode = 'manual', $actorUserId = null, $actorLogin = null) {
+  $stmt = $pdo->prepare("
+    SELECT id, slug, titulo, preco, preco_antigo, desconto_percentual, preco_pix, parcelas_texto, frete_texto, categoria, cupom, imagem_url, url_afiliado, tags
+    FROM ofertas
+    WHERE id = ?
+      AND ativo = 1
+      AND loja = 'Shopee'
+    LIMIT 1
+  ");
+  $stmt->execute([(int) $offerId]);
+  $offer = $stmt->fetch();
+  if (!$offer) {
+    throw new RuntimeException('Oferta Shopee nao encontrada para criar o rascunho.');
+  }
+
+  $videoUrl = admin_shopee_video_offer_video_url($offer);
+  $normalizedMode = $mode === 'api' ? 'api' : 'manual';
+  $status = $videoUrl !== '' ? ($normalizedMode === 'api' ? 'api_blocked' : 'manual_ready') : 'needs_video';
+  $apiStatus = $normalizedMode === 'api' ? 'not_supported' : 'manual_only';
+  $notes = $normalizedMode === 'api'
+    ? 'Sem endpoint publico confirmado para publicar no Shopee Video. Use este rascunho no fluxo manual.'
+    : 'Rascunho pronto para postagem manual no app da Shopee.';
+  $creativePayload = admin_shopee_video_build_creative_payload($offer);
+  $caption = admin_shopee_video_default_caption($offer);
+  $offerUrl = '/oferta/' . rawurlencode((string) ($offer['slug'] ?? ''));
+
+  $upsert = $pdo->prepare("
+    INSERT INTO shopee_video_drafts
+      (oferta_id, status, publish_mode, title_snapshot, price_snapshot, caption, affiliate_url, offer_url, video_source_url, image_url, notes, creative_payload_json, package_status, api_status, created_by_admin_id, created_by_login, published_at, last_error, package_error)
+    VALUES
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+    ON DUPLICATE KEY UPDATE
+      status = VALUES(status),
+      publish_mode = VALUES(publish_mode),
+      title_snapshot = VALUES(title_snapshot),
+      price_snapshot = VALUES(price_snapshot),
+      caption = VALUES(caption),
+      affiliate_url = VALUES(affiliate_url),
+      offer_url = VALUES(offer_url),
+      video_source_url = VALUES(video_source_url),
+      image_url = VALUES(image_url),
+      notes = VALUES(notes),
+      creative_payload_json = VALUES(creative_payload_json),
+      package_status = CASE
+        WHEN package_payload_json IS NULL OR package_payload_json = '' THEN 'not_started'
+        ELSE 'stale'
+      END,
+      api_status = VALUES(api_status),
+      created_by_admin_id = VALUES(created_by_admin_id),
+      created_by_login = VALUES(created_by_login),
+      last_error = NULL,
+      package_error = NULL,
+      published_at = CASE WHEN VALUES(status) = 'published' THEN COALESCE(published_at, NOW()) ELSE published_at END
+  ");
+  $upsert->execute([
+    (int) $offer['id'],
+    $status,
+    $normalizedMode,
+    (string) $offer['titulo'],
+    (float) $offer['preco'],
+    $caption,
+    (string) $offer['url_afiliado'],
+    $offerUrl,
+    $videoUrl !== '' ? $videoUrl : null,
+    (string) ($offer['imagem_url'] ?? ''),
+    $notes,
+    json_encode($creativePayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+    'not_started',
+    $apiStatus,
+    $actorUserId !== null ? (int) $actorUserId : null,
+    $actorLogin !== null ? (string) $actorLogin : null,
+  ]);
+}
+
+function admin_update_shopee_video_draft_status(PDO $pdo, $draftId, $status) {
+  $allowed = ['manual_ready', 'needs_video', 'api_blocked', 'published', 'error', 'archived'];
+  $normalized = trim((string) $status);
+  if (!in_array($normalized, $allowed, true)) {
+    throw new RuntimeException('Status invalido para o rascunho do Shopee Video.');
+  }
+
+  $stmt = $pdo->prepare("
+    UPDATE shopee_video_drafts
+    SET status = ?,
+        published_at = CASE WHEN ? = 'published' THEN COALESCE(published_at, NOW()) ELSE published_at END,
+        updated_at = NOW()
+    WHERE id = ?
+    LIMIT 1
+  ");
+  $stmt->execute([$normalized, $normalized, (int) $draftId]);
+}
+
+function admin_store_shopee_video_package_result(PDO $pdo, $draftId, array $result) {
+  $existingStmt = $pdo->prepare("SELECT package_payload_json FROM shopee_video_drafts WHERE id = ? LIMIT 1");
+  $existingStmt->execute([(int) $draftId]);
+  $existingPayload = $existingStmt->fetchColumn();
+  if ($existingPayload) {
+    admin_delete_shopee_video_package_files(admin_shopee_video_json_decode($existingPayload));
+  }
+
+  $creativePayload = isset($result['creative']) && is_array($result['creative']) ? $result['creative'] : null;
+  $files = isset($result['files']) && is_array($result['files']) ? $result['files'] : [];
+  $warnings = isset($result['warnings']) && is_array($result['warnings']) ? array_values(array_filter(array_map('trim', $result['warnings']))) : [];
+  $hasReelVideo = !empty(($files['reel_video']['path'] ?? ''));
+  $hasAnyFile = false;
+  foreach ($files as $entry) {
+    if (!is_array($entry)) {
+      continue;
+    }
+    if (!empty($entry['path'])) {
+      $hasAnyFile = true;
+      break;
+    }
+  }
+  if ($hasReelVideo) {
+    $packageStatus = 'ready';
+    $packageError = $warnings ? implode(' | ', $warnings) : null;
+  } elseif ($hasAnyFile) {
+    $packageStatus = 'partial';
+    $packageError = $warnings ? implode(' | ', $warnings) : 'Pacote gerado sem o video base. Verifique o metadata/warnings.';
+  } else {
+    $packageStatus = 'error';
+    $packageError = $warnings ? implode(' | ', $warnings) : 'Pacote nao gerou arquivos utilizaveis.';
+  }
+  $stmt = $pdo->prepare("
+    UPDATE shopee_video_drafts
+    SET creative_payload_json = COALESCE(?, creative_payload_json),
+        package_payload_json = ?,
+        package_status = ?,
+        package_job_id = ?,
+        package_error = ?,
+        package_generated_at = NOW(),
+        updated_at = NOW()
+    WHERE id = ?
+    LIMIT 1
+  ");
+  $stmt->execute([
+    $creativePayload ? json_encode($creativePayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null,
+    json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+    $packageStatus,
+    trim((string) ($result['job_id'] ?? '')),
+    $packageError,
+    (int) $draftId,
+  ]);
+  return [
+    'status' => $packageStatus,
+    'error' => $packageError,
+    'has_reel_video' => $hasReelVideo,
+  ];
+}
+
+function admin_mark_shopee_video_package_error(PDO $pdo, $draftId, $message) {
+  $stmt = $pdo->prepare("
+    UPDATE shopee_video_drafts
+    SET package_status = 'error',
+        package_error = ?,
+        updated_at = NOW()
+    WHERE id = ?
+    LIMIT 1
+  ");
+  $stmt->execute([trim((string) $message), (int) $draftId]);
+}
+
+function admin_shopee_video_package_ttl_hours() {
+  return 24;
+}
+
+function admin_shopee_video_safe_local_path($path) {
+  $candidate = trim((string) $path);
+  if ($candidate === '') {
+    return null;
+  }
+  $realPath = realpath($candidate);
+  if ($realPath === false || !is_file($realPath)) {
+    return null;
+  }
+  $projectRoot = realpath(dirname(__DIR__, 2));
+  if ($projectRoot === false) {
+    return null;
+  }
+  if (!str_starts_with(str_replace('\\', '/', $realPath), str_replace('\\', '/', $projectRoot))) {
+    return null;
+  }
+  return $realPath;
+}
+
+function admin_delete_shopee_video_package_files($packagePayload) {
+  if (!is_array($packagePayload)) {
+    return 0;
+  }
+  $files = is_array($packagePayload['files'] ?? null) ? $packagePayload['files'] : [];
+  if (!$files) {
+    return 0;
+  }
+
+  $deleted = 0;
+  $directories = [];
+  foreach ($files as $entry) {
+    if (!is_array($entry)) {
+      continue;
+    }
+    $safePath = admin_shopee_video_safe_local_path($entry['path'] ?? '');
+    if ($safePath === null) {
+      continue;
+    }
+    $directory = dirname($safePath);
+    if (@unlink($safePath)) {
+      $deleted++;
+      $directories[$directory] = true;
+    }
+  }
+
+  $runtimeRoot = realpath(dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'automacao_ofertas' . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'shopee_video');
+  if ($runtimeRoot !== false) {
+    foreach (array_keys($directories) as $directory) {
+      $current = realpath($directory);
+      while ($current !== false && str_starts_with(str_replace('\\', '/', $current), str_replace('\\', '/', $runtimeRoot))) {
+        $items = @scandir($current);
+        if (!is_array($items) || count(array_diff($items, ['.', '..'])) > 0) {
+          break;
+        }
+        @rmdir($current);
+        if ($current === $runtimeRoot) {
+          break;
+        }
+        $current = realpath(dirname($current));
+      }
+    }
+  }
+
+  return $deleted;
+}
+
+function admin_reset_shopee_video_package(PDO $pdo, $draftId, $message = 'Pacote removido manualmente.') {
+  $draftId = (int) $draftId;
+  if ($draftId <= 0) {
+    return false;
+  }
+
+  try {
+    $stmt = $pdo->prepare("
+      SELECT package_payload_json
+      FROM shopee_video_drafts
+      WHERE id = ?
+      LIMIT 1
+    ");
+    $stmt->execute([$draftId]);
+    $row = $stmt->fetch();
+    if (!$row) {
+      return false;
+    }
+
+    admin_delete_shopee_video_package_files(admin_shopee_video_json_decode($row['package_payload_json'] ?? ''));
+
+    $updateStmt = $pdo->prepare("
+      UPDATE shopee_video_drafts
+      SET package_payload_json = NULL,
+          package_status = 'not_started',
+          package_job_id = NULL,
+          package_error = ?,
+          package_generated_at = NULL,
+          updated_at = NOW()
+      WHERE id = ?
+      LIMIT 1
+    ");
+    $updateStmt->execute([trim((string) $message), $draftId]);
+    return true;
+  } catch (Throwable $e) {
+    return false;
+  }
+}
+
+function admin_delete_shopee_video_package(PDO $pdo, $draftId) {
+  return admin_reset_shopee_video_package($pdo, $draftId, 'Pacote removido manualmente pelo admin.');
+}
+
+function admin_delete_shopee_video_draft(PDO $pdo, $draftId) {
+  $draftId = (int) $draftId;
+  if ($draftId <= 0) {
+    return false;
+  }
+
+  try {
+    $stmt = $pdo->prepare("
+      SELECT package_payload_json
+      FROM shopee_video_drafts
+      WHERE id = ?
+      LIMIT 1
+    ");
+    $stmt->execute([$draftId]);
+    $row = $stmt->fetch();
+    if (!$row) {
+      return false;
+    }
+
+    admin_delete_shopee_video_package_files(admin_shopee_video_json_decode($row['package_payload_json'] ?? ''));
+
+    $deleteStmt = $pdo->prepare("
+      DELETE FROM shopee_video_drafts
+      WHERE id = ?
+      LIMIT 1
+    ");
+    $deleteStmt->execute([$draftId]);
+    return $deleteStmt->rowCount() > 0;
+  } catch (Throwable $e) {
+    return false;
+  }
+}
+
+function admin_delete_all_shopee_video_drafts(PDO $pdo, $status = '') {
+  try {
+    $sql = "
+      SELECT id, package_payload_json
+      FROM shopee_video_drafts
+    ";
+    $params = [];
+    if ($status !== '') {
+      $sql .= " WHERE status = ? ";
+      $params[] = $status;
+    }
+    $sql .= " ORDER BY updated_at DESC, id DESC";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll() ?: [];
+    if (!$rows) {
+      return 0;
+    }
+
+    $deleteStmt = $pdo->prepare("
+      DELETE FROM shopee_video_drafts
+      WHERE id = ?
+      LIMIT 1
+    ");
+
+    $deleted = 0;
+    foreach ($rows as $row) {
+      admin_delete_shopee_video_package_files(admin_shopee_video_json_decode($row['package_payload_json'] ?? ''));
+      $deleteStmt->execute([(int) ($row['id'] ?? 0)]);
+      if ($deleteStmt->rowCount() > 0) {
+        $deleted++;
+      }
+    }
+    return $deleted;
+  } catch (Throwable $e) {
+    return 0;
+  }
+}
+
+function admin_delete_all_active_shopee_video_packages(PDO $pdo, $search = '') {
+  $ttlHours = admin_shopee_video_package_ttl_hours();
+  try {
+    $sql = "
+      SELECT d.id
+      FROM shopee_video_drafts d
+      INNER JOIN ofertas o
+        ON o.id = d.oferta_id
+      WHERE d.package_status IN ('ready', 'partial')
+        AND d.package_generated_at IS NOT NULL
+        AND d.package_generated_at >= (NOW() - INTERVAL {$ttlHours} HOUR)
+    ";
+    $params = [];
+    if ($search !== '') {
+      $sql .= " AND (d.title_snapshot LIKE ? OR o.categoria LIKE ? OR o.tags LIKE ?) ";
+      $like = '%' . $search . '%';
+      array_push($params, $like, $like, $like);
+    }
+    $sql .= " ORDER BY d.package_generated_at DESC, d.updated_at DESC";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll() ?: [];
+    if (!$rows) {
+      return 0;
+    }
+
+    $deleted = 0;
+    foreach ($rows as $row) {
+      if (admin_reset_shopee_video_package($pdo, (int) ($row['id'] ?? 0), 'Pacote removido manualmente em lote pelo admin.')) {
+        $deleted++;
+      }
+    }
+    return $deleted;
+  } catch (Throwable $e) {
+    return 0;
+  }
+}
+
+function admin_cleanup_expired_shopee_video_packages(PDO $pdo, $ttlHours = 24) {
+  $ttlHours = max(1, (int) $ttlHours);
+  try {
+    $stmt = $pdo->query("
+      SELECT id, package_payload_json
+      FROM shopee_video_drafts
+      WHERE package_payload_json IS NOT NULL
+        AND package_payload_json <> ''
+        AND package_generated_at IS NOT NULL
+        AND package_generated_at < (NOW() - INTERVAL {$ttlHours} HOUR)
+    ");
+    $rows = $stmt->fetchAll() ?: [];
+    if (!$rows) {
+      return 0;
+    }
+
+    $cleanupStmt = $pdo->prepare("
+      UPDATE shopee_video_drafts
+      SET package_payload_json = NULL,
+          package_status = 'not_started',
+          package_job_id = NULL,
+          package_error = ?,
+          package_generated_at = NULL,
+          updated_at = NOW()
+      WHERE id = ?
+      LIMIT 1
+    ");
+
+    $cleaned = 0;
+    foreach ($rows as $row) {
+      admin_delete_shopee_video_package_files(admin_shopee_video_json_decode($row['package_payload_json'] ?? ''));
+      $cleanupStmt->execute([
+        'Pacote removido automaticamente apos ' . $ttlHours . ' horas.',
+        (int) $row['id'],
+      ]);
+      $cleaned++;
+    }
+    return $cleaned;
+  } catch (Throwable $e) {
+    return 0;
+  }
+}
+
+function admin_fetch_shopee_video_packages(PDO $pdo, $search = '', $limit = 30) {
+  $limit = max(1, min((int) $limit, 100));
+  $ttlHours = admin_shopee_video_package_ttl_hours();
+  try {
+    $sql = "
+      SELECT
+        d.*,
+        o.slug,
+        o.loja,
+        o.categoria,
+        o.preco,
+        o.preco_antigo,
+        o.cupom,
+        o.imagem_url,
+        o.imagem_urls_json,
+        o.url_afiliado,
+        o.video_urls_json,
+        o.tags
+      FROM shopee_video_drafts d
+      INNER JOIN ofertas o
+        ON o.id = d.oferta_id
+      WHERE d.package_status IN ('ready', 'partial')
+        AND d.package_generated_at IS NOT NULL
+        AND d.package_generated_at >= (NOW() - INTERVAL {$ttlHours} HOUR)
+    ";
+    $params = [];
+    if ($search !== '') {
+      $sql .= " AND (d.title_snapshot LIKE ? OR o.categoria LIKE ? OR o.tags LIKE ?) ";
+      $like = '%' . $search . '%';
+      array_push($params, $like, $like, $like);
+    }
+    $sql .= " ORDER BY d.package_generated_at DESC, d.updated_at DESC LIMIT {$limit}";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll() ?: [];
+    foreach ($rows as &$row) {
+      $row['creative_payload'] = admin_shopee_video_json_decode($row['creative_payload_json'] ?? '');
+      $row['package_payload'] = admin_shopee_video_json_decode($row['package_payload_json'] ?? '');
+      $row['image_gallery_urls'] = admin_shopee_video_offer_gallery_urls($row);
+      $row['video_gallery_urls'] = admin_shopee_video_offer_video_gallery_urls($row);
+      $generatedAt = strtotime((string) ($row['package_generated_at'] ?? ''));
+      $expiresAt = $generatedAt ? ($generatedAt + ($ttlHours * 3600)) : 0;
+      $row['expires_at'] = $expiresAt ? date('Y-m-d H:i:s', $expiresAt) : '';
+      $row['expires_in_seconds'] = $expiresAt ? max(0, $expiresAt - time()) : 0;
+      $row['package_status_label'] = admin_shopee_video_package_status_label($row['package_status'] ?? '');
+      $row['package_status_class'] = admin_shopee_video_package_status_class($row['package_status'] ?? '');
+    }
+    unset($row);
+    return $rows;
+  } catch (Throwable $e) {
+    return [];
+  }
+}
+
+function admin_export_shopee_video_drafts_csv(PDO $pdo, array $draftIds) {
+  $ids = array_values(array_unique(array_filter(array_map('intval', $draftIds))));
+  if (!$ids) {
+    throw new RuntimeException('Selecione pelo menos um rascunho para exportar.');
+  }
+
+  $placeholders = implode(',', array_fill(0, count($ids), '?'));
+  $stmt = $pdo->prepare("
+    SELECT id, oferta_id, status, publish_mode, title_snapshot, price_snapshot, caption, affiliate_url, offer_url, video_source_url, image_url, notes, api_status, package_status, package_job_id, updated_at
+    FROM shopee_video_drafts
+    WHERE id IN ($placeholders)
+    ORDER BY updated_at DESC, id DESC
+  ");
+  $stmt->execute($ids);
+  $rows = $stmt->fetchAll() ?: [];
+  if (!$rows) {
+    throw new RuntimeException('Nenhum rascunho selecionado foi encontrado.');
+  }
+
+  $stream = fopen('php://temp', 'r+');
+  fputcsv($stream, ['draft_id', 'offer_id', 'status', 'publish_mode', 'title', 'price', 'caption', 'affiliate_url', 'offer_url', 'video_source_url', 'image_url', 'notes', 'api_status', 'package_status', 'package_job_id', 'updated_at'], ';');
+  foreach ($rows as $row) {
+    fputcsv($stream, [
+      (int) $row['id'],
+      (int) $row['oferta_id'],
+      (string) $row['status'],
+      (string) $row['publish_mode'],
+      (string) $row['title_snapshot'],
+      number_format((float) $row['price_snapshot'], 2, '.', ''),
+      (string) ($row['caption'] ?? ''),
+      (string) ($row['affiliate_url'] ?? ''),
+      (string) ($row['offer_url'] ?? ''),
+      (string) ($row['video_source_url'] ?? ''),
+      (string) ($row['image_url'] ?? ''),
+      (string) ($row['notes'] ?? ''),
+      (string) ($row['api_status'] ?? ''),
+      (string) ($row['package_status'] ?? ''),
+      (string) ($row['package_job_id'] ?? ''),
+      (string) ($row['updated_at'] ?? ''),
+    ], ';');
+  }
+  rewind($stream);
+  $csv = stream_get_contents($stream);
+  fclose($stream);
+  return (string) $csv;
 }
 

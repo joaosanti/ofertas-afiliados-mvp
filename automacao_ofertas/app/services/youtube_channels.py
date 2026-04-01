@@ -15,6 +15,7 @@ CREATE_YOUTUBE_CHANNEL_PROFILES_SQL = text(
       name VARCHAR(180) NOT NULL,
       handle VARCHAR(180) NULL,
       notes TEXT NULL,
+      source_channels TEXT NULL,
       avoid_terms TEXT NULL,
       preferred_terms TEXT NULL,
       viral_tone TEXT NULL,
@@ -42,6 +43,7 @@ CREATE_YOUTUBE_CHANNEL_PROFILES_SQL = text(
 )
 
 YOUTUBE_CHANNEL_PROFILE_ALTER_SQL: dict[str, str] = {
+    "source_channels": "ALTER TABLE youtube_channel_profiles ADD COLUMN source_channels TEXT NULL AFTER notes",
     "avoid_terms": "ALTER TABLE youtube_channel_profiles ADD COLUMN avoid_terms TEXT NULL AFTER notes",
     "preferred_terms": "ALTER TABLE youtube_channel_profiles ADD COLUMN preferred_terms TEXT NULL AFTER avoid_terms",
     "viral_tone": "ALTER TABLE youtube_channel_profiles ADD COLUMN viral_tone TEXT NULL AFTER preferred_terms",
@@ -142,6 +144,7 @@ def _row_to_profile(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "name": str(row.get("name") or ""),
         "handle": str(row.get("handle") or ""),
         "notes": str(row.get("notes") or ""),
+        "source_channels": str(row.get("source_channels") or ""),
         "avoid_terms": str(row.get("avoid_terms") or ""),
         "preferred_terms": str(row.get("preferred_terms") or ""),
         "viral_tone": str(row.get("viral_tone") or ""),
@@ -250,7 +253,7 @@ def create_youtube_channel_profile(db, payload: dict[str, Any]) -> dict[str, Any
             """
             INSERT INTO youtube_channel_profiles
             (
-              slug, name, handle, notes, avoid_terms, preferred_terms, viral_tone,
+              slug, name, handle, notes, source_channels, avoid_terms, preferred_terms, viral_tone,
               client_id, client_secret, redirect_uri,
               access_token, refresh_token, token_expires_at,
               oauth_state, channel_id, channel_title, channel_custom_url, channel_thumbnail_url,
@@ -258,7 +261,7 @@ def create_youtube_channel_profile(db, payload: dict[str, Any]) -> dict[str, Any
             )
             VALUES
             (
-              :slug, :name, :handle, :notes, :avoid_terms, :preferred_terms, :viral_tone,
+              :slug, :name, :handle, :notes, :source_channels, :avoid_terms, :preferred_terms, :viral_tone,
               :client_id, :client_secret, :redirect_uri,
               :access_token, :refresh_token, :token_expires_at,
               :oauth_state, :channel_id, :channel_title, :channel_custom_url, :channel_thumbnail_url,
@@ -271,6 +274,7 @@ def create_youtube_channel_profile(db, payload: dict[str, Any]) -> dict[str, Any
             "name": payload.get("name"),
             "handle": payload.get("handle") or None,
             "notes": payload.get("notes") or None,
+            "source_channels": payload.get("source_channels") or None,
             "avoid_terms": payload.get("avoid_terms") or None,
             "preferred_terms": payload.get("preferred_terms") or None,
             "viral_tone": payload.get("viral_tone") or None,
@@ -313,6 +317,7 @@ def update_youtube_channel_profile(db, profile_id: int, payload: dict[str, Any])
         "name",
         "handle",
         "notes",
+        "source_channels",
         "avoid_terms",
         "preferred_terms",
         "viral_tone",

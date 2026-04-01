@@ -12,6 +12,13 @@ import httpx
 
 from app.services.category_inference import infer_category_label
 
+try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+except Exception:  # noqa: BLE001
+    PlaywrightTimeoutError = Exception
+    sync_playwright = None
+
 
 SHOPEE_API_URL = "https://open-api.affiliate.shopee.com.br/graphql"
 DEFAULT_QUERY = """
@@ -90,6 +97,250 @@ def _clean_media_url(value: str) -> str:
     return media_url if media_url.startswith(("http://", "https://")) else ""
 
 
+def _normalize_shopee_image_candidate(value: str) -> str:
+    normalized = _clean_media_url(value)
+    if normalized:
+        normalized = re.sub(r"@resize_[^/?#]+", "", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"_(?:tn|thumbnail)(?=$|[?#])", "", normalized, flags=re.IGNORECASE)
+        return normalized
+
+    candidate = unescape(str(value or "").strip()).strip('"').strip("'")
+    if not candidate:
+        return ""
+    if re.fullmatch(r"(?:[a-z]{2,4}-)?[\w-]{18,120}", candidate, re.IGNORECASE):
+        return f"https://down-br.img.susercontent.com/file/{candidate}"
+    return ""
+
+
+def _dedupe_media_urls(urls: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        deduped.append(url)
+    return deduped
+
+
+def _is_shopee_gallery_image(url: str) -> bool:
+    value = _clean_media_url(url)
+    if not value:
+        return False
+    lowered = value.lower()
+    if lowered.endswith(".svg"):
+        return False
+    return "img.susercontent.com/file/" in lowered
+
+
+def _extract_browser_dom_offer(page: Any, source_url: str) -> dict[str, Any]:
+    final_url = str(page.url or source_url)
+    title = ""
+    try:
+        h1_values = page.locator("h1").all_inner_texts()
+        title = next((str(item or "").strip() for item in h1_values if str(item or "").strip()), "")
+    except Exception:  # noqa: BLE001
+        title = ""
+    if not title:
+        try:
+            title = str(page.title() or "").strip()
+        except Exception:  # noqa: BLE001
+            title = ""
+    title = re.sub(r"\s*\|\s*Shopee Brasil\s*$", "", title, flags=re.IGNORECASE).strip()
+
+    image_candidates: list[str] = []
+    try:
+        image_candidates = page.eval_on_selector_all(
+            "img",
+            """els => els.map((element) => (
+                element.currentSrc ||
+                element.getAttribute('src') ||
+                element.getAttribute('data-src') ||
+                ''
+            )).filter(Boolean)""",
+        )
+    except Exception:  # noqa: BLE001
+        image_candidates = []
+    image_urls = _dedupe_media_urls(
+        [
+            _normalize_shopee_image_candidate(url)
+            for url in image_candidates
+            if _is_shopee_gallery_image(url)
+        ]
+    )
+
+    video_candidates: list[str] = []
+    try:
+        video_candidates = page.eval_on_selector_all(
+            "video, source",
+            """els => els.map((element) => (
+                element.currentSrc ||
+                element.getAttribute('src') ||
+                ''
+            )).filter(Boolean)""",
+        )
+    except Exception:  # noqa: BLE001
+        video_candidates = []
+    video_urls = _dedupe_media_urls([_clean_media_url(url) for url in video_candidates])
+
+    tags = ["shopee", "manual"]
+    if video_urls:
+        encoded_video = urlsafe_b64encode(video_urls[0].encode("utf-8")).decode("ascii").rstrip("=")
+        tags.append(f"shopee_video_url:{encoded_video}")
+
+    return {
+        "title": title,
+        "description": f"Oferta Shopee importada manualmente de {source_url}",
+        "price": 0.0,
+        "old_price": None,
+        "url": final_url,
+        "canonical_url": final_url,
+        "image": image_urls[0] if image_urls else "",
+        "image_urls": image_urls,
+        "category": infer_category_label(title, "", source_url, final_url),
+        "tags": ",".join(tags),
+        "featured": 0,
+        "coupon": None,
+        "affiliate_tag": os.getenv("SHOPEE_AFFILIATE_TAG", "").strip(),
+        "video_url": video_urls[0] if video_urls else None,
+        "video_urls": video_urls,
+    }
+
+
+def _extract_image_urls_from_html(html_text: str) -> list[str]:
+    patterns = [
+        r'"images"\s*:\s*\[([^\]]+)\]',
+        r'"image"\s*:\s*\[([^\]]+)\]',
+        r'"imageList"\s*:\s*\[([^\]]+)\]',
+        r'"image_list"\s*:\s*\[([^\]]+)\]',
+        r'"imageUrlList"\s*:\s*\[([^\]]+)\]',
+        r'"image_url_list"\s*:\s*\[([^\]]+)\]',
+        r'"thumbnailList"\s*:\s*\[([^\]]+)\]',
+        r'"thumbnail_list"\s*:\s*\[([^\]]+)\]',
+    ]
+    single_patterns = [
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+        r'"imageUrl"\s*:\s*"([^"]+)"',
+        r'"image_url"\s*:\s*"([^"]+)"',
+        r'"thumbnailUrl"\s*:\s*"([^"]+)"',
+        r'"thumbnail_url"\s*:\s*"([^"]+)"',
+        r'"@type":"Product".*?"image":"([^"]+)"',
+    ]
+
+    urls: list[str] = []
+    for pattern in patterns:
+        for match in re.findall(pattern, html_text, re.IGNORECASE | re.DOTALL):
+            inner_matches = re.findall(r'"([^"]+)"', str(match or ""))
+            urls.extend(_normalize_shopee_image_candidate(item) for item in inner_matches)
+
+    for pattern in single_patterns:
+        for match in re.findall(pattern, html_text, re.IGNORECASE | re.DOTALL):
+            urls.append(_normalize_shopee_image_candidate(str(match or "")))
+
+    prioritized = [
+        url
+        for url in urls
+        if any(token in url.lower() for token in ("/file/", "susercontent", "cf.shopee", "deo.shopeemobile"))
+    ]
+    fallback = [url for url in urls if url not in prioritized]
+    return _dedupe_media_urls(prioritized + fallback)
+
+
+def _playwright_fallback_enabled() -> bool:
+    value = (os.getenv("SHOPEE_BROWSER_FALLBACK_ENABLED") or "false").strip().lower()
+    return value in {"1", "true", "on", "yes", "sim"}
+
+
+def _playwright_fallback_timeout_ms() -> int:
+    raw = (os.getenv("SHOPEE_BROWSER_FALLBACK_TIMEOUT_MS") or "45000").strip() or "45000"
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return 45000
+    return max(10000, min(parsed, 120000))
+
+
+def _merge_offer_media(base_offer: dict[str, Any], fallback_offer: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base_offer)
+    merged_images = _dedupe_media_urls(
+        list(base_offer.get("image_urls") or [])
+        + list(fallback_offer.get("image_urls") or [])
+        + ([str(base_offer.get("image") or "").strip()] if base_offer.get("image") else [])
+        + ([str(fallback_offer.get("image") or "").strip()] if fallback_offer.get("image") else [])
+    )
+    merged_videos = _dedupe_media_urls(
+        list(base_offer.get("video_urls") or [])
+        + list(fallback_offer.get("video_urls") or [])
+        + ([str(base_offer.get("video_url") or "").strip()] if base_offer.get("video_url") else [])
+        + ([str(fallback_offer.get("video_url") or "").strip()] if fallback_offer.get("video_url") else [])
+    )
+
+    if merged_images:
+        merged["image_urls"] = merged_images
+        merged["image"] = merged_images[0]
+    if merged_videos:
+        merged["video_urls"] = merged_videos
+        merged["video_url"] = merged_videos[0]
+        tags = [part.strip() for part in str(merged.get("tags") or "").split(",") if part.strip()]
+        if not any(tag.startswith("shopee_video_url:") for tag in tags):
+            encoded_video = urlsafe_b64encode(merged_videos[0].encode("utf-8")).decode("ascii").rstrip("=")
+            tags.append(f"shopee_video_url:{encoded_video}")
+            merged["tags"] = ",".join(dict.fromkeys(tags))
+
+    if (len(merged_images) > 1 or merged_videos) and fallback_offer.get("canonical_url"):
+        merged["canonical_url"] = fallback_offer["canonical_url"]
+    return merged
+
+
+def _render_offer_via_browser(source_url: str) -> dict[str, Any] | None:
+    if sync_playwright is None or not _playwright_fallback_enabled():
+        return None
+
+    timeout_ms = _playwright_fallback_timeout_ms()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 2200},
+                locale="pt-BR",
+                user_agent=_build_browser_headers()["User-Agent"],
+            )
+            page = context.new_page()
+            try:
+                page.goto(source_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                page.wait_for_timeout(9000)
+                final_url = str(page.url or source_url)
+                dom_offer = _extract_browser_dom_offer(page, source_url)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    html_text = page.content()
+                except Exception:  # noqa: BLE001
+                    html_text = ""
+                if not html_text or len(html_text) < 2000:
+                    return dom_offer if dom_offer.get("title") or dom_offer.get("image_urls") else None
+                try:
+                    parsed_offer = _manual_offer_from_html(source_url, final_url, html_text)
+                except Exception:  # noqa: BLE001
+                    parsed_offer = {}
+                if parsed_offer:
+                    return _merge_offer_media(parsed_offer, dom_offer)
+                return dom_offer if dom_offer.get("title") or dom_offer.get("image_urls") else None
+            finally:
+                context.close()
+                browser.close()
+    except (PlaywrightTimeoutError, ValueError):
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _extract_video_urls_from_html(html_text: str) -> list[str]:
     patterns = [
         r'"videoUrl"\s*:\s*"([^"]+)"',
@@ -110,14 +361,7 @@ def _extract_video_urls_from_html(html_text: str) -> list[str]:
                 continue
             urls.append(_clean_media_url(str(match or "")))
 
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for url in urls:
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        deduped.append(url)
-    return deduped
+    return _dedupe_media_urls(urls)
 
 
 def _clean_coupon_text(value: Any) -> str | None:
@@ -250,14 +494,8 @@ def _manual_offer_from_html(source_url: str, final_url: str, html_text: str) -> 
         ],
     )
     title = re.sub(r"\s*\|\s*Shopee Brasil\s*$", "", title, flags=re.IGNORECASE).strip()
-    image = _extract_first(
-        html_text,
-        [
-            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
-            r'"@type":"Product".*?"image":"([^"]+)"',
-        ],
-    )
+    image_urls = _extract_image_urls_from_html(html_text)
+    image = image_urls[0] if image_urls else ""
     description = _extract_first(
         html_text,
         [
@@ -337,6 +575,7 @@ def _manual_offer_from_html(source_url: str, final_url: str, html_text: str) -> 
         "url": final_url or source_url,
         "canonical_url": final_url or source_url,
         "image": image,
+        "image_urls": image_urls,
         "category": infer_category_label(title, description, source_url, final_url),
         "tags": ",".join(tags),
         "featured": 0,
@@ -382,6 +621,10 @@ def preview_shopee_affiliate_links(links: list[str]) -> list[dict[str, Any]]:
                 reverse=True,
             )
             selected = dict(candidates[0])
+            if len(selected.get("image_urls") or []) <= 1 or not (selected.get("video_urls") or []):
+                browser_offer = _render_offer_via_browser(resolved_affiliate_url or link)
+                if browser_offer:
+                    selected = _merge_offer_media(selected, browser_offer)
             if resolved_affiliate_url:
                 selected["url"] = resolved_affiliate_url
                 if _is_shopee_short_url(selected.get("canonical_url") or ""):
@@ -416,6 +659,8 @@ def _fetch_feed_offers() -> list[dict[str, Any]]:
                 "old_price": float(item.get("old_price")) if item.get("old_price") else None,
                 "url": item.get("url", "#"),
                 "image": item.get("image", ""),
+                "image_urls": item.get("image_urls") or ([item.get("image")] if item.get("image") else []),
+                "video_urls": item.get("video_urls") or ([item.get("video_url")] if item.get("video_url") else []),
                 "category": item.get("category") or infer_category_label(item.get("title"), item.get("description"), item.get("url")),
                 "tags": item.get("tags", "shopee"),
                 "featured": int(item.get("featured", 0)),
@@ -471,13 +716,26 @@ def _node_to_offer(node: dict[str, Any], keyword: str, affiliate_tag: str) -> di
     if sales > 0:
         tags.append(f"sold:{sales}")
 
+    image_url = node.get("imageUrl") or node.get("image") or ""
+    image_urls = [
+        _clean_media_url(str(value))
+        for value in (
+            node.get("imageUrlList")
+            or node.get("image_url_list")
+            or node.get("images")
+            or ([image_url] if image_url else [])
+        )
+        if _clean_media_url(str(value))
+    ]
+
     return {
         "title": node.get("productName") or node.get("title") or "Oferta Shopee",
         "description": f"Oferta Shopee encontrada para: {keyword}",
         "price": price,
         "old_price": old_price if old_price and old_price > price else None,
         "url": node.get("offerLink") or node.get("productLink") or "#",
-        "image": node.get("imageUrl") or node.get("image") or "",
+        "image": image_url,
+        "image_urls": _dedupe_media_urls(image_urls),
         "category": category,
         "tags": ",".join(dict.fromkeys(tags)),
         "featured": 0,
