@@ -1,8 +1,10 @@
 import os
 import re
+from typing import Any
 from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urlparse, urlunparse
 
-from sqlalchemy import text
+import httpx
+from sqlalchemy import bindparam, text
 
 from app.services.manual_link_import import preview_manual_affiliate_links
 from app.services.normalize import _extract_meli_item_id, _has_meli_affiliate_marker, ensure_affiliate_link
@@ -46,6 +48,18 @@ SELECT_STORE_OFFERS_SQL = text(
     ORDER BY id DESC
     """
 )
+
+SELECT_SHOPEE_OFFER_POOL_SQL = text(
+    """
+    SELECT id, titulo, url_afiliado, ativo, criado_em, atualizado_em
+    FROM ofertas
+    WHERE LOWER(loja) = 'shopee'
+    ORDER BY COALESCE(atualizado_em, criado_em) DESC, id DESC
+    """
+)
+
+DELETE_CLICKS_BY_OFFER_IDS_SQL = text("DELETE FROM cliques WHERE oferta_id IN :ids").bindparams(bindparam("ids", expanding=True))
+DELETE_OFFERS_BY_IDS_SQL = text("DELETE FROM ofertas WHERE id IN :ids").bindparams(bindparam("ids", expanding=True))
 
 
 def _has_exact_amazon_tag(url: str, affiliate_tag: str) -> bool:
@@ -175,6 +189,115 @@ def _has_shopee_affiliate_marker(url: str) -> bool:
         or "an_" in value
         or "s.shopee.com.br/" in value
     )
+
+
+def _shopee_check_headers() -> dict[str, str]:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+
+def _shopee_offer_is_accessible(client: httpx.Client, url: str) -> tuple[bool, str, str, int]:
+    candidate = str(url or "").strip()
+    if not candidate:
+        return False, "sem_url", "", 0
+
+    try:
+        response = client.get(candidate, headers=_shopee_check_headers(), follow_redirects=True)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"erro_http:{str(exc)}", "", 0
+
+    status_code = int(response.status_code or 0)
+    final_url = str(response.url or candidate)
+    if status_code >= 400:
+        return False, f"http_{status_code}", final_url, status_code
+
+    body = (response.text or "")[:12000].lower()
+    invalid_markers = (
+        "produto não encontrado",
+        "produto nao encontrado",
+        "produto indisponível",
+        "produto indisponivel",
+        "página não encontrada",
+        "pagina nao encontrada",
+        "page not found",
+        "item not found",
+        "this product is unavailable",
+        "produto foi removido",
+        "sorry, this product is no longer available",
+    )
+    if any(marker in body for marker in invalid_markers):
+        return False, "conteudo_indisponivel", final_url, status_code
+
+    final_host = (urlparse(final_url).netloc or "").lower()
+    if "shopee" not in final_host:
+        return False, f"redirecionado:{final_host or 'desconhecido'}", final_url, status_code
+
+    if "<title>shopee</title>" in body and "/product/" not in final_url and "/br/" not in final_url:
+        return False, "sem_produto_final", final_url, status_code
+
+    return True, "ok", final_url, status_code
+
+
+def _delete_offer_ids(db, offer_ids: list[int]) -> int:
+    normalized_ids = sorted({int(offer_id) for offer_id in (offer_ids or []) if int(offer_id) > 0})
+    if not normalized_ids:
+        return 0
+    db.execute(DELETE_CLICKS_BY_OFFER_IDS_SQL, {"ids": normalized_ids})
+    db.execute(DELETE_OFFERS_BY_IDS_SQL, {"ids": normalized_ids})
+    return len(normalized_ids)
+
+
+def cleanup_shopee_offer_pool(
+    db,
+    *,
+    keep_latest: int = 500,
+    validate_links: bool = True,
+) -> dict[str, Any]:
+    rows = [dict(row) for row in db.execute(SELECT_SHOPEE_OFFER_POOL_SQL).mappings().all()]
+    keep_latest = max(1, int(keep_latest or 500))
+    kept_rows = rows[:keep_latest]
+    trimmed_rows = rows[keep_latest:]
+
+    trimmed_ids = [int(row["id"]) for row in trimmed_rows]
+    trimmed_deleted = _delete_offer_ids(db, trimmed_ids)
+
+    checked = 0
+    invalid_items: list[dict[str, Any]] = []
+    invalid_ids: list[int] = []
+    if validate_links and kept_rows:
+        with httpx.Client(timeout=20) as client:
+            for row in kept_rows:
+                checked += 1
+                accessible, reason, final_url, status_code = _shopee_offer_is_accessible(client, str(row.get("url_afiliado") or ""))
+                if accessible:
+                    continue
+                invalid_ids.append(int(row["id"]))
+                invalid_items.append(
+                    {
+                        "id": int(row["id"]),
+                        "titulo": str(row.get("titulo") or ""),
+                        "url": str(row.get("url_afiliado") or ""),
+                        "final_url": final_url,
+                        "status_code": status_code,
+                        "reason": reason,
+                    }
+                )
+
+    invalid_deleted = _delete_offer_ids(db, invalid_ids)
+    return {
+        "processed_total": len(rows),
+        "kept_latest": keep_latest,
+        "checked_links": checked,
+        "trimmed_deleted": trimmed_deleted,
+        "invalid_deleted": invalid_deleted,
+        "invalid_items": invalid_items[:20],
+    }
 
 
 def _sanitize_shopee_affiliate_url(url: str) -> str:

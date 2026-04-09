@@ -2,6 +2,8 @@ import json
 import os
 import re
 import secrets
+import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -19,10 +21,13 @@ from pydantic import BaseModel
 
 from app.collectors.amazon import fetch_amazon_offers
 from app.collectors.mercadolivre import fetch_mercadolivre_offers, preview_mercadolivre_offers
-from app.collectors.shopee import fetch_shopee_offers, preview_shopee_affiliate_links, preview_shopee_offers
+from app.collectors.shopee import enrich_shopee_offers_with_media, fetch_shopee_offers, preview_shopee_affiliate_links, preview_shopee_offers
 from app.collectors.tiktok import fetch_tiktok_offers
 from app.database import SessionLocal
 from app.integrations.youtube_oauth import (
+    _fetch_recent_uploads_from_channel_list,
+    _split_channel_sources,
+    _videos_details,
     build_channel_trend_ideas,
     build_youtube_auth_url,
     exchange_youtube_code,
@@ -95,6 +100,7 @@ from app.services.social_meta import (
     publish_instagram_container,
     wait_for_instagram_container_ready,
 )
+from app.services.shopee_video import build_shopee_social_video_asset, queue_shopee_video_drafts_for_offers
 from app.services.whatsapp_social import (
     list_whatsapp_groups,
     prepare_whatsapp_group_batch,
@@ -104,6 +110,7 @@ from app.services.whatsapp_social import (
 )
 from app.services.youtube_cuts import analyze_youtube_video_for_cuts
 from app.services.youtube_cuts import build_youtube_cut_publish_draft
+from app.services.youtube_cuts import extract_youtube_video_id
 from app.services.youtube_cuts import rerender_youtube_cut
 from app.services.youtube_cuts import youtube_cut_video_path
 from app.services.youtube_cuts import process_youtube_video_for_cuts
@@ -115,10 +122,10 @@ ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 scheduler: AutomationScheduler | None = None
 
 AUTO_SOCIAL_SUPPORTED_MODES: dict[str, tuple[str, ...]] = {
-    "facebook": ("feed", "reel", "feed_story_reel"),
-    "instagram": ("feed", "reel", "feed_story", "feed_story_reel"),
-    "both": ("feed", "reel", "feed_story", "feed_story_reel"),
-    "facebook_instagram": ("feed", "reel", "feed_story", "feed_story_reel"),
+    "facebook": ("feed", "reel", "reel_story", "feed_story_reel"),
+    "instagram": ("feed", "reel", "story", "reel_story", "feed_story", "feed_story_reel"),
+    "both": ("feed", "reel", "reel_story", "feed_story", "feed_story_reel"),
+    "facebook_instagram": ("feed", "reel", "reel_story", "feed_story", "feed_story_reel"),
     "whatsapp": ("group",),
 }
 
@@ -238,6 +245,12 @@ class MetaInstagramStoryCreatePayload(BaseModel):
 
 class DashboardImportRunPayload(BaseModel):
     providers: list[str] | None = None
+    limit: int | None = None
+    keyword: str | None = None
+
+
+class DashboardShopeeReimportPayload(BaseModel):
+    limit: int | None = 25
 
 
 class DashboardShopeeLinksPayload(BaseModel):
@@ -901,18 +914,50 @@ def _auto_social_candidate_score(item: dict[str, Any]) -> float:
     return (clicks * 12.0) + (discount * 4.0) + coupon_bonus + min(price / 100.0, 15.0) + video_bonus
 
 
+def _build_auto_social_candidate_previews(db, candidate_limit: int) -> list[dict[str, Any]]:
+    preferred_stores = ["Amazon", "Mercado Livre", "Shopee"]
+    per_store_limit = max(18, min(90, max(1, candidate_limit)))
+    seen_offer_ids: set[int] = set()
+    combined: list[dict[str, Any]] = []
+
+    for store_name in preferred_stores:
+        store_items = build_meta_post_previews(
+            db,
+            limit=per_store_limit,
+            include_story_assets=False,
+            include_square_card_assets=False,
+            store_filter=store_name,
+        )
+        for item in store_items:
+            offer_id = int(item.get("offer_id") or 0)
+            if offer_id <= 0 or offer_id in seen_offer_ids:
+                continue
+            seen_offer_ids.add(offer_id)
+            combined.append(item)
+
+    fallback_items = build_meta_post_previews(
+        db,
+        limit=max(candidate_limit, 60),
+        include_story_assets=False,
+        include_square_card_assets=False,
+    )
+    for item in fallback_items:
+        offer_id = int(item.get("offer_id") or 0)
+        if offer_id <= 0 or offer_id in seen_offer_ids:
+            continue
+        seen_offer_ids.add(offer_id)
+        combined.append(item)
+
+    return combined
+
+
 def _pick_auto_social_offer_ids(db, platform: str, mode: str, limit: int = 1) -> list[int]:
-    candidate_limit = max(24, min(160, max(1, limit) * 40))
+    candidate_limit = max(90, min(240, max(1, limit) * 90))
     recent_id_list = _recent_site_social_offer_ids(db, 20)
     recent_ids = set(recent_id_list)
     recent_block_minutes = _auto_social_repeat_block_minutes()
     blocked_recent_ids = _recent_social_offer_ids_within_minutes(db, recent_block_minutes)
-    previews = build_meta_post_previews(
-        db,
-        limit=candidate_limit,
-        include_story_assets=False,
-        include_square_card_assets=False,
-    )
+    previews = _build_auto_social_candidate_previews(db, candidate_limit)
     candidates = [
         item
         for item in previews
@@ -929,6 +974,7 @@ def _pick_auto_social_offer_ids(db, platform: str, mode: str, limit: int = 1) ->
         return []
 
     recent_store_counts: dict[str, int] = {}
+    recent_store_positions: dict[str, int] = {}
     if recent_ids:
         placeholders = ",".join(str(int(offer_id)) for offer_id in sorted(recent_ids))
         store_rows = db.execute(
@@ -944,6 +990,10 @@ def _pick_auto_social_offer_ids(db, platform: str, mode: str, limit: int = 1) ->
             store_key = (str(row.get("loja") or "") or "loja").strip().lower()
             recent_store_counts[store_key] = recent_store_counts.get(store_key, 0) + 1
         recent_store_map = {int(row["id"]): (str(row.get("loja") or "") or "loja").strip().lower() for row in store_rows}
+        for index, offer_id in enumerate(recent_id_list):
+            store_key = recent_store_map.get(int(offer_id))
+            if store_key and store_key not in recent_store_positions:
+                recent_store_positions[store_key] = index
         last_store_key = recent_store_map.get(int(recent_id_list[0])) if recent_id_list else None
     else:
         last_store_key = None
@@ -965,7 +1015,9 @@ def _pick_auto_social_offer_ids(db, platform: str, mode: str, limit: int = 1) ->
     ordered_store_keys = sorted(
         grouped.keys(),
         key=lambda key: (
-            1 if last_store_key and key == last_store_key else 0,
+            1 if len(grouped) > 1 and last_store_key and key == last_store_key else 0,
+            0 if key not in recent_store_positions else 1,
+            -recent_store_positions.get(key, len(recent_id_list) + 100),
             recent_store_counts.get(key, 0),
             -_auto_social_candidate_score(grouped[key][0]),
             key,
@@ -1154,7 +1206,7 @@ def _manager_login_html(error: str | None = None) -> str:
 def _env_settings_snapshot() -> dict:
     auto_social_platform, auto_social_mode = _normalize_auto_social_action(
         os.getenv("AUTO_SOCIAL_PLATFORM") or "facebook",
-        os.getenv("AUTO_SOCIAL_MODE") or "feed_story_reel",
+        os.getenv("AUTO_SOCIAL_MODE") or "reel_story",
     )
     db = SessionLocal()
     try:
@@ -1245,6 +1297,7 @@ def _import_provider(db, store: str, offers: list[dict]) -> dict:
     created = 0
     updated = 0
     skipped = 0
+    imported_items: list[dict[str, Any]] = []
     for raw in offers:
         if store.strip().lower() == "mercado livre" and not _has_meli_affiliate_marker(str(raw.get("url") or "")):
             skipped += 1
@@ -1258,7 +1311,24 @@ def _import_provider(db, store: str, offers: list[dict]) -> dict:
             updated += 1
         else:
             skipped += 1
-    return {"processed": processed, "created": created, "updated": updated, "skipped": skipped}
+        if action in {"created", "updated"}:
+            published_state = _published_offer_state(db, normalized)
+            if published_state is not None:
+                imported_items.append(
+                    {
+                        "offer_id": int(published_state["id"]),
+                        "title": str(published_state.get("titulo") or normalized.titulo),
+                        "action": action,
+                        "has_video": bool(published_state.get("has_video")),
+                    }
+                )
+    return {
+        "processed": processed,
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "items": imported_items,
+    }
 
 
 def _raise_meta_http_error(exc: httpx.HTTPStatusError) -> HTTPException:
@@ -1392,9 +1462,352 @@ def _provider_fetcher(key: str):
     return mapping[key]
 
 
-def execute_import_run(providers: list[str] | None = None) -> dict:
+def _published_offer_state(db, normalized_offer) -> dict[str, Any] | None:
+    normalized_store = str(normalized_offer.loja or "").strip().lower()
+    normalized_url = str(normalized_offer.url_afiliado or "").strip()
+    row = None
+    if normalized_url:
+        row = db.execute(
+            PUBLISHED_OFFER_BY_URL_SQL,
+            {"url": normalized_url, "store": normalized_store},
+        ).mappings().first()
+    if row is None:
+        row = db.execute(
+            PUBLISHED_OFFER_BY_SLUG_SQL,
+            {"slug": build_slug(normalized_offer.titulo), "store": normalized_store},
+        ).mappings().first()
+    if row is None:
+        return None
+    payload = dict(row)
+    payload["has_video"] = _shopee_offer_has_video_state(payload)
+    return payload
+
+
+SHOPEE_IMPORT_EXISTING_SQL = text(
+    """
+    SELECT
+      id,
+      url_afiliado,
+      tags,
+      video_urls_json,
+      criado_em,
+      atualizado_em
+    FROM ofertas
+    WHERE LOWER(loja) = 'shopee'
+      AND url_afiliado IN :urls
+    """
+).bindparams(bindparam("urls", expanding=True))
+
+PUBLISHED_OFFER_BY_URL_SQL = text(
+    """
+    SELECT
+      id,
+      titulo,
+      tags,
+      video_urls_json
+    FROM ofertas
+    WHERE url_afiliado = :url
+      AND LOWER(loja) = :store
+    LIMIT 1
+    """
+)
+
+PUBLISHED_OFFER_BY_SLUG_SQL = text(
+    """
+    SELECT
+      id,
+      titulo,
+      tags,
+      video_urls_json
+    FROM ofertas
+    WHERE slug = :slug
+      AND LOWER(loja) = :store
+    LIMIT 1
+    """
+)
+
+SHOPEE_IMPORT_EXISTING_TITLE_SQL = text(
+    """
+    SELECT
+      id,
+      titulo,
+      url_afiliado,
+      tags,
+      video_urls_json,
+      criado_em,
+      atualizado_em
+    FROM ofertas
+    WHERE LOWER(loja) = 'shopee'
+      AND titulo IN :titles
+    ORDER BY atualizado_em DESC, id DESC
+    """
+).bindparams(bindparam("titles", expanding=True))
+
+
+def _shopee_offer_title_key(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _shopee_offer_has_video_state(row: dict[str, Any]) -> bool:
+    tags = str(row.get("tags") or "")
+    if "offer_video_url:" in tags or "shopee_video_url:" in tags:
+        return True
+    return bool(_decode_json_url_list(row.get("video_urls_json")))
+
+
+def _shopee_offer_is_recent(row: dict[str, Any]) -> bool:
+    reference = row.get("atualizado_em") or row.get("criado_em")
+    if reference is None:
+        return False
+    if isinstance(reference, str):
+        try:
+            reference = datetime.fromisoformat(reference.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    if not isinstance(reference, datetime):
+        return False
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - reference) < timedelta(hours=24)
+
+
+def _preserve_existing_shopee_video_data(offer: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(offer)
+    current_tags = [part.strip() for part in str(merged.get("tags") or "").split(",") if part.strip()]
+    preserved_tags = [
+        part.strip()
+        for part in str(row.get("tags") or "").split(",")
+        if part.strip().startswith(("offer_video_url:", "shopee_video_url:"))
+    ]
+    for tag in preserved_tags:
+        if tag not in current_tags:
+            current_tags.append(tag)
+    if current_tags:
+        merged["tags"] = ",".join(current_tags)
+
+    existing_video_urls = _decode_json_url_list(row.get("video_urls_json"))
+    if existing_video_urls:
+        merged["video_urls"] = existing_video_urls
+        merged["video_url"] = existing_video_urls[0]
+    return merged
+
+
+def _shopee_import_pool_limit(limit: int | None) -> int | None:
+    normalized_limit = _normalize_import_limit(limit)
+    if normalized_limit is None:
+        return None
+    return max(normalized_limit * 8, 40)
+
+
+def _merge_shopee_import_candidate(base_item: dict[str, Any], enriched_item: dict[str, Any] | None = None) -> dict[str, Any]:
+    merged_item = dict(base_item)
+    if isinstance(enriched_item, dict):
+        merged_item.update(enriched_item)
+
+    merged_item["store"] = "Shopee"
+    merged_item["provider"] = "shopee"
+
+    if float(merged_item.get("price") or 0) <= 0 and float(base_item.get("price") or 0) > 0:
+        merged_item["price"] = float(base_item.get("price") or 0)
+    if (not merged_item.get("old_price")) and base_item.get("old_price") not in (None, ""):
+        merged_item["old_price"] = base_item.get("old_price")
+    if not str(merged_item.get("title") or "").strip():
+        merged_item["title"] = base_item.get("title") or "Oferta Shopee"
+    if not str(merged_item.get("description") or "").strip():
+        merged_item["description"] = base_item.get("description") or "Oferta Shopee importada da busca."
+    if not str(merged_item.get("category") or "").strip():
+        merged_item["category"] = base_item.get("category") or "ofertas"
+    if not str(merged_item.get("url") or "").strip():
+        merged_item["url"] = base_item.get("url") or ""
+    if not str(merged_item.get("canonical_url") or "").strip():
+        merged_item["canonical_url"] = base_item.get("canonical_url") or merged_item.get("url") or ""
+    if not str(merged_item.get("image") or "").strip() and str(base_item.get("image") or "").strip():
+        merged_item["image"] = base_item.get("image")
+    if not merged_item.get("image_urls") and base_item.get("image_urls"):
+        merged_item["image_urls"] = base_item.get("image_urls")
+    if not merged_item.get("video_urls") and base_item.get("video_urls"):
+        merged_item["video_urls"] = base_item.get("video_urls")
+    if not merged_item.get("video_url") and base_item.get("video_url"):
+        merged_item["video_url"] = base_item.get("video_url")
+    if not str(merged_item.get("tags") or "").strip():
+        merged_item["tags"] = base_item.get("tags") or "shopee"
+    return merged_item
+
+
+def _shopee_candidate_has_video(offer: dict[str, Any]) -> bool:
+    if str(offer.get("video_url") or "").strip():
+        return True
+    if any(str(url or "").strip() for url in (offer.get("video_urls") or [])):
+        return True
+    tags = str(offer.get("tags") or "")
+    return "offer_video_url:" in tags or "shopee_video_url:" in tags
+
+
+def _shopee_candidate_has_media(offer: dict[str, Any]) -> bool:
+    if _shopee_candidate_has_video(offer):
+        return True
+    image_urls = [str(url or "").strip() for url in (offer.get("image_urls") or []) if str(url or "").strip()]
+    if len(image_urls) >= 2:
+        return True
+    return str(offer.get("image") or "").strip() != ""
+
+
+def _prepare_shopee_import_offers(
+    db,
+    offers: list[dict[str, Any]],
+    limit: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    if not offers:
+        return [], {
+            "offers_selected": 0,
+            "recent_skipped": 0,
+            "existing_video_skipped": 0,
+            "existing_video_updated": 0,
+        }
+
+    target = max(1, int(limit)) if limit is not None else len(offers)
+    candidates: list[dict[str, Any]] = []
+    lookup_urls: list[str] = []
+    for offer in offers:
+        candidate = dict(offer)
+        normalized = normalize_offer(candidate, "Shopee", candidate.get("affiliate_tag"))
+        normalized_url = str(normalized.url_afiliado or "").strip()
+        candidate["_job_affiliate_url"] = normalized_url
+        candidate["_job_title_key"] = _shopee_offer_title_key(candidate.get("title"))
+        candidates.append(candidate)
+        if normalized_url:
+            lookup_urls.append(normalized_url)
+    lookup_titles = sorted({_shopee_offer_title_key(offer.get("title")) for offer in candidates if _shopee_offer_title_key(offer.get("title"))})
+
+    existing_rows_by_url = (
+        db.execute(SHOPEE_IMPORT_EXISTING_SQL, {"urls": sorted(set(lookup_urls))}).mappings().all()
+        if lookup_urls
+        else []
+    )
+    existing_rows_by_title = (
+        db.execute(SHOPEE_IMPORT_EXISTING_TITLE_SQL, {"titles": lookup_titles}).mappings().all()
+        if lookup_titles
+        else []
+    )
+    existing_by_url = {str(row["url_afiliado"] or "").strip(): dict(row) for row in existing_rows_by_url}
+    existing_by_title: dict[str, dict[str, Any]] = {}
+    for row in existing_rows_by_title:
+        title_key = _shopee_offer_title_key(row.get("titulo"))
+        if title_key and title_key not in existing_by_title:
+            existing_by_title[title_key] = dict(row)
+
+    selected: list[dict[str, Any]] = []
+    refresh_existing_video: list[dict[str, Any]] = []
+    recent_skipped = 0
+    existing_video_skipped = 0
+
+    for candidate in candidates:
+        existing = existing_by_url.get(str(candidate.get("_job_affiliate_url") or "").strip())
+        if existing is None:
+            existing = existing_by_title.get(str(candidate.get("_job_title_key") or "").strip())
+        if existing and _shopee_offer_is_recent(existing):
+            recent_skipped += 1
+            continue
+        if existing and _shopee_offer_has_video_state(existing):
+            existing_video_skipped += 1
+            if len(refresh_existing_video) < target:
+                refresh_existing_video.append(_preserve_existing_shopee_video_data(candidate, existing))
+            continue
+
+        selected.append(candidate)
+    selected_with_video: list[dict[str, Any]] = []
+    selected_with_media: list[dict[str, Any]] = []
+    selected_without_media: list[dict[str, Any]] = []
+    scan_batch_size = max(1, min(10, target))
+
+    for index in range(0, len(selected), scan_batch_size):
+        batch = selected[index:index + scan_batch_size]
+        try:
+            enriched_batch = enrich_shopee_offers_with_media(batch) if batch else []
+        except Exception:
+            enriched_batch = []
+        for batch_index, base_item in enumerate(batch):
+            enriched_item = enriched_batch[batch_index] if batch_index < len(enriched_batch) and isinstance(enriched_batch[batch_index], dict) else {}
+            merged_item = _merge_shopee_import_candidate(base_item, enriched_item)
+            if _shopee_candidate_has_video(merged_item):
+                selected_with_video.append(merged_item)
+            elif _shopee_candidate_has_media(merged_item):
+                selected_with_media.append(merged_item)
+            else:
+                selected_without_media.append(merged_item)
+
+    enriched_selected = selected_with_video[:target]
+    if len(enriched_selected) < target:
+        remaining_slots = target - len(enriched_selected)
+        enriched_selected.extend(selected_with_media[:remaining_slots])
+    if len(enriched_selected) < target:
+        remaining_slots = target - len(enriched_selected)
+        enriched_selected.extend(selected_without_media[:remaining_slots])
+
+    final_offers = enriched_selected + refresh_existing_video
+    for offer in final_offers:
+        offer.pop("_job_affiliate_url", None)
+        offer.pop("_job_title_key", None)
+
+    return final_offers, {
+        "offers_selected": len(enriched_selected),
+        "offers_with_video_selected": len(selected_with_video[:target]),
+        "offers_with_media_selected": len(selected_with_media[: max(0, target - len(selected_with_video[:target]))]),
+        "offers_without_media_selected": max(0, len(enriched_selected) - len(selected_with_video[:target]) - len(selected_with_media[: max(0, target - len(selected_with_video[:target]))])),
+        "offers_scanned": len(selected),
+        "recent_skipped": recent_skipped,
+        "existing_video_skipped": existing_video_skipped,
+        "existing_video_updated": len(refresh_existing_video),
+    }
+
+
+def _prepare_import_offers(
+    db,
+    key: str,
+    offers: list[dict[str, Any]],
+    limit: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    if key == "shopee":
+        return _prepare_shopee_import_offers(db, offers, limit)
+    if limit is not None:
+        offers = offers[:limit]
+    return offers, {"offers_selected": len(offers)}
+
+
+def _fetch_provider_import_offers(
+    db,
+    key: str,
+    limit: int | None = None,
+    keyword: str | None = None,
+) -> tuple[int, list[dict[str, Any]], dict[str, int]]:
+    if key == "shopee":
+        offers = fetch_shopee_offers(limit_override=_shopee_import_pool_limit(limit), keyword_override=keyword)
+        offers_found = len(offers)
+        prepared, meta = _prepare_import_offers(db, key, offers, limit)
+        return offers_found, prepared, meta
+
+    fetcher = _provider_fetcher(key)
+    offers = fetcher()
+    offers_found = len(offers)
+    prepared, meta = _prepare_import_offers(db, key, offers, limit)
+    return offers_found, prepared, meta
+
+
+def _normalize_import_limit(limit: int | None) -> int | None:
+    if limit in (None, "", 0):
+        return None
+    try:
+        parsed = int(limit)
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(parsed, 100))
+
+
+def execute_import_run(providers: list[str] | None = None, limit: int | None = None, keyword: str | None = None) -> dict:
     db = SessionLocal()
     items = providers or ["mercadolivre", "shopee", "amazon", "tiktok"]
+    normalized_limit = _normalize_import_limit(limit)
+    normalized_keyword = (keyword or "").strip() or None
     results = []
 
     try:
@@ -1404,14 +1817,34 @@ def execute_import_run(providers: list[str] | None = None) -> dict:
                 db,
                 tipo="import",
                 provider=provider_key,
-                requested_count=0,
-                payload={"provider": provider_key},
+                requested_count=normalized_limit or 0,
+                payload={"provider": provider_key, "limit": normalized_limit, "keyword": normalized_keyword},
             )
 
             try:
-                fetcher = _provider_fetcher(provider_key)
-                offers = fetcher()
+                offers_found, offers, selection_meta = _fetch_provider_import_offers(
+                    db,
+                    provider_key,
+                    normalized_limit,
+                    normalized_keyword if provider_key == "shopee" else None,
+                )
                 import_summary = _import_provider(db, _provider_label(provider_key), offers)
+                imported_without_video_ids: list[int] = []
+                imported_without_video_titles: list[str] = []
+                draft_summary: dict[str, Any] = {"count": 0, "created": 0, "updated": 0, "items": []}
+                if provider_key == "shopee":
+                    imported_without_video_ids = [
+                        int(item["offer_id"])
+                        for item in import_summary.get("items", [])
+                        if int(item.get("offer_id") or 0) > 0 and not bool(item.get("has_video"))
+                    ]
+                    imported_without_video_titles = [
+                        str(item.get("title") or "")
+                        for item in import_summary.get("items", [])
+                        if int(item.get("offer_id") or 0) > 0 and not bool(item.get("has_video"))
+                    ]
+                    if imported_without_video_ids:
+                        draft_summary = queue_shopee_video_drafts_for_offers(db, imported_without_video_ids)
                 db.commit()
                 result = {
                     "provider": provider_key,
@@ -1420,7 +1853,21 @@ def execute_import_run(providers: list[str] | None = None) -> dict:
                     "updated": import_summary["updated"],
                     "skipped": import_summary.get("skipped", 0),
                     "imported": import_summary["processed"],
-                    "offers_found": len(offers),
+                    "offers_found": offers_found,
+                    "offers_selected": int(selection_meta.get("offers_selected") or len(offers)),
+                    "limit_requested": normalized_limit,
+                    "keyword": normalized_keyword,
+                    "recent_skipped": int(selection_meta.get("recent_skipped") or 0),
+                    "existing_video_skipped": int(selection_meta.get("existing_video_skipped") or 0),
+                    "existing_video_updated": int(selection_meta.get("existing_video_updated") or 0),
+                    "offers_with_video_selected": int(selection_meta.get("offers_with_video_selected") or 0),
+                    "offers_with_media_selected": int(selection_meta.get("offers_with_media_selected") or 0),
+                    "offers_without_media_selected": int(selection_meta.get("offers_without_media_selected") or 0),
+                    "offers_scanned": int(selection_meta.get("offers_scanned") or 0),
+                    "imported_without_video_count": len(imported_without_video_ids),
+                    "imported_without_video_titles": imported_without_video_titles[:10],
+                    "shopee_video_drafts_created": int(draft_summary.get("created") or 0),
+                    "shopee_video_drafts_updated": int(draft_summary.get("updated") or 0),
                 }
                 record_execution_success(db, run_id, processed_count=import_summary["processed"], result=result)
                 results.append({"run_id": run_id, "status": "success"} | result)
@@ -1504,14 +1951,14 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
             db,
             limit=limit,
             offer_ids=selected_offer_ids or None,
-            include_story_assets=((platform == "instagram" and mode in {"story", "feed_story", "feed_story_reel"}) or (platform in {"both", "facebook_instagram", "facebook"} and mode in {"feed_story", "feed_story_reel"})),
+            include_story_assets=((platform == "instagram" and mode in {"story", "reel_story", "feed_story", "feed_story_reel"}) or (platform in {"both", "facebook_instagram", "facebook"} and mode in {"reel_story", "feed_story", "feed_story_reel"})),
             include_square_card_assets=(platform in {"facebook", "instagram", "both", "facebook_instagram"} and mode in {"feed", "story", "feed_story", "feed_story_reel"}),
         )
         if not previews:
             raise ValueError("Nao ha ofertas elegiveis para publicar.")
 
-        def prepare_reel_asset(item: dict[str, Any]) -> tuple[dict[str, Any], str, str | None, str | None]:
-            offer = {
+        def build_offer_media_payload(item: dict[str, Any]) -> dict[str, Any]:
+            return {
                 "id": item["offer_id"],
                 "slug": item["slug"],
                 "titulo": item["title"],
@@ -1520,6 +1967,8 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                 "loja": item["store"],
                 "categoria": item["category"],
                 "imagem_url": item["image_url"],
+                "imagem_urls": item.get("image_gallery_urls") or [],
+                "video_urls": item.get("video_gallery_urls") or [],
                 "url_afiliado": item.get("cta_url"),
                 "cupom": item.get("coupon"),
                 "parcelas_texto": item.get("installments"),
@@ -1529,6 +1978,25 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                 "avaliacao_total": item.get("rating_count"),
                 "promocao_texto": item.get("promotion_text"),
             }
+
+        source_video_asset_cache: dict[int, tuple[dict[str, Any] | None, str | None, str | None]] = {}
+        story_video_asset_cache: dict[int, tuple[dict[str, Any] | None, str, str | None, str | None]] = {}
+        generated_shopee_video_asset_cache: dict[int, tuple[dict[str, Any] | None, str | None]] = {}
+
+        def prepare_generated_shopee_video_asset(item: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+            offer_id = int(item.get("offer_id") or 0)
+            if offer_id in generated_shopee_video_asset_cache:
+                return generated_shopee_video_asset_cache[offer_id]
+
+            try:
+                asset = build_shopee_social_video_asset(offer_id=offer_id)
+                generated_shopee_video_asset_cache[offer_id] = (asset, None)
+            except Exception as exc:  # noqa: BLE001
+                generated_shopee_video_asset_cache[offer_id] = (None, str(exc))
+            return generated_shopee_video_asset_cache[offer_id]
+
+        def prepare_reel_asset(item: dict[str, Any]) -> tuple[dict[str, Any], str, str | None, str | None]:
+            offer = build_offer_media_payload(item)
             reel_source = "generated_art"
             reel_asset_error = None
             source_video_url = str(item.get("reel_payload", {}).get("source_video_url") or "").strip() or None
@@ -1541,29 +2009,21 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                 except Exception as source_exc:  # noqa: BLE001
                     reel_asset_error = str(source_exc)
 
+            shopee_asset, shopee_asset_error = prepare_generated_shopee_video_asset(item)
+            if shopee_asset:
+                return shopee_asset, "generated_social_video", source_video_url, reel_asset_error
+            if shopee_asset_error:
+                reel_asset_error = shopee_asset_error if not reel_asset_error else f"{reel_asset_error} | {shopee_asset_error}"
+
             reel_asset = generate_reel_asset(offer)
             return reel_asset, reel_source, source_video_url, reel_asset_error
-
-        source_video_asset_cache: dict[int, tuple[dict[str, Any] | None, str | None, str | None]] = {}
-        story_video_asset_cache: dict[int, tuple[dict[str, Any] | None, str | None, str | None]] = {}
 
         def prepare_source_video_asset(item: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
             offer_id = int(item.get("offer_id") or 0)
             if offer_id in source_video_asset_cache:
                 return source_video_asset_cache[offer_id]
 
-            offer = {
-                "id": item["offer_id"],
-                "slug": item["slug"],
-                "titulo": item["title"],
-                "preco": item["price"],
-                "preco_antigo": item.get("old_price"),
-                "loja": item["store"],
-                "categoria": item["category"],
-                "imagem_url": item["image_url"],
-                "url_afiliado": item.get("cta_url"),
-                "cupom": item.get("coupon"),
-            }
+            offer = build_offer_media_payload(item)
             source_video_url = str(item.get("reel_payload", {}).get("source_video_url") or "").strip() or None
             if not source_video_url:
                 source_video_asset_cache[offer_id] = (None, None, None)
@@ -1576,38 +2036,27 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                 source_video_asset_cache[offer_id] = (None, source_video_url, str(source_exc))
             return source_video_asset_cache[offer_id]
 
-        def prepare_story_video_asset(item: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
+        def prepare_story_video_asset(item: dict[str, Any]) -> tuple[dict[str, Any] | None, str, str | None, str | None]:
             offer_id = int(item.get("offer_id") or 0)
             if offer_id in story_video_asset_cache:
                 return story_video_asset_cache[offer_id]
 
-            offer = {
-                "id": item["offer_id"],
-                "slug": item["slug"],
-                "titulo": item["title"],
-                "preco": item["price"],
-                "preco_antigo": item.get("old_price"),
-                "loja": item["store"],
-                "categoria": item["category"],
-                "imagem_url": item["image_url"],
-                "url_afiliado": item.get("cta_url"),
-                "cupom": item.get("coupon"),
-                "parcelas_texto": item.get("installments"),
-                "preco_pix": item.get("pix_price"),
-                "frete_texto": item.get("shipping"),
-                "avaliacao_nota": item.get("rating"),
-                "avaliacao_total": item.get("rating_count"),
-                "promocao_texto": item.get("promotion_text"),
-            }
             source_asset, source_video_url, source_video_error = prepare_source_video_asset(item)
             if not source_asset or not source_video_url:
-                story_video_asset_cache[offer_id] = (None, source_video_url, source_video_error)
+                shopee_asset, shopee_asset_error = prepare_generated_shopee_video_asset(item)
+                if shopee_asset:
+                    story_video_asset_cache[offer_id] = (shopee_asset, "generated_social_video", source_video_url, source_video_error)
+                    return story_video_asset_cache[offer_id]
+                combined_error = source_video_error
+                if shopee_asset_error:
+                    combined_error = shopee_asset_error if not combined_error else f"{combined_error} | {shopee_asset_error}"
+                story_video_asset_cache[offer_id] = (None, "", source_video_url, combined_error)
                 return story_video_asset_cache[offer_id]
-            story_video_asset_cache[offer_id] = (source_asset, source_video_url, source_video_error)
+            story_video_asset_cache[offer_id] = (source_asset, "offer_source_video", source_video_url, source_video_error)
             return story_video_asset_cache[offer_id]
 
         def publish_facebook_story_with_fallback(item: dict[str, Any], combined_item: dict[str, Any]) -> bool:
-            story_video_asset, source_video_url, source_video_error = prepare_story_video_asset(item)
+            story_video_asset, story_video_source, source_video_url, source_video_error = prepare_story_video_asset(item)
             if source_video_error:
                 combined_item["facebook_story_video_error"] = source_video_error
                 if source_video_url:
@@ -1618,7 +2067,7 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     published_video_story = publish_facebook_story_video(story_video_asset["file_path"])
                     combined_item["facebook_story_result"] = published_video_story["result"]
                     combined_item["facebook_story_video_id"] = published_video_story["video_id"]
-                    combined_item["facebook_story_source"] = "source_video"
+                    combined_item["facebook_story_source"] = story_video_source or "source_video"
                     return True
                 except Exception as exc:  # noqa: BLE001
                     combined_item["facebook_story_video_error"] = str(exc)
@@ -1643,7 +2092,7 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                 return False
 
         def publish_instagram_story_with_fallback(item: dict[str, Any], combined_item: dict[str, Any]) -> bool:
-            story_video_asset, source_video_url, source_video_error = prepare_story_video_asset(item)
+            story_video_asset, story_video_source, source_video_url, source_video_error = prepare_story_video_asset(item)
             if source_video_error:
                 combined_item["instagram_story_video_error"] = source_video_error
                 if source_video_url:
@@ -1656,7 +2105,7 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     published_story = publish_instagram_container(created_story["result"]["id"])
                     combined_item["story_creation_id"] = created_story["result"]["id"]
                     combined_item["story_result"] = published_story["result"]
-                    combined_item["story_source"] = "source_video"
+                    combined_item["story_source"] = story_video_source or "source_video"
                     return True
                 except Exception as exc:  # noqa: BLE001
                     combined_item["instagram_story_video_error"] = _http_error_detail(exc)
@@ -1687,14 +2136,14 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
         warnings = []
         instagram_posts_required = 0
         if platform == "instagram":
-            if mode == "feed_story":
+            if mode in {"reel_story", "feed_story"}:
                 instagram_posts_required = len(previews) * 2
             elif mode == "feed_story_reel":
                 instagram_posts_required = len(previews) * 3
             else:
                 instagram_posts_required = len(previews)
         elif platform in {"both", "facebook_instagram"}:
-            if mode == "feed_story":
+            if mode in {"reel_story", "feed_story"}:
                 instagram_posts_required = len(previews) * 2
             elif mode == "feed_story_reel":
                 instagram_posts_required = len(previews) * 3
@@ -1712,7 +2161,44 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
         instagram_skip_for_combined = bool(instagram_capacity_error and platform in {"both", "facebook_instagram"})
         if instagram_skip_for_combined:
             warnings.append({"platform": "instagram", "warning": instagram_capacity_error})
-        if platform == "facebook" and mode == "feed_story_reel":
+        if platform == "facebook" and mode == "reel_story":
+            for item in previews:
+                combined_item = {
+                    "offer_id": item["offer_id"],
+                    "slug": item["slug"],
+                    "title": item["title"],
+                }
+                success_for_item = False
+
+                if publish_facebook_story_with_fallback(item, combined_item):
+                    success_for_item = True
+
+                try:
+                    reel_asset, reel_source, source_video_url, reel_asset_error = prepare_reel_asset(item)
+                    published = publish_facebook_reel(
+                        video_path=reel_asset["file_path"],
+                        description=item["reel_payload"]["caption"],
+                    )
+                    combined_item["reel_file"] = reel_asset["filename"]
+                    combined_item["reel_source"] = reel_source
+                    combined_item["source_video_url"] = source_video_url or None
+                    combined_item["source_video_error"] = reel_asset_error
+                    combined_item["video_id"] = published["video_id"]
+                    combined_item["publish_result"] = published["result"]
+                    success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "facebook_reel",
+                            "error": str(exc),
+                        }
+                    )
+
+                if success_for_item:
+                    items.append(combined_item)
+        elif platform == "facebook" and mode == "feed_story_reel":
             for item in previews:
                 combined_item = {
                     "offer_id": item["offer_id"],
@@ -1829,6 +2315,109 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                     )
 
                 if facebook_ok or instagram_ok:
+                    items.append(combined_item)
+        elif platform in {"both", "facebook_instagram"} and mode == "reel_story":
+            for item in previews:
+                combined_item = {
+                    "offer_id": item["offer_id"],
+                    "slug": item["slug"],
+                    "title": item["title"],
+                }
+                facebook_story_ok = False
+                facebook_reel_ok = False
+                instagram_story_ok = False
+                instagram_reel_ok = False
+
+                if publish_facebook_story_with_fallback(item, combined_item):
+                    facebook_story_ok = True
+
+                try:
+                    reel_asset, reel_source, source_video_url, reel_asset_error = prepare_reel_asset(item)
+                    combined_item["reel_file"] = reel_asset["filename"]
+                    combined_item["reel_source"] = reel_source
+                    combined_item["source_video_url"] = source_video_url
+                    combined_item["source_video_error"] = reel_asset_error
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "reel_asset",
+                            "error": str(exc),
+                        }
+                    )
+                    reel_asset = None
+
+                if reel_asset:
+                    try:
+                        published = publish_facebook_reel(
+                            video_path=reel_asset["file_path"],
+                            description=item["reel_payload"]["caption"],
+                        )
+                        combined_item["video_id"] = published["video_id"]
+                        combined_item["facebook_reel_result"] = published["result"]
+                        facebook_reel_ok = True
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(
+                            {
+                                "offer_id": item["offer_id"],
+                                "title": item["title"],
+                                "platform": "facebook_reel",
+                                "error": str(exc),
+                            }
+                        )
+
+                try:
+                    if instagram_skip_for_combined:
+                        combined_item["instagram_story_skipped_reason"] = instagram_capacity_error
+                        raise StopIteration
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
+                    if publish_instagram_story_with_fallback(item, combined_item):
+                        instagram_story_ok = True
+                except StopIteration:
+                    pass
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_story",
+                            "error": _http_error_detail(exc),
+                        }
+                    )
+
+                if reel_asset:
+                    try:
+                        if instagram_skip_for_combined:
+                            combined_item["instagram_reel_skipped_reason"] = instagram_capacity_error
+                            raise StopIteration
+                        if instagram_capacity_error:
+                            raise ValueError(instagram_capacity_error)
+                        deploy_stories_via_sftp(only_files=[reel_asset["filename"]])
+                        created_reel = _create_instagram_reel_container_with_retry(
+                            reel_asset["public_url"],
+                            item["reel_payload"]["caption"],
+                        )
+                        status_payload = wait_for_instagram_container_ready(created_reel["result"]["id"])
+                        published_reel = publish_instagram_container(created_reel["result"]["id"])
+                        combined_item["instagram_reel_creation_id"] = created_reel["result"]["id"]
+                        combined_item["instagram_reel_status"] = status_payload["result"]
+                        combined_item["instagram_result"] = published_reel["result"]
+                        instagram_reel_ok = True
+                    except StopIteration:
+                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(
+                            {
+                                "offer_id": item["offer_id"],
+                                "title": item["title"],
+                                "platform": "instagram_reel",
+                                "error": _http_error_detail(exc),
+                            }
+                        )
+
+                if facebook_story_ok or facebook_reel_ok or instagram_story_ok or instagram_reel_ok:
                     items.append(combined_item)
         elif platform in {"both", "facebook_instagram"} and mode == "feed_story":
             for item in previews:
@@ -2240,6 +2829,61 @@ def execute_social_run(platform: str, mode: str = "feed", limit: int = 1, offer_
                         items.append(combined_item)
                 except Exception as exc:  # noqa: BLE001
                     errors.append({"offer_id": item["offer_id"], "title": item["title"], "error": _http_error_detail(exc)})
+        elif platform == "instagram" and mode == "reel_story":
+            for item in previews:
+                combined_item = {
+                    "offer_id": item["offer_id"],
+                    "slug": item["slug"],
+                    "title": item["title"],
+                }
+                success_for_item = False
+
+                try:
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
+                    if publish_instagram_story_with_fallback(item, combined_item):
+                        success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_story",
+                            "error": _http_error_detail(exc),
+                        }
+                    )
+
+                try:
+                    if instagram_capacity_error:
+                        raise ValueError(instagram_capacity_error)
+                    reel_asset, reel_source, source_video_url, reel_asset_error = prepare_reel_asset(item)
+                    deploy_stories_via_sftp(only_files=[reel_asset["filename"]])
+                    created_reel = _create_instagram_reel_container_with_retry(
+                        reel_asset["public_url"],
+                        item["reel_payload"]["caption"],
+                    )
+                    status_payload = wait_for_instagram_container_ready(created_reel["result"]["id"])
+                    published_reel = publish_instagram_container(created_reel["result"]["id"])
+                    combined_item["reel_file"] = reel_asset["filename"]
+                    combined_item["reel_source"] = reel_source
+                    combined_item["source_video_url"] = source_video_url
+                    combined_item["source_video_error"] = reel_asset_error
+                    combined_item["instagram_reel_creation_id"] = created_reel["result"]["id"]
+                    combined_item["instagram_reel_status"] = status_payload["result"]
+                    combined_item["instagram_result"] = published_reel["result"]
+                    success_for_item = True
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "offer_id": item["offer_id"],
+                            "title": item["title"],
+                            "platform": "instagram_reel",
+                            "error": _http_error_detail(exc),
+                        }
+                    )
+
+                if success_for_item:
+                    items.append(combined_item)
         elif platform == "instagram" and mode == "feed_story":
             for item in previews:
                 combined_item = {
@@ -2499,7 +3143,10 @@ def manager_ui(request: Request, manager_session: str | None = Cookie(default=No
     index_path = UI_DIR / "index.html"
     if not index_path.exists():
         raise HTTPException(status_code=404, detail="Dashboard React ainda nao foi gerado.")
-    return index_path.read_text(encoding="utf-8")
+    return HTMLResponse(
+        index_path.read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.get("/manager/login", response_class=HTMLResponse)
@@ -2563,11 +3210,12 @@ def manager_ui_assets(asset_path: str, _: str = Depends(require_manager_auth)):
         ".json": "application/json; charset=utf-8",
         ".svg": "image/svg+xml; charset=utf-8",
     }
+    cache_headers = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
     media_type = text_media_types.get(asset.suffix.lower())
     if media_type:
-        return Response(content=asset.read_text(encoding="utf-8"), media_type=media_type)
+        return Response(content=asset.read_text(encoding="utf-8"), media_type=media_type, headers=cache_headers)
 
-    return FileResponse(asset)
+    return FileResponse(asset, headers=cache_headers)
 
 
 @app.get("/dashboard/api/stories/{filename}")
@@ -2629,7 +3277,7 @@ def dashboard_api_import_preview(provider: str, keyword: str, limit: int = 10, p
 
 @app.post("/dashboard/api/import/run")
 def dashboard_api_import_run(payload: DashboardImportRunPayload, _: str = Depends(require_manager_auth)):
-    return execute_import_run(payload.providers)
+    return execute_import_run(payload.providers, payload.limit, payload.keyword)
 
 
 @app.post("/dashboard/api/import/shopee-links/preview")
@@ -2720,8 +3368,232 @@ def dashboard_api_mercadolivre_relink_existing_preview(payload: DashboardMercado
         db.close()
 
 
+def _run_local_job_command(args: list[str], *, timeout_seconds: int = 3600) -> dict[str, Any]:
+    runner_path = Path(__file__).resolve().parents[1] / "run_job.py"
+    if not runner_path.is_file():
+        raise ValueError("run_job.py nao encontrado no servidor do manager.")
+
+    completed = subprocess.run(
+        [sys.executable, str(runner_path), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=max(30, int(timeout_seconds or 3600)),
+        cwd=str(runner_path.parent),
+    )
+
+    stdout_lines = [line.strip() for line in str(completed.stdout or "").splitlines() if line.strip()]
+    payload: dict[str, Any] | None = None
+    if stdout_lines:
+        try:
+            payload = json.loads(stdout_lines[-1])
+        except json.JSONDecodeError:
+            payload = None
+
+    if completed.returncode != 0:
+        if isinstance(payload, dict) and payload.get("error"):
+            raise ValueError(str(payload.get("error") or "Falha ao executar job local."))
+        stderr = str(completed.stderr or "").strip()
+        stdout = str(completed.stdout or "").strip()
+        raise ValueError(stderr or stdout or "Falha ao executar job local.")
+
+    if not isinstance(payload, dict):
+        raise ValueError("O job local nao retornou JSON valido.")
+    if payload.get("ok") is False:
+        raise ValueError(str(payload.get("error") or "O job local retornou erro."))
+    return payload
+
+
 def execute_youtube_cuts_analyze(url: str) -> dict[str, Any]:
     return analyze_youtube_video_for_cuts(url)
+
+
+def _youtube_geo_blocked_error(exc: Exception | str) -> bool:
+    message = str(exc or "").strip().lower()
+    if not message:
+        return False
+    markers = (
+        "bloqueio de pais no servidor",
+        "not made this video available in your country",
+        "not available in your country",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _youtube_geo_block_fallback_candidates(
+    url: str,
+    *,
+    profile: dict[str, Any] | None,
+    recent_limit: int = 12,
+    videos_per_topic: int = 8,
+    retry_candidates: int = 10,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    profile_id = int((profile or {}).get("id") or 0)
+    if profile_id <= 0:
+        return [], {}
+
+    original_video_id = ""
+    try:
+        original_video_id = extract_youtube_video_id(url)
+    except Exception:
+        original_video_id = ""
+
+    trends = execute_youtube_trends_themes(
+        recent_limit=max(4, min(int(recent_limit or 12), 16)),
+        videos_per_topic=max(4, min(int(videos_per_topic or 8), 10)),
+        channel_profile_id=profile_id,
+    )
+    candidates: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    max_candidates = max(1, min(int(retry_candidates or 10), 12))
+    for item in trends.get("recent_uploads") or []:
+        if not isinstance(item, dict):
+            continue
+        candidate_url = str(item.get("url") or "").strip()
+        candidate_video_id = str(item.get("video_id") or "").strip()
+        if not candidate_url or not candidate_video_id:
+            continue
+        if candidate_video_id == original_video_id or candidate_video_id in seen_ids:
+            continue
+        seen_ids.add(candidate_video_id)
+        candidates.append(item)
+        if len(candidates) >= max_candidates:
+            break
+
+    source_entries = _split_channel_sources((profile or {}).get("source_channels"))
+    if len(candidates) < max_candidates and source_entries:
+        try:
+            access_token, ready_profile = _youtube_access_token_ready(profile_id)
+            recent_uploads, _ = _fetch_recent_uploads_from_channel_list(
+                access_token,
+                source_entries=source_entries,
+                recent_hours=168,
+                uploads_per_channel=12,
+                exclude_channel_id=str(ready_profile.get("channel_id") or ""),
+            )
+            detail_map = {
+                str(item.get("video_id") or "").strip(): item
+                for item in _videos_details(
+                    access_token,
+                    [
+                        str(item.get("video_id") or "").strip()
+                        for item in recent_uploads[:36]
+                        if str(item.get("video_id") or "").strip()
+                    ],
+                )
+            }
+            for item in recent_uploads:
+                candidate_video_id = str(item.get("video_id") or "").strip()
+                if not candidate_video_id or candidate_video_id == original_video_id or candidate_video_id in seen_ids:
+                    continue
+                merged = detail_map.get(candidate_video_id, {}) | item
+                candidate_url = str(merged.get("url") or f"https://www.youtube.com/watch?v={candidate_video_id}").strip()
+                if not candidate_url:
+                    continue
+                seen_ids.add(candidate_video_id)
+                candidates.append(
+                    {
+                        "video_id": candidate_video_id,
+                        "url": candidate_url,
+                        "title": str(merged.get("title") or ""),
+                        "channel_title": str(merged.get("channel_title") or ""),
+                        "published_at": str(merged.get("published_at") or ""),
+                        "duration_seconds": int(merged.get("duration_seconds") or 0),
+                        "source_type": str(merged.get("source_type") or "manual_channel_list"),
+                    }
+                )
+                if len(candidates) >= max_candidates:
+                    break
+        except Exception:
+            pass
+    return candidates, trends
+
+
+def _process_youtube_video_with_geo_fallback(
+    url: str,
+    *,
+    limit: int,
+    mode: str,
+    selection_strategy: str,
+    risk_profile: str,
+    profile: dict[str, Any] | None,
+    burn_subtitles: bool,
+    retry_geo_block_with_profile_candidates: bool = True,
+) -> dict[str, Any]:
+    channel_profile_id = (profile or {}).get("id")
+    channel_profile_name = (profile or {}).get("name")
+    try:
+        result = process_youtube_video_for_cuts(
+            url,
+            limit=limit,
+            mode=mode,
+            selection_strategy=selection_strategy,
+            risk_profile=risk_profile,
+            channel_profile_id=channel_profile_id,
+            channel_profile_name=channel_profile_name,
+            channel_preferences=profile or None,
+            burn_subtitles=burn_subtitles,
+        )
+        result["source_fallback"] = {"used": False}
+        return result
+    except Exception as exc:
+        if not retry_geo_block_with_profile_candidates or not _youtube_geo_blocked_error(exc):
+            raise
+
+        candidates, trends = _youtube_geo_block_fallback_candidates(url, profile=profile)
+        if not candidates:
+            raise ValueError(
+                f"{str(exc)} Nao encontrei outro video recente elegivel para fallback no perfil "
+                f"{str(channel_profile_name or '').strip() or 'selecionado'}."
+            ) from exc
+
+        fallback_errors: list[dict[str, Any]] = []
+        for candidate in candidates:
+            candidate_url = str(candidate.get("url") or "").strip()
+            if not candidate_url:
+                continue
+            try:
+                result = process_youtube_video_for_cuts(
+                    candidate_url,
+                    limit=limit,
+                    mode=mode,
+                    selection_strategy=selection_strategy,
+                    risk_profile=risk_profile,
+                    channel_profile_id=channel_profile_id,
+                    channel_profile_name=channel_profile_name,
+                    channel_preferences=profile or None,
+                    burn_subtitles=burn_subtitles,
+                )
+                result["source_fallback"] = {
+                    "used": True,
+                    "reason": "geo_blocked_original",
+                    "requested_url": url,
+                    "processed_url": candidate_url,
+                    "video_id": str(candidate.get("video_id") or ""),
+                    "title": str(candidate.get("title") or ""),
+                    "channel_title": str(candidate.get("channel_title") or ""),
+                    "published_at": str(candidate.get("published_at") or ""),
+                    "trend_profile": dict(trends.get("trend_profile") or {}),
+                    "attempts": fallback_errors,
+                }
+                return result
+            except Exception as fallback_exc:
+                fallback_errors.append(
+                    {
+                        "url": candidate_url,
+                        "video_id": str(candidate.get("video_id") or ""),
+                        "title": str(candidate.get("title") or ""),
+                        "error": str(fallback_exc),
+                    }
+                )
+
+        last_error = fallback_errors[-1]["error"] if fallback_errors else ""
+        raise ValueError(
+            f"{str(exc)} Tambem falhei ao tentar outros videos recentes do perfil "
+            f"{str(channel_profile_name or '').strip() or 'selecionado'}. "
+            f"Ultimo erro: {last_error or 'sem detalhes'}"
+        ) from exc
 
 
 def execute_youtube_cuts_process(
@@ -2733,6 +3605,7 @@ def execute_youtube_cuts_process(
     risk_profile: str = "default",
     channel_profile_id: int | None = None,
     burn_subtitles: bool = True,
+    retry_geo_block_with_profile_candidates: bool = True,
 ) -> dict[str, Any]:
     normalized_mode = (mode or "short").strip().lower()
     max_limit = 3 if normalized_mode == "long" else 8
@@ -2751,16 +3624,15 @@ def execute_youtube_cuts_process(
         finally:
             db.close()
 
-    result = process_youtube_video_for_cuts(
+    result = _process_youtube_video_with_geo_fallback(
         url,
         limit=normalized_limit,
         mode=normalized_mode,
         selection_strategy=selection_strategy,
         risk_profile=risk_profile,
-        channel_profile_id=channel_profile_id or (profile or {}).get("id"),
-        channel_profile_name=(profile or {}).get("name"),
-        channel_preferences=profile or None,
+        profile=profile or None,
         burn_subtitles=burn_subtitles,
+        retry_geo_block_with_profile_candidates=retry_geo_block_with_profile_candidates,
     )
     result["youtube_auth"] = _youtube_auth_snapshot(channel_profile_id or (profile or {}).get("id"), refresh=False)
     for item in result.get("cuts") or []:
@@ -2793,6 +3665,7 @@ def execute_youtube_cut_private_test(
         risk_profile="conservative",
         channel_profile_id=channel_profile_id or (profile or {}).get("id"),
         burn_subtitles=burn_subtitles,
+        retry_geo_block_with_profile_candidates=True,
     )
     processed_cuts = list(process_result.get("cuts") or [])
     requires_person_gate = _youtube_profile_requires_person_gate(profile)
@@ -3133,6 +4006,7 @@ def execute_youtube_auto_cut_publish(
                     selection_strategy=selection_strategy,
                     channel_profile_id=profile_id,
                     burn_subtitles=requested_burn_subtitles,
+                    retry_geo_block_with_profile_candidates=False,
                 )
                 processed_cuts = list(process_result.get("cuts") or [])
                 if requires_person_gate and processed_cuts and not any(bool(item.get("publish_allowed", True)) for item in processed_cuts if isinstance(item, dict)):
@@ -3647,6 +4521,42 @@ def dashboard_api_shopee_repair_affiliate(payload: DashboardAmazonRepairPayload,
         db.close()
 
 
+@app.post("/dashboard/api/import/store/shopee/reimport-without-video")
+def dashboard_api_shopee_reimport_without_video(payload: DashboardShopeeReimportPayload, _: str = Depends(require_manager_auth)):
+    normalized_limit = None if payload.limit in (None, "", 0) else max(1, min(int(payload.limit), 1000))
+    command_args = [
+        "refresh-existing-offers",
+        "--store",
+        "shopee",
+        "--shopee-video-state",
+        "without",
+        "--max-images",
+        "5",
+    ]
+    if normalized_limit is not None:
+        command_args.extend(["--limit", str(normalized_limit)])
+    try:
+        command_result = _run_local_job_command(
+            command_args,
+            timeout_seconds=max(3600, (normalized_limit or 500) * 90),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail=f"O job da Shopee excedeu o tempo de espera do manager ({int(exc.timeout)}s).")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    result = command_result.get("result") if isinstance(command_result.get("result"), dict) else {}
+    return {
+        "ok": True,
+        "store": "Shopee",
+        "queue": "without_video",
+        "limit_requested": normalized_limit,
+        **result,
+    }
+
+
 @app.post("/dashboard/api/import/store/mercadolivre/relink-existing/run")
 def dashboard_api_mercadolivre_relink_existing_run(payload: DashboardMercadoLivreRelinkPayload, _: str = Depends(require_manager_auth)):
     db = SessionLocal()
@@ -3781,23 +4691,15 @@ def dashboard_api_youtube_cuts_process(payload: DashboardYoutubeCutsProcessPaylo
                 profile = get_default_youtube_channel_profile(db)
             finally:
                 db.close()
-        result = process_youtube_video_for_cuts(
+        result = execute_youtube_cuts_process(
             payload.url,
             limit=limit,
             mode=mode,
             selection_strategy=payload.selection_strategy,
             risk_profile=payload.risk_profile,
             channel_profile_id=payload.channel_profile_id or (profile or {}).get("id"),
-            channel_profile_name=(profile or {}).get("name"),
-            channel_preferences=profile or None,
             burn_subtitles=payload.burn_subtitles,
         )
-        result["youtube_auth"] = _youtube_auth_snapshot(payload.channel_profile_id or (profile or {}).get("id"), refresh=False)
-        for item in result.get("cuts") or []:
-            draft = build_youtube_cut_publish_draft(result["job_id"], int(item.get("cut_id") or 0))
-            draft["channel_profile_id"] = (profile or {}).get("id")
-            draft["channel_profile_name"] = (profile or {}).get("name") or ""
-            item["publish_draft"] = draft
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -3992,7 +4894,7 @@ def dashboard_api_youtube_cuts_asset(job_id: str, filename: str, _: str = Depend
 @app.post("/dashboard/api/automation/import/run-now")
 def dashboard_api_automation_import_run_now(payload: DashboardJobRunPayload, _: str = Depends(require_manager_auth)):
     providers = payload.providers or _env_settings_snapshot().get("auto_import_providers") or ["mercadolivre"]
-    result = execute_import_run(providers)
+    result = execute_import_run(providers, payload.limit)
     if scheduler is not None:
         scheduler._record_result("import", status="success" if not result.get("error") else "error", result=result)
     return result
@@ -4003,7 +4905,7 @@ def dashboard_api_automation_social_run_now(payload: DashboardJobRunPayload, _: 
     settings = _env_settings_snapshot()
     platform, mode = _normalize_auto_social_action(
         payload.platform or settings.get("auto_social_platform") or "facebook",
-        payload.mode or settings.get("auto_social_mode") or "feed_story_reel",
+        payload.mode or settings.get("auto_social_mode") or "reel_story",
     )
     limit = int(payload.limit or settings.get("auto_social_limit") or 1)
     result = execute_social_run(platform, mode, limit)

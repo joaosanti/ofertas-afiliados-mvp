@@ -175,7 +175,7 @@ if ($id > 0) {
   }
   $oferta = $row;
   $oferta['expira_em'] = $row['expira_em'] ? str_replace(' ', 'T', substr((string) $row['expira_em'], 0, 16)) : '';
-  $oferta['video_url'] = tag_url_decode($row['tags'] ?? '', 'offer_video_url:');
+  $oferta['video_url'] = admin_shopee_video_offer_video_url($row);
 }
 
 $galleryUrls = admin_shopee_video_offer_gallery_urls($oferta);
@@ -333,10 +333,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $pageTitle = ((int) ($oferta['id'] ?? 0) > 0) ? 'Editar oferta' : 'Nova oferta';
-$videoPreviewUrl = trim((string) ($oferta['video_url'] ?? ''));
-if ($videoPreviewUrl === '') {
-  $videoPreviewUrl = tag_url_decode($oferta['tags'] ?? '', 'shopee_video_url:');
-}
+$videoPreviewUrl = admin_shopee_video_offer_video_url($oferta);
 $imageGalleryUrls = admin_shopee_video_offer_gallery_urls($oferta);
 $imageGalleryText = admin_offer_gallery_urls_to_text($imageGalleryUrls);
 ?>

@@ -1,7 +1,9 @@
 import json
 import os
+from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from sqlalchemy import text
 from app.services.youtube_channels import bootstrap_legacy_env_youtube_channel, ensure_youtube_channel_tables
 
@@ -446,6 +448,22 @@ def _provider_status(label: str, enabled: bool, mode: str, notes: str) -> dict[s
 
 
 def build_provider_status() -> dict[str, Any]:
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    load_dotenv(dotenv_path=env_path, override=True)
+    shopee_api_key = (os.getenv("SHOPEE_API_KEY") or "").strip()
+    shopee_api_secret = (os.getenv("SHOPEE_API_SECRET") or "").strip()
+    shopee_feed_url = (os.getenv("SHOPEE_FEED_URL") or "").strip()
+    shopee_enabled = bool((shopee_api_key and shopee_api_secret) or shopee_feed_url)
+    shopee_notes = (
+        "Open API da Shopee pronta para preview e importacao real."
+        if (shopee_api_key and shopee_api_secret)
+        else (
+            "Shopee pronta via feed fallback."
+            if shopee_feed_url
+            else "Estrutura pronta; depende das credenciais liberadas."
+        )
+    )
+
     return {
         "imports": [
             _provider_status(
@@ -456,9 +474,9 @@ def build_provider_status() -> dict[str, Any]:
             ),
             _provider_status(
                 "Shopee",
-                bool((os.getenv("SHOPEE_API_KEY") or "").strip() or (os.getenv("SHOPEE_FEED_URL") or "").strip()),
+                shopee_enabled,
                 "GraphQL/API",
-                "Estrutura pronta; depende das credenciais liberadas.",
+                shopee_notes,
             ),
             _provider_status(
                 "Amazon",

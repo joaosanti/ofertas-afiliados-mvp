@@ -9,16 +9,18 @@ unset($_SESSION['admin_social_preview']);
 $pendingSocialJob = $_SESSION['admin_social_pending_job'] ?? null;
 $search = trim((string) ($_GET['q'] ?? ''));
 $store = trim((string) ($_GET['loja'] ?? ''));
+$onlyWithVideo = (string) ($_GET['com_video'] ?? '0') === '1';
 $limitDefault = 10;
 $limit = (int) ($_GET['limit'] ?? $limitDefault);
 $limit = max(1, min($limit, 30));
 $page = max(1, (int) ($_GET['page'] ?? 1));
 
 function social_admin_query(array $overrides = []) {
-  global $search, $store, $limit, $page;
+  global $search, $store, $limit, $page, $onlyWithVideo;
   $params = [
     'q' => $search,
     'loja' => $store,
+    'com_video' => $onlyWithVideo ? '1' : '0',
     'limit' => $limit,
     'page' => $page,
   ];
@@ -31,11 +33,7 @@ function social_admin_query(array $overrides = []) {
 }
 
 function social_offer_video_url(array $offer): string {
-  $manualVideo = trim((string) tag_url_decode($offer['tags'] ?? '', 'offer_video_url:'));
-  if ($manualVideo !== '') {
-    return $manualVideo;
-  }
-  return trim((string) tag_url_decode($offer['tags'] ?? '', 'shopee_video_url:'));
+  return admin_shopee_video_offer_video_url($offer);
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -45,7 +43,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
   if ($action === 'publish_selected') {
     $platform = trim((string) ($_POST['platform'] ?? 'facebook'));
-    $mode = trim((string) ($_POST['mode'] ?? 'feed_story_reel'));
+    $mode = trim((string) ($_POST['mode'] ?? 'reel_story'));
     $offerIds = array_values(array_unique(array_filter(array_map('intval', (array) ($_POST['offer_ids'] ?? [])))));
 
     if (!$offerIds) {
@@ -78,7 +76,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
   } elseif ($action === 'publish_auto') {
     $platform = trim((string) ($_POST['platform'] ?? 'both'));
-    $mode = trim((string) ($_POST['mode'] ?? 'feed_story_reel'));
+    $mode = trim((string) ($_POST['mode'] ?? 'reel_story'));
     $autoLimit = max(1, min((int) ($_POST['auto_limit'] ?? 1), 10));
     $_SESSION['admin_social_preview'] = null;
     $jobStart = admin_start_python_job_async(['social', '--platform', $platform, '--mode', $mode, '--limit', (string) $autoLimit], [
@@ -103,7 +101,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   exit;
 }
 
-$offersPayload = admin_fetch_social_candidates($pdo, $search, $store, $limit, $page);
+$offersPayload = admin_fetch_social_candidates($pdo, $search, $store, $limit, $page, $onlyWithVideo);
 $offers = (array) ($offersPayload['items'] ?? []);
 foreach ($offers as &$offer) {
   $offer['video_url'] = social_offer_video_url((array) $offer);
@@ -188,7 +186,7 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
   <?php if (is_array($pendingSocialJob) && !empty($pendingSocialJob['job_id'])): ?>
     <?php
       $pendingPlatform = (string) ($pendingSocialJob['platform'] ?? 'both');
-      $pendingMode = (string) ($pendingSocialJob['mode'] ?? 'feed_story_reel');
+      $pendingMode = (string) ($pendingSocialJob['mode'] ?? 'reel_story');
       $progressTitle = 'Publicando nas redes sociais';
       if ($pendingPlatform === 'instagram') {
         $progressTitle = 'Publicando no Instagram';
@@ -241,8 +239,9 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
           <select id="mode_auto" name="mode">
             <option value="feed">Feed</option>
             <option value="reel">Reel</option>
+            <option value="reel_story" selected>Reel + Story</option>
             <option value="feed_story">Feed + Story</option>
-            <option value="feed_story_reel" selected>Feed + Story + Reel</option>
+            <option value="feed_story_reel">Feed + Story + Reel</option>
             <option value="story">Story</option>
             <option value="web">WhatsApp Web Local</option>
           </select>
@@ -288,6 +287,13 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
           <label for="limit">Limite</label>
           <input id="limit" type="number" name="limit" value="<?= (int) $limit ?>" min="1" max="30">
         </div>
+        <div class="admin-field">
+          <label for="com_video">M&iacute;dia</label>
+          <select id="com_video" name="com_video">
+            <option value="0" <?= !$onlyWithVideo ? 'selected' : '' ?>>Todos</option>
+            <option value="1" <?= $onlyWithVideo ? 'selected' : '' ?>>Com v&iacute;deo</option>
+          </select>
+        </div>
         <div class="admin-field admin-field-submit">
           <label>&nbsp;</label>
           <button class="btn-link primary" type="submit">Filtrar</button>
@@ -314,8 +320,9 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
           <select id="mode_manual" name="mode">
             <option value="feed">Feed</option>
             <option value="reel">Reel</option>
+            <option value="reel_story" selected>Reel + Story</option>
             <option value="feed_story">Feed + Story</option>
-            <option value="feed_story_reel" selected>Feed + Story + Reel</option>
+            <option value="feed_story_reel">Feed + Story + Reel</option>
             <option value="story">Story</option>
             <option value="web">WhatsApp Web Local</option>
           </select>
@@ -382,8 +389,14 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
       <?php else: ?>
         <div class="admin-meta-row" style="margin-top:18px;">
           <span class="admin-meta-chip"><?= (int) $offersTotal ?> ofertas eleg&iacute;veis</span>
+          <?php if ($onlyWithVideo): ?>
+            <span class="admin-meta-chip">Com v&iacute;deo</span>
+          <?php endif; ?>
           <span class="admin-meta-chip">P&aacute;gina <?= (int) $page ?> de <?= (int) $totalPages ?></span>
           <span class="admin-meta-chip" id="social-selected-count">0 selecionadas</span>
+          <a class="btn-link <?= $onlyWithVideo ? 'primary' : '' ?>" href="/admin/social.php?<?= h(social_admin_query(['com_video' => $onlyWithVideo ? '0' : '1', 'page' => 1])) ?>">
+            <?= $onlyWithVideo ? 'Mostrar todas' : 'Filtrar com v&iacute;deos' ?>
+          </a>
           <button class="btn-link" type="button" id="social-clear-selection">Desmarcar selecionadas</button>
         </div>
         <div class="admin-offers-grid" style="margin-top:18px;">
@@ -751,7 +764,7 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
       if (platform.value === 'whatsapp' || mode.value === 'web') {
         return false;
       }
-      return ['story', 'reel', 'feed_story', 'feed_story_reel'].indexOf(mode.value) !== -1;
+      return ['story', 'reel', 'reel_story', 'feed_story', 'feed_story_reel'].indexOf(mode.value) !== -1;
     }
 
     function syncVideoBadges() {
@@ -765,7 +778,7 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
       if (platform.value === 'whatsapp') {
         mode.value = 'web';
       } else if (mode.value === 'web') {
-        mode.value = 'feed_story_reel';
+        mode.value = 'reel_story';
       }
     }
 

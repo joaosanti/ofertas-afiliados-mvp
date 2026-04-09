@@ -38,11 +38,30 @@ function admin_strip_shopee_aff_param($url) {
   return $scheme . $auth . $host . $port . $path . $queryString . $fragment;
 }
 
+function admin_auditoria_links_query($selectedStore, $selectedPublication, $selectedSeverity) {
+  $params = [];
+  if ($selectedStore !== '') {
+    $params['loja'] = $selectedStore;
+  }
+  if ($selectedPublication !== '') {
+    $params['publicacao'] = $selectedPublication;
+  }
+  if ($selectedSeverity !== '') {
+    $params['diagnostico'] = $selectedSeverity;
+  }
+  return '/admin/auditoria_links.php' . ($params ? ('?' . http_build_query($params)) : '');
+}
+
 $flash = admin_flash_get();
 
 $pdo = db();
 $targetStores = ['Mercado Livre', 'Shopee', 'Amazon'];
 $feedback = '';
+$pendingShopeeCleanupJob = $_SESSION['admin_shopee_cleanup_pending_job'] ?? null;
+$selectedStore = trim((string) ($_GET['loja'] ?? ''));
+if ($selectedStore !== '' && !in_array($selectedStore, $targetStores, true)) {
+  $selectedStore = '';
+}
 $selectedPublication = trim((string) ($_GET['publicacao'] ?? ''));
 if (!in_array($selectedPublication, ['', 'ativo', 'inativo'], true)) {
   $selectedPublication = '';
@@ -145,13 +164,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } else {
       $feedback = 'Falha ao rodar a correcao do Mercado Livre: ' . (string) ($payload['error'] ?? 'erro desconhecido');
     }
+  } elseif ($action === 'cleanup_shopee_offers') {
+    $redirectUrl = admin_auditoria_links_query($selectedStore, $selectedPublication, $selectedSeverity);
+    $keepLatest = 500;
+    $started = admin_start_python_job_async(
+      ['cleanup-shopee-offers', '--keep-latest', (string) $keepLatest],
+      [
+        'kind' => 'cleanup_shopee_offers',
+        'target_tab' => 'auditoria_links',
+        'keep_latest' => $keepLatest,
+      ]
+    );
+    if (empty($started['ok'])) {
+      admin_flash_set('error', (string) ($started['error'] ?? 'Falha ao iniciar a limpeza da Shopee.'));
+      header('Location: ' . $redirectUrl);
+      exit;
+    }
+    $_SESSION['admin_shopee_cleanup_pending_job'] = [
+      'job_id' => (string) ($started['job_id'] ?? ''),
+      'kind' => 'cleanup_shopee_offers',
+      'keep_latest' => $keepLatest,
+      'redirect_url' => $redirectUrl,
+    ];
+    header('Location: ' . $redirectUrl);
+    exit;
   }
 }
 
-$selectedStore = trim((string) ($_GET['loja'] ?? ''));
-if ($selectedStore !== '' && !in_array($selectedStore, $targetStores, true)) {
-  $selectedStore = '';
-}
+$shopeeCatalogSnapshot = admin_fetch_shopee_catalog_snapshot($pdo);
+$currentShopeeCount = (int) ($shopeeCatalogSnapshot['current_count'] ?? 0);
+$latestShopeeCleanup = is_array($shopeeCatalogSnapshot['latest_cleanup'] ?? null) ? $shopeeCatalogSnapshot['latest_cleanup'] : null;
+$latestShopeeCleanupSummary = is_array($latestShopeeCleanup['summary'] ?? null) ? $latestShopeeCleanup['summary'] : null;
+$adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
 
 $whereParts = [];
 $params = [];
@@ -229,14 +273,17 @@ foreach ($rows as $row) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Admin - Auditoria de Links</title>
+  <link rel="icon" type="image/png" href="/assets/img/logo-zp.png">
   <link rel="stylesheet" href="/assets/css/style.css">
-  <link rel="stylesheet" href="/assets/css/admin.css">
+  <link rel="stylesheet" href="/assets/css/admin.css?v=<?= urlencode($adminCssVersion) ?>">
   <style>
     .admin-wrap { display:grid; gap:18px; }
-    .panel { background:#fff; border:1px solid #d9e2f2; border-radius:18px; padding:18px; }
     .filters, .stats { display:flex; gap:10px; flex-wrap:wrap; }
     .stat { min-width:150px; padding:12px 14px; border:1px solid #d9e2f2; border-radius:14px; background:#f8fbff; }
     .stat strong { display:block; font-size:22px; color:#10213a; }
+    .actions-grid { display:grid; gap:10px; }
+    .progress-track { margin-top:12px; background:#dbe7ff; border-radius:999px; overflow:hidden; height:14px; }
+    .progress-fill { width:8%; height:14px; background:linear-gradient(90deg,#1947d1,#4f7dff); transition:width .3s ease; }
     .muted { color:#617089; font-size:13px; }
     .status { display:inline-flex; align-items:center; gap:6px; font-size:12px; padding:5px 10px; border-radius:999px; border:1px solid #d8e2f2; color:#324564; margin:0 6px 6px 0; }
     .status.ok { background:#eef8f0; color:#1d6b39; border-color:#c9ead3; }
@@ -250,22 +297,101 @@ foreach ($rows as $row) {
   </style>
 </head>
 <body class="admin-page">
-<header>
-  <div class="container" style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
-    <div style="font-weight:700;">Auditoria de links afiliados</div>
-    <div style="display:flex; gap:8px; flex-wrap:wrap;">
-      <a class="badge" href="/admin/ofertas.php">Ofertas</a>
-      <a class="badge" href="/admin/ml_corrigir_lote.php">Corrigir ML em lote</a>
-      <a class="badge" href="/admin/logout.php">Sair</a>
-    </div>
-  </div>
-</header>
+<?php admin_render_header('auditoria'); ?>
 
-<main class="container admin-wrap">
+<main class="container admin-shell admin-wrap">
   <?php if ($flash): ?>
     <div class="admin-alert <?= h((string) ($flash['type'] ?? '')) ?>"><?= h((string) ($flash['message'] ?? '')) ?></div>
   <?php endif; ?>
-  <section class="panel">
+
+  <section class="admin-hero">
+    <div class="admin-hero-head">
+      <div class="admin-hero-copy">
+        <a class="admin-kicker" href="/admin/ofertas.php">Gerenciador de produtos</a>
+        <h1>Auditoria de links</h1>
+        <p>Revisao operacional dos links afiliados com limpeza manual da Shopee e correcoes por loja.</p>
+      </div>
+      <div class="admin-hero-actions">
+        <a class="btn-link primary" href="/admin/ofertas.php">Voltar ao catalogo</a>
+      </div>
+    </div>
+  </section>
+
+  <?php admin_render_offer_subnav('auditoria'); ?>
+
+  <?php if (is_array($pendingShopeeCleanupJob) && !empty($pendingShopeeCleanupJob['job_id'])): ?>
+    <section class="admin-panel" id="shopee-cleanup-progress" data-job-id="<?= h((string) $pendingShopeeCleanupJob['job_id']) ?>">
+      <div class="muted">Job em andamento</div>
+      <div style="font-weight:700; color:#10213a; margin-top:4px;">Limpando a base da Shopee e validando os links.</div>
+      <div class="muted" id="shopee-cleanup-progress-label" style="margin-top:10px;">Iniciando limpeza da Shopee...</div>
+      <div class="progress-track">
+        <div class="progress-fill" id="shopee-cleanup-progress-bar"></div>
+      </div>
+    </section>
+  <?php endif; ?>
+
+  <section class="admin-panel">
+    <div class="muted">Operacao Shopee</div>
+    <div style="font-weight:700; color:#10213a; margin-top:4px;">Controle manual da limpeza e validacao dos 500 mais recentes.</div>
+    <div class="stats" style="margin-top:14px;">
+      <div class="stat">
+        <span class="muted">Itens Shopee agora</span>
+        <strong><?= $currentShopeeCount ?></strong>
+      </div>
+      <div class="stat">
+        <span class="muted">Limite operacional</span>
+        <strong>500</strong>
+      </div>
+      <div class="stat">
+        <span class="muted">Ultima limpeza manual</span>
+        <strong style="font-size:18px;"><?= h((string) ($latestShopeeCleanup['criado_em'] ?? 'Ainda nao rodada')) ?></strong>
+      </div>
+      <div class="stat">
+        <span class="muted">Status da ultima limpeza manual</span>
+        <strong style="font-size:18px;"><?= h((string) ($latestShopeeCleanup['status'] ?? 'sem historico')) ?></strong>
+      </div>
+    </div>
+    <div class="actions-grid" style="margin-top:14px;">
+      <form method="post">
+        <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+        <input type="hidden" name="action" value="cleanup_shopee_offers">
+        <button class="btn" type="submit" <?= is_array($pendingShopeeCleanupJob) && !empty($pendingShopeeCleanupJob['job_id']) ? 'disabled' : '' ?>>Limpar Shopee e validar links</button>
+      </form>
+    </div>
+    <?php if ($latestShopeeCleanup): ?>
+      <?php if (!empty($latestShopeeCleanupSummary['has_data'])): ?>
+        <div class="stats" style="margin-top:16px;">
+          <div class="stat">
+            <span class="muted">Processados</span>
+            <strong><?= (int) ($latestShopeeCleanupSummary['processed_total'] ?? 0) ?></strong>
+          </div>
+          <div class="stat">
+            <span class="muted">Mantidos</span>
+            <strong><?= (int) ($latestShopeeCleanupSummary['kept_count'] ?? 0) ?></strong>
+          </div>
+          <div class="stat">
+            <span class="muted">Apagados por excesso</span>
+            <strong><?= (int) ($latestShopeeCleanupSummary['trimmed_deleted'] ?? 0) ?></strong>
+          </div>
+          <div class="stat">
+            <span class="muted">Links checados</span>
+            <strong><?= (int) ($latestShopeeCleanupSummary['checked_links'] ?? 0) ?></strong>
+          </div>
+          <div class="stat">
+            <span class="muted">Apagados por link invalido</span>
+            <strong><?= (int) ($latestShopeeCleanupSummary['invalid_deleted'] ?? 0) ?></strong>
+          </div>
+        </div>
+      <?php endif; ?>
+      <?php if (!empty($latestShopeeCleanup['error_message'])): ?>
+        <div class="status broken" style="margin-top:12px;"><?= h((string) $latestShopeeCleanup['error_message']) ?></div>
+      <?php endif; ?>
+    <?php else: ?>
+      <div class="muted" style="margin-top:12px;">Nenhuma limpeza manual da Shopee registrada no historico ainda.</div>
+    <?php endif; ?>
+  </section>
+
+  <section class="admin-panel">
     <div class="muted">Classificacao automatica por loja</div>
     <div style="font-weight:700; color:#10213a; margin-top:4px;">Links foram separados em `aparentemente ok`, `suspeito` e `definitivamente errado`.</div>
     <?php if ($feedback !== ''): ?>
@@ -282,31 +408,33 @@ foreach ($rows as $row) {
       <a class="badge" href="/admin/auditoria_links.php?loja=<?= urlencode($selectedStore) ?>&publicacao=<?= urlencode($selectedPublication) ?>&diagnostico=suspect">So suspeitos</a>
       <a class="badge" href="/admin/auditoria_links.php?loja=<?= urlencode($selectedStore) ?>&publicacao=<?= urlencode($selectedPublication) ?>&diagnostico=ok">So OK</a>
     </div>
-    <form method="post" style="margin-top:14px;">
-      <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
-      <input type="hidden" name="action" value="safe_mode">
-      <button class="btn" type="submit">Reaplicar modo seguro</button>
-    </form>
-    <form method="post" style="margin-top:10px;">
-      <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
-      <input type="hidden" name="action" value="reactivate_ok_filtered">
-      <input type="hidden" name="target_store" value="<?= h($selectedStore) ?>">
-      <button class="btn" type="submit">Reativar OK da selecao atual</button>
-    </form>
-    <form method="post" style="margin-top:10px;">
-      <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
-      <input type="hidden" name="action" value="sanitize_shopee_aff">
-      <button class="btn" type="submit">Limpar aff da Shopee</button>
-    </form>
-    <form method="post" style="margin-top:10px;">
-      <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
-      <input type="hidden" name="action" value="repair_ml_product_links">
-      <button class="btn" type="submit">Corrigir links produto ML</button>
-    </form>
+    <div class="actions-grid" style="margin-top:14px;">
+      <form method="post">
+        <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+        <input type="hidden" name="action" value="safe_mode">
+        <button class="btn" type="submit">Reaplicar modo seguro</button>
+      </form>
+      <form method="post">
+        <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+        <input type="hidden" name="action" value="reactivate_ok_filtered">
+        <input type="hidden" name="target_store" value="<?= h($selectedStore) ?>">
+        <button class="btn" type="submit">Reativar OK da selecao atual</button>
+      </form>
+      <form method="post">
+        <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+        <input type="hidden" name="action" value="sanitize_shopee_aff">
+        <button class="btn" type="submit">Limpar aff da Shopee</button>
+      </form>
+      <form method="post">
+        <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+        <input type="hidden" name="action" value="repair_ml_product_links">
+        <button class="btn" type="submit">Corrigir links produto ML</button>
+      </form>
+    </div>
   </section>
 
   <?php foreach ($summary as $store => $numbers): ?>
-    <section class="panel">
+    <section class="admin-panel">
       <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start;">
         <div>
           <h2 style="margin:0; color:#10213a;"><?= h($store) ?></h2>
@@ -332,7 +460,7 @@ foreach ($rows as $row) {
   <?php endforeach; ?>
 
   <?php foreach (['broken' => 'Definitivamente errado', 'suspect' => 'Suspeito', 'ok' => 'Aparentemente ok'] as $severity => $title): ?>
-    <section class="panel table-wrap">
+    <section class="admin-panel table-wrap">
       <h3 style="margin-top:0; color:#10213a;"><?= h($title) ?></h3>
       <table>
         <thead>
@@ -394,6 +522,81 @@ foreach ($rows as $row) {
     </section>
   <?php endforeach; ?>
 </main>
+<script>
+  (function () {
+    var toggle = document.querySelector('[data-admin-menu-toggle]');
+    var menu = document.querySelector('[data-admin-menu]');
+    if (!toggle || !menu) {
+      return;
+    }
+
+    function syncMenuState() {
+      if (window.innerWidth > 640) {
+        document.body.classList.remove('admin-menu-open');
+        toggle.setAttribute('aria-expanded', 'false');
+      }
+    }
+
+    toggle.addEventListener('click', function () {
+      var isOpen = document.body.classList.toggle('admin-menu-open');
+      toggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    });
+
+    window.addEventListener('resize', syncMenuState);
+    syncMenuState();
+  })();
+
+  (function () {
+    var progressRoot = document.getElementById('shopee-cleanup-progress');
+    if (!progressRoot) {
+      return;
+    }
+
+    var jobId = progressRoot.getAttribute('data-job-id');
+    var bar = document.getElementById('shopee-cleanup-progress-bar');
+    var label = document.getElementById('shopee-cleanup-progress-label');
+    if (!jobId || !bar || !label) {
+      return;
+    }
+
+    function applyProgress(payload) {
+      var percent = Math.max(4, Math.min(100, parseInt(payload.progress_percent || 0, 10) || 0));
+      bar.style.width = percent + '%';
+      label.textContent = payload.progress_label || 'Processando limpeza da Shopee no servidor';
+      if (payload.status === 'success' || payload.status === 'error') {
+        if (payload.redirect_url) {
+          window.location.href = payload.redirect_url;
+          return;
+        }
+        window.location.reload();
+      }
+    }
+
+    function poll() {
+      fetch('/admin/shopee_cleanup_job_status.php?job_id=' + encodeURIComponent(jobId), {
+        credentials: 'same-origin'
+      })
+        .then(function (response) { return response.json(); })
+        .then(function (payload) {
+          if (!payload || payload.ok !== true) {
+            label.textContent = payload && payload.error ? payload.error : 'Falha ao consultar o andamento da limpeza.';
+            bar.style.width = '100%';
+            return;
+          }
+          applyProgress(payload);
+          if (payload.status === 'running') {
+            window.setTimeout(poll, 2500);
+          }
+        })
+        .catch(function () {
+          label.textContent = 'Falha ao consultar o andamento da limpeza.';
+          bar.style.width = '100%';
+        });
+    }
+
+    window.setTimeout(poll, 1200);
+  })();
+</script>
 </body>
 </html>
 

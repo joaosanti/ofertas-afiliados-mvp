@@ -1,23 +1,27 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import secrets
 import shutil
 import subprocess
+import time
 from base64 import urlsafe_b64encode
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 import httpx
 import imageio_ffmpeg
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from app.database import SessionLocal
 from app.services.offer_card_asset import generate_offer_square_card_asset
 from app.services.social_meta import download_source_video_asset, generate_reel_asset
+from app.services.sftp_deploy import ensure_stories_dir, story_public_url
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -25,6 +29,9 @@ RUNTIME_ROOT = PROJECT_ROOT / "automacao_ofertas" / "runtime" / "shopee_video"
 BUNDLED_MUSIC_DIR = PROJECT_ROOT / "automacao_ofertas" / "assets" / "music"
 BUNDLED_DEFAULT_BG_MUSIC = BUNDLED_MUSIC_DIR / "mixkit-serene-view-443.mp3"
 OFFER_VIDEO_UPLOAD_DIR = PROJECT_ROOT / "public_html" / "uploads" / "ofertas_videos"
+TARGET_VIDEO_WIDTH = 1080
+TARGET_VIDEO_HEIGHT = 1920
+TARGET_VIDEO_FPS = 30
 
 SELECT_DRAFT_SQL = text(
     """
@@ -60,7 +67,8 @@ SELECT_DRAFT_SQL = text(
       o.imagem_urls_json,
       o.video_urls_json,
       o.categoria,
-      o.tags
+      o.tags,
+      d.package_payload_json
     FROM shopee_video_drafts d
     INNER JOIN ofertas o
       ON o.id = d.oferta_id
@@ -112,6 +120,111 @@ SELECT_OFFER_SQL = text(
     """
 )
 
+SELECT_SOCIAL_OFFER_SQL = text(
+    """
+    SELECT
+      NULL AS draft_id,
+      o.id AS oferta_id,
+      NULL AS draft_status,
+      'manual' AS publish_mode,
+      o.titulo AS title_snapshot,
+      NULL AS draft_caption,
+      o.url_afiliado AS draft_affiliate_url,
+      CONCAT('/oferta/', o.slug) AS draft_offer_url,
+      NULL AS draft_video_source_url,
+      o.imagem_url AS draft_image_url,
+      o.id,
+      o.slug,
+      o.titulo,
+      o.descricao,
+      o.preco,
+      o.preco_antigo,
+      o.desconto_percentual,
+      o.preco_pix,
+      o.preco_outros_meios,
+      o.parcelas_texto,
+      o.frete_texto,
+      o.avaliacao_nota,
+      o.avaliacao_total,
+      o.promocao_texto,
+      o.loja,
+      o.url_afiliado,
+      o.cupom,
+      o.imagem_url,
+      o.imagem_urls_json,
+      o.video_urls_json,
+      o.categoria,
+      o.tags
+    FROM ofertas o
+    WHERE o.id = :offer_id
+      AND o.ativo = 1
+    LIMIT 1
+    """
+)
+
+SELECT_DRAFT_OFFERS_SQL = text(
+    """
+    SELECT
+      id,
+      slug,
+      titulo,
+      preco,
+      preco_antigo,
+      desconto_percentual,
+      preco_pix,
+      parcelas_texto,
+      frete_texto,
+      categoria,
+      cupom,
+      imagem_url,
+      url_afiliado,
+      tags
+    FROM ofertas
+    WHERE id IN :ids
+      AND ativo = 1
+      AND LOWER(loja) = 'shopee'
+    """
+).bindparams(bindparam("ids", expanding=True))
+
+SELECT_EXISTING_DRAFT_IDS_SQL = text(
+    """
+    SELECT oferta_id
+    FROM shopee_video_drafts
+    WHERE oferta_id IN :ids
+    """
+).bindparams(bindparam("ids", expanding=True))
+
+UPSERT_DRAFT_SQL = text(
+    """
+    INSERT INTO shopee_video_drafts
+      (oferta_id, status, publish_mode, title_snapshot, price_snapshot, caption, affiliate_url, offer_url, video_source_url, image_url, notes, creative_payload_json, package_status, api_status, created_by_admin_id, created_by_login, published_at, last_error, package_error)
+    VALUES
+      (:oferta_id, :status, :publish_mode, :title_snapshot, :price_snapshot, :caption, :affiliate_url, :offer_url, :video_source_url, :image_url, :notes, :creative_payload_json, :package_status, :api_status, :created_by_admin_id, :created_by_login, NULL, NULL, NULL)
+    ON DUPLICATE KEY UPDATE
+      status = VALUES(status),
+      publish_mode = VALUES(publish_mode),
+      title_snapshot = VALUES(title_snapshot),
+      price_snapshot = VALUES(price_snapshot),
+      caption = VALUES(caption),
+      affiliate_url = VALUES(affiliate_url),
+      offer_url = VALUES(offer_url),
+      video_source_url = VALUES(video_source_url),
+      image_url = VALUES(image_url),
+      notes = VALUES(notes),
+      creative_payload_json = VALUES(creative_payload_json),
+      package_status = CASE
+        WHEN package_payload_json IS NULL OR package_payload_json = '' THEN 'not_started'
+        ELSE 'stale'
+      END,
+      api_status = VALUES(api_status),
+      created_by_admin_id = VALUES(created_by_admin_id),
+      created_by_login = VALUES(created_by_login),
+      last_error = NULL,
+      package_error = NULL,
+      published_at = CASE WHEN VALUES(status) = 'published' THEN COALESCE(published_at, NOW()) ELSE published_at END
+    """
+)
+
 
 def shopee_video_runtime_dir() -> Path:
     RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
@@ -129,6 +242,24 @@ def _slugify(value: Any) -> str:
 
 def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _decode_tag_url(tags: Any, prefix: str) -> str:
+    for part in [item.strip() for item in str(tags or "").split(",") if item.strip()]:
+        if not part.startswith(prefix):
+            continue
+        encoded = part[len(prefix):].strip()
+        if not encoded:
+            continue
+        padding = "=" * (-len(encoded) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(encoded + padding).decode("utf-8")
+        except Exception:  # noqa: BLE001
+            continue
+        normalized = _clean_text(decoded)
+        if normalized.startswith(("http://", "https://")):
+            return normalized
+    return ""
 
 
 def _site_base_url() -> str:
@@ -178,6 +309,131 @@ def _category_hashtags(category: str) -> list[str]:
     return ["#achadinhos", "#promocao"]
 
 
+def _normalize_hashtag_token(value: Any) -> str:
+    raw = _clean_text(value)
+    if not raw or re.match(r"^https?://", raw, flags=re.IGNORECASE):
+        return ""
+    if ":" in raw:
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "", _slugify(raw))
+    return f"#{slug}" if slug else ""
+
+
+def _offer_hashtags(offer: dict[str, Any], limit: int = 6) -> list[str]:
+    hashtags: list[str] = []
+    raw_tags = re.split(r"[\r\n,]+", str(offer.get("tags") or ""))
+    for raw_tag in raw_tags:
+        normalized = _normalize_hashtag_token(raw_tag)
+        if normalized and normalized not in hashtags:
+            hashtags.append(normalized)
+        if len(hashtags) >= max(1, limit):
+            return hashtags
+
+    for tag in _category_hashtags(_clean_text(offer.get("categoria") or "")):
+        normalized = _normalize_hashtag_token(tag)
+        if normalized and normalized not in hashtags:
+            hashtags.append(normalized)
+        if len(hashtags) >= max(1, limit):
+            return hashtags
+
+    for tag in _store_hashtags(offer):
+        if tag not in hashtags:
+            hashtags.append(tag)
+        if len(hashtags) >= max(1, limit):
+            break
+    return hashtags
+
+
+def _store_label(value: Any) -> str:
+    lowered = _clean_text(value).lower()
+    mapping = {
+        "shopee": "Shopee",
+        "amazon": "Amazon",
+        "mercado livre": "Mercado Livre",
+    }
+    return mapping.get(lowered, _clean_text(value) or "Loja")
+
+
+def _store_with_article(value: Any) -> str:
+    lowered = _clean_text(value).lower()
+    if lowered == "mercado livre":
+        return "no Mercado Livre"
+    if lowered == "amazon":
+        return "na Amazon"
+    if lowered == "shopee":
+        return "na Shopee"
+    label = _store_label(value)
+    return f"na {label}"
+
+
+def _store_of(value: Any) -> str:
+    lowered = _clean_text(value).lower()
+    if lowered == "mercado livre":
+        return "do Mercado Livre"
+    if lowered == "amazon":
+        return "da Amazon"
+    if lowered == "shopee":
+        return "da Shopee"
+    label = _store_label(value)
+    return f"da {label}"
+
+
+def _store_hashtags(offer: dict[str, Any]) -> list[str]:
+    store = _clean_text(offer.get("loja") or offer.get("store")).lower()
+    if store == "amazon":
+        return ["#amazon", "#ofertas", "#achadinhos", "#promocao"]
+    if store == "mercado livre":
+        return ["#mercadolivre", "#ofertas", "#achadinhos", "#promocao"]
+    return ["#shopee", "#shopeevideo", "#ofertas", "#achadinhos"]
+
+
+def _truncate_text(value: Any, max_chars: int) -> str:
+    text = _clean_text(value)
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 1:
+        return text[:max_chars]
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def _compact_caption(offer: dict[str, Any], max_chars: int = 150) -> str:
+    title = _clean_text(offer.get("titulo") or offer.get("title_snapshot") or "Oferta")
+    price = _money(offer.get("preco"))
+    discount = _discount_percent(offer)
+    coupon = _clean_text(offer.get("cupom"))
+    store = _store_label(offer.get("loja") or offer.get("store"))
+    store_with_article = _store_with_article(store)
+    hashtags = _offer_hashtags(offer, limit=5)
+    hashtags_text = " ".join(hashtags)
+
+    candidates: list[str] = []
+    if coupon:
+        candidates.append(f"Cupom {coupon} no {title} por {price}.")
+        candidates.append(f"{title} com cupom por {price}.")
+    if discount > 0:
+        candidates.append(f"{title} com {discount}% off por {price}.")
+    candidates.extend(
+        [
+            f"{title} por {price} {store_with_article}.",
+            f"{title} por {price}.",
+            f"Achado {store} por {price}.",
+        ]
+    )
+
+    for candidate in candidates:
+        final = _clean_text(f"{hashtags_text} {candidate}")
+        if len(final) <= max_chars:
+            return final
+
+    reserve = len(hashtags_text) + 1 if hashtags_text else 0
+    available = max(20, max_chars - reserve)
+    short_title = _truncate_text(title, max(12, available - 12))
+    fallback = _clean_text(f"{hashtags_text} {short_title} {price}")
+    if len(fallback) <= max_chars:
+        return fallback
+    return _truncate_text(_clean_text(f"{hashtags_text} {price}"), max_chars)
+
+
 def _brand_name() -> str:
     raw = _clean_text(os.getenv("SHOPEE_VIDEO_BRAND_NAME") or "Zero Preço")
     if not raw:
@@ -197,7 +453,18 @@ def _category_matches(category: Any, keywords: tuple[str, ...]) -> bool:
 
 
 def _offer_video_url(offer: dict[str, Any]) -> str:
-    return _clean_text(offer.get("draft_video_source_url") or "")
+    draft_video_url = _clean_text(offer.get("draft_video_source_url") or "")
+    if draft_video_url.startswith(("http://", "https://")):
+        return draft_video_url
+
+    tags = offer.get("tags") or ""
+    for prefix in ("offer_video_url:", "shopee_video_url:"):
+        decoded_tag_url = _decode_tag_url(tags, prefix)
+        if decoded_tag_url:
+            return decoded_tag_url
+
+    gallery = _decode_url_list(offer.get("video_urls") or offer.get("video_urls_json"))
+    return gallery[0] if gallery else ""
 
 
 def _offer_video_upload_dir() -> Path:
@@ -266,7 +533,19 @@ def _attach_generated_video_to_offer(offer: dict[str, Any], video_path: Path, *,
         "label": label,
         "offer_id": int(offer["id"]),
         "tag_prefix": "offer_video_url:",
+        "persistent": True,
     }
+
+
+def _best_ready_video_file(files: dict[str, dict[str, Any]]) -> tuple[str, dict[str, Any]] | None:
+    for key in ("reel_video_final", "reel_video_tts_subtitled", "reel_video_tts", "reel_video", "source_video"):
+        entry = files.get(key)
+        if not isinstance(entry, dict):
+            continue
+        path = Path(str(entry.get("path") or "").strip())
+        if path.is_file():
+            return key, entry
+    return None
 
 
 def _decode_url_list(value: Any) -> list[str]:
@@ -316,12 +595,35 @@ def _tts_enabled() -> bool:
     return value not in {"0", "false", "off", "no", "nao"}
 
 
+def _package_simple_mode() -> bool:
+    value = (os.getenv("SHOPEE_VIDEO_SIMPLE_MODE") or "true").strip().lower()
+    return value not in {"0", "false", "off", "no", "nao"}
+
+
+def _package_target_duration_seconds() -> float:
+    raw = (os.getenv("SHOPEE_VIDEO_TARGET_DURATION_SECONDS") or "10").strip() or "10"
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return 10.0
+    return max(4.0, min(parsed, 60.0))
+
+
 def _openai_api_key_optional() -> str:
     return (os.getenv("OPENAI_API_KEY") or "").strip()
 
 
 def _tts_model() -> str:
     return (os.getenv("SHOPEE_VIDEO_TTS_MODEL") or "gpt-4o-mini-tts").strip()
+
+
+def _tts_max_attempts() -> int:
+    raw = (os.getenv("SHOPEE_VIDEO_TTS_MAX_ATTEMPTS") or "3").strip() or "3"
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return 3
+    return max(1, min(parsed, 5))
 
 
 def _tts_voice() -> str:
@@ -357,6 +659,31 @@ def _tts_instructions_for_offer(offer: dict[str, Any]) -> str:
         return f"{base} Destaque performance, praticidade e percepcao de tecnologia."
     if _category_matches(category, ("fitness", "esport", "saude")):
         return f"{base} Traga energia, urgencia e foco em beneficio rapido."
+    return base
+
+
+def _tts_instructions() -> str:
+    configured = (os.getenv("SHOPEE_VIDEO_TTS_INSTRUCTIONS") or "").strip()
+    if configured:
+        return configured
+    return (
+        "Fale em portugues do Brasil com energia de locutor de oferta, sorriso na voz, "
+        "mais empolgacao comercial e urgencia leve. Soe humano, quente e convincente, "
+        "nunca monotono ou robotico. Dê mais intencao nas palavras de preco, desconto, "
+        "cupom e chamada para acao. Pronuncie corretamente 'preco', 'video' e a marca "
+        "'Zero Preco'."
+    )
+
+
+def _tts_instructions_for_offer(offer: dict[str, Any]) -> str:
+    base = _tts_instructions()
+    category = offer.get("categoria") or ""
+    if _category_matches(category, ("moda", "beleza", "decor", "casa")):
+        return f"{base} Valorize desejo, estilo, conforto e sensacao de oportunidade bonita de vitrine."
+    if _category_matches(category, ("eletron", "gamer", "ferrament", "automot")):
+        return f"{base} Destaque performance, praticidade, tecnologia e impacto de oferta boa."
+    if _category_matches(category, ("fitness", "esport", "saude")):
+        return f"{base} Traga energia alta, urgencia e sensacao de resultado rapido."
     return base
 
 
@@ -486,6 +813,112 @@ def _probe_media_duration_seconds(media_path: Path) -> float:
     return max(0.0, (hours * 3600) + (minutes * 60) + seconds + (centiseconds / 100.0))
 
 
+def _probe_video_dimensions(media_path: Path) -> tuple[int, int]:
+    command = _ffprobe_command()
+    if not media_path.is_file() or not command:
+        return (0, 0)
+
+    completed = subprocess.run(
+        command
+        + [
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            str(media_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return (0, 0)
+
+    raw = (completed.stdout or "").strip().lower()
+    if "x" not in raw:
+        return (0, 0)
+
+    width_raw, height_raw = raw.split("x", 1)
+    try:
+        return (max(0, int(width_raw)), max(0, int(height_raw)))
+    except ValueError:
+        return (0, 0)
+
+
+def _normalize_video_for_shopee(
+    video_path: Path,
+    output_path: Path,
+    *,
+    max_duration_seconds: float | None = None,
+) -> dict[str, Any]:
+    if not video_path.is_file():
+        raise ValueError("Video base nao encontrado para normalizar em 1080x1920.")
+
+    width, height = _probe_video_dimensions(video_path)
+    filter_chain = (
+        f"scale={TARGET_VIDEO_WIDTH}:{TARGET_VIDEO_HEIGHT}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"pad={TARGET_VIDEO_WIDTH}:{TARGET_VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=0x0a2a67,"
+        "setsar=1"
+    )
+    errors: list[str] = []
+
+    for ffmpeg in _ffmpeg_command_candidates():
+        output_path.unlink(missing_ok=True)
+        command = ffmpeg + [
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            filter_chain,
+            "-r",
+            str(TARGET_VIDEO_FPS),
+            "-c:v",
+            "libx264",
+            "-threads",
+            "1",
+            "-preset",
+            "veryfast",
+            "-profile:v",
+            "main",
+            "-level:v",
+            "4.1",
+            "-crf",
+            "24",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "96k",
+            "-movflags",
+            "+faststart",
+        ]
+        if max_duration_seconds and max_duration_seconds > 0:
+            command.extend(["-t", f"{float(max_duration_seconds):.2f}"])
+        command.append(str(output_path))
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if completed.returncode == 0 and output_path.is_file():
+            return {
+                "path": str(output_path),
+                "filename": output_path.name,
+                "content_type": "video/mp4",
+                "width": TARGET_VIDEO_WIDTH,
+                "height": TARGET_VIDEO_HEIGHT,
+                "fps": TARGET_VIDEO_FPS,
+                "generated_from": "source_video",
+                "source_dimensions": {"width": width, "height": height},
+            }
+
+        detail = ((completed.stderr or "") + "\n" + (completed.stdout or "")).strip()
+        errors.append(f"{' '.join(ffmpeg)}: {detail[:220]}")
+
+    raise ValueError(f"Falha ao normalizar o video para 1080x1920. {' | '.join(errors[:3])}")
+
+
 def _split_voiceover_chunks(script_text: str, *, max_words: int = 6) -> list[str]:
     sentences = [segment.strip() for segment in re.split(r"(?<=[\.\!\?\:])\s+", _clean_text(script_text)) if segment.strip()]
     chunks: list[str] = []
@@ -550,8 +983,8 @@ def _background_music_source() -> str:
 def _reel_duration_seconds(creative: dict[str, Any], *, narration_duration: float = 0.0) -> float:
     creative_duration = max(1.5, float(creative.get("duration_seconds") or 0.0))
     if narration_duration <= 0:
-        return creative_duration
-    return max(creative_duration, round(float(narration_duration) + 0.35, 2))
+        return min(creative_duration, _package_target_duration_seconds())
+    return max(creative_duration, round(float(narration_duration) + 0.5, 2))
 
 
 def _background_music_source_for_offer(offer: dict[str, Any]) -> str:
@@ -593,8 +1026,50 @@ def _creative_angle(offer: dict[str, Any], discount: int, coupon: str) -> str:
     return "achadinho útil do dia"
 
 
-def _build_creative_payload(offer: dict[str, Any]) -> dict[str, Any]:
-    title = _clean_text(offer.get("titulo") or offer.get("title_snapshot") or "Oferta Shopee")
+def _creative_seed(offer: dict[str, Any], salt: str = "") -> int:
+    base = "|".join(
+        [
+            str(offer.get("id") or offer.get("oferta_id") or ""),
+            _clean_text(offer.get("titulo") or offer.get("title_snapshot") or ""),
+            str(salt or ""),
+        ]
+    )
+    digest = sha256(base.encode("utf-8", errors="ignore")).hexdigest()
+    return int(digest[:8], 16)
+
+
+def _pick_variant(offer: dict[str, Any], salt: str, options: list[str]) -> str:
+    if not options:
+        return ""
+    return options[_creative_seed(offer, salt) % len(options)]
+
+
+def _draft_ready_status(offer: dict[str, Any], mode: str) -> tuple[str, str, str]:
+    normalized_mode = "api" if mode == "api" else "manual"
+    if normalized_mode == "api":
+        return (
+            "api_blocked",
+            "not_supported",
+            "Sem endpoint publico confirmado para publicar no Shopee Video. Use este rascunho no fluxo manual.",
+        )
+
+    has_video = bool(_offer_video_url(offer))
+    has_image = bool(_clean_text(offer.get("imagem_url")))
+    if has_video or has_image:
+        return (
+            "manual_ready",
+            "manual_only",
+            "Rascunho pronto para gerar pacote pro e postar manualmente no app da Shopee.",
+        )
+    return (
+        "needs_video",
+        "manual_only",
+        "Oferta sem video e sem imagem suficiente para gerar pacote agora.",
+    )
+
+
+def _build_creative_payload_legacy(offer: dict[str, Any]) -> dict[str, Any]:
+    title = _clean_text(offer.get("titulo") or offer.get("title_snapshot") or "Oferta")
     price = _money(offer.get("preco"))
     old_price = _money(offer.get("preco_antigo")) if offer.get("preco_antigo") not in (None, "", 0, 0.0) else ""
     pix_price = _money(offer.get("preco_pix")) if offer.get("preco_pix") not in (None, "", 0, 0.0) else ""
@@ -603,6 +1078,9 @@ def _build_creative_payload(offer: dict[str, Any]) -> dict[str, Any]:
     shipping = _clean_text(offer.get("frete_texto"))
     installments = _clean_text(offer.get("parcelas_texto"))
     category = _clean_text(offer.get("categoria") or "Achadinhos")
+    store = _store_label(offer.get("loja") or offer.get("store"))
+    store_with_article = _store_with_article(store)
+    store_of = _store_of(store)
     angle = _creative_angle(offer, discount, coupon)
     brand_name = _brand_name()
 
@@ -619,10 +1097,10 @@ def _build_creative_payload(offer: dict[str, Any]) -> dict[str, Any]:
         hook = "Achadinho da Shopee que vale a pena abrir agora"
         cover = f"ACHADO {price}"
 
-    cta = "Clique no link e confira o preço atualizado."
+    cta = f"Abre o link e vê os detalhes completos com {brand_name}."
     if coupon:
         cta = f"Clique no link e teste o cupom {coupon}."
-    cta_final = f"Salva e abre o link com {brand_name}."
+    cta_final = f"Abre o link e vê os detalhes completos com {brand_name}."
 
     value_points = [title]
     if old_price:
@@ -730,7 +1208,7 @@ def _build_creative_payload(offer: dict[str, Any]) -> dict[str, Any]:
     scene_overlays = [
         {
             "scene_id": "hook",
-            "eyebrow": "ACHADO SHOPEE",
+            "eyebrow": f"ACHADO {store.upper()}",
             "headline": hook,
             "subline": _clean_text(title[:88]),
             "sticker": cover,
@@ -769,7 +1247,6 @@ def _build_creative_payload(offer: dict[str, Any]) -> dict[str, Any]:
     if coupon:
         voiceover_lines.append(f"Teste o cupom {coupon}.")
     voiceover_lines.append(cta)
-    voiceover_lines.append(f"Conteúdo por {brand_name}.")
 
     return {
         "angle": angle,
@@ -782,6 +1259,224 @@ def _build_creative_payload(offer: dict[str, Any]) -> dict[str, Any]:
         "value_points": value_points,
         "hashtags": hashtags,
         "caption": "\n".join([line for line in caption_lines if line]).strip(),
+        "shot_plan": shot_plan,
+        "scene_overlays": scene_overlays,
+        "voiceover_script": " ".join([line for line in voiceover_lines if line]).strip(),
+        "edit_notes": edit_notes,
+        "publish_checklist": publish_checklist,
+    }
+
+
+def _build_creative_payload(offer: dict[str, Any]) -> dict[str, Any]:
+    title = _clean_text(offer.get("titulo") or offer.get("title_snapshot") or "Oferta")
+    price = _money(offer.get("preco"))
+    old_price_value = float(offer.get("preco_antigo") or 0) if offer.get("preco_antigo") not in (None, "") else 0.0
+    old_price = _money(old_price_value) if old_price_value > 0 else ""
+    pix_price_value = float(offer.get("preco_pix") or 0) if offer.get("preco_pix") not in (None, "") else 0.0
+    pix_price = _money(pix_price_value) if pix_price_value > 0 else ""
+    discount = _discount_percent(offer)
+    coupon = _clean_text(offer.get("cupom"))
+    shipping = _clean_text(offer.get("frete_texto"))
+    installments = _clean_text(offer.get("parcelas_texto"))
+    category = _clean_text(offer.get("categoria") or "Achadinhos")
+    store = _store_label(offer.get("loja") or offer.get("store"))
+    store_with_article = _store_with_article(store)
+    store_of = _store_of(store)
+    angle = _creative_angle(offer, discount, coupon)
+    brand_name = _brand_name()
+
+    if coupon:
+        hook = _pick_variant(
+            offer,
+            "hook_coupon",
+            [
+                f"Cupom {store_with_article} e produto chamando clique: {title}",
+                f"Achado com cupom {store_with_article}: {title}",
+                f"Se liga nesse achado com cupom: {title}",
+            ],
+        )
+        cover = _pick_variant(offer, "cover_coupon", [f"CUPOM + {price}", f"CUPOM {coupon}", f"OFERTA + {price}"])
+    elif discount >= 35:
+        hook = _pick_variant(
+            offer,
+            "hook_discount",
+            [
+                f"Olha esse achado {store_with_article} com {discount}% off",
+                f"Desconto forte {store_with_article}: {discount}% off nesse produto",
+                f"Esse achado apareceu com {discount}% de desconto",
+            ],
+        )
+        cover = _pick_variant(offer, "cover_discount", [f"{discount}% OFF", f"CAIU PRA {price}", f"ACHADO {discount}%"])
+    elif pix_price:
+        hook = _pick_variant(
+            offer,
+            "hook_pix",
+            [
+                f"Esse produto ficou forte no Pix: {title}",
+                "Preco no Pix que chamou atencao agora",
+                f"Olha como esse item ficou no Pix: {pix_price}",
+            ],
+        )
+        cover = _pick_variant(offer, "cover_pix", [f"NO PIX {pix_price}", f"PIX {pix_price}", f"PIX + OFERTA"])
+    else:
+        hook = _pick_variant(
+            offer,
+            "hook_general",
+            [
+                f"Passando esse achado {store_of} que chamou atencao",
+                f"Se liga nesse achadinho {store_of} que apareceu agora",
+                f"Olha esse produto {store_of} com cara de venda rapida",
+                f"Achei esse item {store_with_article} e o pre\u00e7o ficou interessante",
+            ],
+        )
+        cover = _pick_variant(offer, "cover_general", [f"ACHADO {price}", f"OFERTA {price}", "VALE O CLIQUE"])
+
+    cta = _pick_variant(
+        offer,
+        "cta_primary",
+        [
+            f"Abre o link e v\u00ea os detalhes completos com {brand_name}.",
+        ],
+    )
+    if coupon:
+        cta = _pick_variant(
+            offer,
+            "cta_coupon",
+            [
+                f"Clica no link e testa o cupom {coupon}.",
+                f"Abre o link agora e valida o cupom {coupon}.",
+                f"Toca no link e aproveita o cupom {coupon} enquanto aparece.",
+            ],
+        )
+    cta_final = _pick_variant(
+        offer,
+        "cta_final",
+        [
+            f"Abre o link e v\u00ea os detalhes completos com {brand_name}.",
+        ],
+    )
+
+    value_points = [title]
+    if old_price and old_price_value > float(offer.get("preco") or 0):
+        value_points.append(f"Antes {old_price}, agora {price}.")
+    else:
+        value_points.append(f"Preco atual em destaque: {price}.")
+    if pix_price:
+        value_points.append(f"No Pix pode ficar por {pix_price}.")
+    if installments:
+        value_points.append(installments)
+    if shipping:
+        value_points.append(shipping)
+    if coupon:
+        value_points.append(f"Cupom em destaque: {coupon}.")
+
+    price_proof = price if discount <= 0 else f"{price} | {discount}% OFF"
+    detail_line = "Confira o valor atualizado no link."
+    if pix_price:
+        detail_line = f"No Pix: {pix_price}"
+    elif installments:
+        detail_line = installments
+    elif shipping:
+        detail_line = shipping
+    elif coupon:
+        detail_line = f"Cupom {coupon}"
+
+    hashtags = _offer_hashtags(offer, limit=6)
+
+    caption_lines = [hook, f"Produto: {title}", f"Preco destaque: {price}"]
+    if old_price and old_price_value > float(offer.get("preco") or 0):
+        caption_lines.append(f"Preco anterior: {old_price}")
+    if pix_price:
+        caption_lines.append(f"Preco no Pix: {pix_price}")
+    if installments:
+        caption_lines.append(f"Parcelamento: {installments}")
+    if shipping:
+        caption_lines.append(f"Frete: {shipping}")
+    if coupon:
+        caption_lines.append(f"Cupom: {coupon}")
+    caption_lines.extend([cta, " ".join([tag for tag in hashtags if tag])])
+
+    shot_plan = [
+        {"segment": "0-2s", "goal": "gancho inicial", "overlay": hook, "direction": "Abrir com close forte, texto grande e ritmo de oferta."},
+        {"segment": "2-5s", "goal": "prova de oferta", "overlay": price_proof, "direction": "Mostrar preco, produto e vantagem principal sem enrolar."},
+        {"segment": "5-8s", "goal": "fechamento com CTA", "overlay": cta_final, "direction": "Fechar com energia, CTA clara e marca no frame final."},
+    ]
+
+    scene_overlays = [
+        {"scene_id": "hook", "eyebrow": f"ACHADO {store.upper()}", "headline": hook, "subline": _clean_text(title[:88]), "sticker": cover},
+        {"scene_id": "proof", "eyebrow": "PROVA DE OFERTA", "headline": price_proof, "subline": detail_line, "sticker": f"CUPOM {coupon}" if coupon else (f"{discount}% OFF" if discount > 0 else "OFERTA DO DIA")},
+        {"scene_id": "cta", "eyebrow": "FECHAMENTO", "headline": cta_final, "subline": "Abra o link e confira os detalhes completos.", "sticker": "LINK DO PRODUTO", "brand": brand_name, "button_label": "ABRIR AGORA"},
+    ]
+
+    edit_notes = [
+        "Usar video vertical 9:16.",
+        "Gancho forte no primeiro segundo com texto em caixa alta.",
+        "Cortes curtos, mais energia e ritmo de venda.",
+        "Mostrar preco e beneficio principal antes dos 4 segundos.",
+        "Fechar com CTA visivel e marca no final.",
+    ]
+    if coupon:
+        edit_notes.append(f"Reforcar o cupom {coupon} no fechamento.")
+    if discount >= 35:
+        edit_notes.append("Destacar o desconto com selo grande e urgente.")
+
+    publish_checklist = [
+        "Confirmar se o produto exibido e o produto marcado sao o mesmo item.",
+        "Revisar preco e cupom antes de publicar.",
+        "Checar se o link de afiliado esta correto.",
+        f"Manter titulo curto e direto no app da {store}.",
+        "Publicar na vertical com capa legivel.",
+    ]
+
+    voiceover_lines = [
+        _pick_variant(
+            offer,
+            "voice_open",
+            [
+                f"Se liga nesse achadinho {store_of} que apareceu agora.",
+                f"Olha essa oferta {store_of} que chamou atencao por aqui.",
+                f"Presta atencao nesse achado {store_of} que vale abrir agora.",
+                f"Acabei de encontrar essa oferta {store_of} e o pre\u00e7o chamou aten\u00e7\u00e3o.",
+            ],
+        ),
+        f"Produto: {title}.",
+        f"Pre\u00e7o destaque: {price}.",
+    ]
+    if old_price and old_price_value > float(offer.get("preco") or 0):
+        voiceover_lines.append(f"Antes estava em {old_price}.")
+    if pix_price:
+        voiceover_lines.append(f"No Pix pode sair por {pix_price}.")
+    elif installments:
+        voiceover_lines.append(installments)
+    if shipping:
+        voiceover_lines.append(shipping)
+    if coupon:
+        voiceover_lines.append(f"Testa o cupom {coupon}.")
+    voiceover_lines.append(
+        _pick_variant(
+            offer,
+            "voice_bridge",
+            [
+                "Vale conferir esse pre\u00e7o com calma no link.",
+                "Esse valor ficou interessante para esse produto.",
+                "Oferta boa assim vale abrir o link e olhar os detalhes.",
+            ],
+        )
+    )
+    voiceover_lines.append(cta)
+
+    return {
+        "angle": angle,
+        "brand_name": brand_name,
+        "hook": hook,
+        "cover_text": cover,
+        "cta_text": cta,
+        "cta_final_text": cta_final,
+        "duration_seconds": 8,
+        "value_points": value_points,
+        "hashtags": hashtags,
+        "caption": "\n".join([line for line in caption_lines if line]).strip(),
+        "short_caption": _compact_caption(offer, 150),
         "shot_plan": shot_plan,
         "scene_overlays": scene_overlays,
         "voiceover_script": " ".join([line for line in voiceover_lines if line]).strip(),
@@ -865,19 +1560,33 @@ def _generate_openai_tts_audio(script_text: str, output_path: Path, *, voice: st
         "instructions": instructions,
         "response_format": "mp3",
     }
-    with httpx.Client(timeout=180, follow_redirects=True) as client:
-        response = client.post(
-            "https://api.openai.com/v1/audio/speech",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
-        response.raise_for_status()
-        audio_bytes = response.content
+    last_error: Exception | None = None
+    audio_bytes = b""
+    for attempt in range(1, _tts_max_attempts() + 1):
+        try:
+            with httpx.Client(timeout=180, follow_redirects=True) as client:
+                response = client.post(
+                    "https://api.openai.com/v1/audio/speech",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
+                audio_bytes = response.content
+            if audio_bytes:
+                break
+            raise ValueError("A OpenAI retornou audio vazio para a narracao.")
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt >= _tts_max_attempts():
+                raise ValueError(f"Falha ao gerar a narracao apos {attempt} tentativa(s): {str(exc)}") from exc
+            time.sleep(min(2.5, 0.8 * attempt))
 
     if not audio_bytes:
+        if last_error is not None:
+            raise ValueError(str(last_error)) from last_error
         raise ValueError("A OpenAI retornou audio vazio para a narracao.")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -896,6 +1605,8 @@ def _mux_video_with_audio(video_path: Path, audio_path: Path, output_path: Path)
         raise ValueError("Audio da narracao nao encontrado para finalizar o video.")
 
     video_duration = _probe_media_duration_seconds(video_path)
+    audio_duration = _probe_media_duration_seconds(audio_path)
+    loop_video = audio_duration > 0 and video_duration > 0 and audio_duration > video_duration + 0.05
     attempts = [
         ("copy", ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]),
         ("libx264", [*_ffmpeg_h264_video_args(), "-c:a", "aac", "-b:a", "192k"]),
@@ -911,6 +1622,10 @@ def _mux_video_with_audio(video_path: Path, audio_path: Path, output_path: Path)
                 "-hide_banner",
                 "-loglevel",
                 "error",
+            ]
+            if loop_video:
+                command.extend(["-stream_loop", "-1"])
+            command.extend([
                 "-i",
                 str(video_path),
                 "-i",
@@ -920,8 +1635,10 @@ def _mux_video_with_audio(video_path: Path, audio_path: Path, output_path: Path)
                 "-map",
                 "1:a:0",
                 *video_args,
-            ]
-            if video_duration > 0:
+            ])
+            if loop_video and audio_duration > 0:
+                command.extend(["-t", f"{audio_duration:.3f}"])
+            elif video_duration > 0:
                 command.extend(["-af", "apad", "-t", f"{video_duration:.3f}"])
             else:
                 command.append("-shortest")
@@ -1070,6 +1787,19 @@ def _mix_background_music_with_ducking(video_path: Path, music_path: Path, outpu
     raise ValueError(f"Falha ao mixar a trilha com ducking automatico. {' | '.join(errors[:3])}")
 
 
+def _copy_video_as_final(video_path: Path, output_path: Path) -> dict[str, Any]:
+    if not video_path.is_file():
+        raise ValueError("Video base nao encontrado para gerar o video final.")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.unlink(missing_ok=True)
+    shutil.copy2(video_path, output_path)
+    return {
+        "path": str(output_path),
+        "filename": output_path.name,
+        "content_type": "video/mp4",
+    }
+
+
 def _fetch_offer_payload(*, draft_id: int | None = None, offer_id: int | None = None) -> dict[str, Any]:
     db = SessionLocal()
     try:
@@ -1077,18 +1807,108 @@ def _fetch_offer_payload(*, draft_id: int | None = None, offer_id: int | None = 
             row = db.execute(SELECT_DRAFT_SQL, {"draft_id": int(draft_id)}).mappings().first()
         elif offer_id is not None:
             row = db.execute(SELECT_OFFER_SQL, {"offer_id": int(offer_id)}).mappings().first()
+            if row is None:
+                row = db.execute(SELECT_SOCIAL_OFFER_SQL, {"offer_id": int(offer_id)}).mappings().first()
         else:
             row = None
         if row is None:
-            raise ValueError("Oferta Shopee nao encontrada para gerar o pacote.")
+            raise ValueError("Oferta nao encontrada para gerar o pacote.")
+        payload = dict(row)
+        package_payload_raw = payload.get("package_payload_json")
+        if package_payload_raw:
+            try:
+                payload["package_payload"] = json.loads(str(package_payload_raw))
+            except json.JSONDecodeError:
+                payload["package_payload"] = {}
+        else:
+            payload["package_payload"] = {}
+        return payload
+    finally:
+        db.close()
+
+
+def _fetch_social_offer_payload(*, offer_id: int) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        row = db.execute(SELECT_SOCIAL_OFFER_SQL, {"offer_id": int(offer_id)}).mappings().first()
+        if row is None:
+            raise ValueError("Oferta nao encontrada para gerar o video social.")
         return dict(row)
     finally:
         db.close()
 
 
+def queue_shopee_video_drafts_for_offers(
+    db,
+    offer_ids: list[int],
+    *,
+    mode: str = "manual",
+    actor_user_id: int | None = None,
+    actor_login: str | None = None,
+) -> dict[str, Any]:
+    normalized_ids = sorted({int(item) for item in offer_ids if int(item) > 0})
+    if not normalized_ids:
+        return {"count": 0, "created": 0, "updated": 0, "items": []}
+
+    existing_ids = {
+        int(value)
+        for value in db.execute(SELECT_EXISTING_DRAFT_IDS_SQL, {"ids": normalized_ids}).scalars().all()
+    }
+    rows = db.execute(SELECT_DRAFT_OFFERS_SQL, {"ids": normalized_ids}).mappings().all()
+
+    created = 0
+    updated = 0
+    items: list[dict[str, Any]] = []
+    normalized_mode = "api" if mode == "api" else "manual"
+
+    for row in rows:
+        offer = dict(row)
+        status, api_status, notes = _draft_ready_status(offer, normalized_mode)
+        creative_payload = _build_creative_payload(offer)
+        video_url = _offer_video_url(offer) or None
+        db.execute(
+            UPSERT_DRAFT_SQL,
+            {
+                "oferta_id": int(offer["id"]),
+                "status": status,
+                "publish_mode": normalized_mode,
+                "title_snapshot": str(offer.get("titulo") or ""),
+                "price_snapshot": float(offer.get("preco") or 0),
+                "caption": str(creative_payload.get("caption") or ""),
+                "affiliate_url": str(offer.get("url_afiliado") or ""),
+                "offer_url": f"/oferta/{str(offer.get('slug') or '')}",
+                "video_source_url": video_url,
+                "image_url": str(offer.get("imagem_url") or ""),
+                "notes": notes,
+                "creative_payload_json": json.dumps(creative_payload, ensure_ascii=False),
+                "package_status": "not_started",
+                "api_status": api_status,
+                "created_by_admin_id": actor_user_id,
+                "created_by_login": actor_login,
+            },
+        )
+        action = "updated" if int(offer["id"]) in existing_ids else "created"
+        if action == "created":
+            created += 1
+        else:
+            updated += 1
+        items.append(
+            {
+                "offer_id": int(offer["id"]),
+                "title": str(offer.get("titulo") or ""),
+                "status": status,
+                "has_video": bool(video_url),
+                "action": action,
+            }
+        )
+
+    return {"count": len(items), "created": created, "updated": updated, "items": items}
+
+
 def build_shopee_video_package(*, draft_id: int | None = None, offer_id: int | None = None) -> dict[str, Any]:
     payload = _fetch_offer_payload(draft_id=draft_id, offer_id=offer_id)
     creative = _build_creative_payload(payload)
+    simple_mode = _package_simple_mode()
 
     created_at = _utc_now()
     job_id = f"shopee-video-{int(payload['id'])}-{created_at.strftime('%Y%m%d%H%M%S')}"
@@ -1099,10 +1919,12 @@ def build_shopee_video_package(*, draft_id: int | None = None, offer_id: int | N
     warnings: list[str] = []
 
     caption_file = _write_text_file(job_dir / "caption.txt", str(creative.get("caption") or ""))
+    short_caption_file = _write_text_file(job_dir / "caption-short.txt", str(creative.get("short_caption") or ""))
     brief_file = _write_text_file(job_dir / "brief.txt", _build_brief_text(payload, creative))
     checklist_file = _write_text_file(job_dir / "publish-checklist.txt", _build_checklist_text(creative))
     voiceover_file = _write_text_file(job_dir / "voiceover.txt", _build_voiceover_text(creative))
     files["caption"] = caption_file
+    files["caption_short"] = short_caption_file
     files["brief"] = brief_file
     files["checklist"] = checklist_file
     files["voiceover"] = voiceover_file
@@ -1120,6 +1942,7 @@ def build_shopee_video_package(*, draft_id: int | None = None, offer_id: int | N
         "offer_url": str(payload.get("draft_offer_url") or ""),
         "image_url": str(payload.get("imagem_url") or payload.get("draft_image_url") or ""),
         "source_video_url": _offer_video_url(payload),
+        "reel_source": "image_gallery",
         "image_gallery_urls": _offer_image_gallery_urls(payload),
         "video_gallery_urls": _offer_video_gallery_urls(payload),
         "tts": {
@@ -1130,6 +1953,7 @@ def build_shopee_video_package(*, draft_id: int | None = None, offer_id: int | N
             "generated": False,
             "subtitle_generated": False,
         },
+        "simple_mode": simple_mode,
         "creative": creative,
         "warnings": warnings,
     }
@@ -1162,7 +1986,8 @@ def build_shopee_video_package(*, draft_id: int | None = None, offer_id: int | N
                     voice=selected_voice,
                     instructions=selected_instructions,
                 )
-                files["tts_audio"] = tts_audio
+                if not simple_mode:
+                    files["tts_audio"] = tts_audio
                 metadata_payload["tts"]["generated"] = True
                 narration_duration = _probe_media_duration_seconds(Path(tts_audio["path"]))
                 metadata_payload["tts"]["duration_seconds"] = round(narration_duration, 2)
@@ -1174,24 +1999,65 @@ def build_shopee_video_package(*, draft_id: int | None = None, offer_id: int | N
     reel_duration = _reel_duration_seconds(creative, narration_duration=narration_duration)
     metadata_payload["creative"]["duration_seconds"] = reel_duration
 
-    try:
-        reel_asset = generate_reel_asset(payload, duration_seconds=reel_duration, creative=creative)
-        files["reel_video"] = {
-            "path": str(reel_asset["file_path"]),
-            "filename": str(reel_asset["filename"]),
-            "content_type": "video/mp4",
-            "public_url": str(reel_asset.get("public_url") or ""),
-        }
-        poster_url = str(reel_asset.get("poster_url") or "")
-        if poster_url:
-            files["poster"] = {
-                "path": str((Path(reel_asset["file_path"]).parent / Path(poster_url).name)),
-                "filename": Path(poster_url).name,
-                "content_type": "image/jpeg",
-                "public_url": poster_url,
+    source_video_url = _offer_video_url(payload)
+    if source_video_url and not simple_mode:
+        try:
+            source_video = download_source_video_asset(payload, source_video_url)
+            source_video_entry = {
+                "path": str(source_video["file_path"]),
+                "filename": str(source_video["filename"]),
+                "content_type": "video/mp4",
+                "public_url": str(source_video.get("public_url") or ""),
+                "source_url": source_video_url,
             }
-    except Exception as exc:  # noqa: BLE001
-        warnings.append(f"Video base gerado por imagem indisponivel: {str(exc)}")
+            files["source_video"] = source_video_entry
+            try:
+                normalized_source_path = job_dir / f"source-video-{int(payload['id'])}-1080x1920.mp4"
+                normalized_source_video = _normalize_video_for_shopee(
+                    Path(source_video["file_path"]),
+                    normalized_source_path,
+                    max_duration_seconds=reel_duration,
+                )
+                files["reel_video"] = {
+                    **normalized_source_video,
+                    "source_url": source_video_url,
+                }
+                metadata_payload["reel_source"] = "source_video_normalized"
+                metadata_payload["source_video_dimensions"] = normalized_source_video.get("source_dimensions")
+                metadata_payload["reel_video_dimensions"] = {
+                    "width": TARGET_VIDEO_WIDTH,
+                    "height": TARGET_VIDEO_HEIGHT,
+                }
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"Video original baixado, mas sem normalizacao HD: {str(exc)}")
+                files["reel_video"] = {
+                    **source_video_entry,
+                    "generated_from": "source_video",
+                }
+                metadata_payload["reel_source"] = "source_video"
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Video original nao baixado para usar como reel base: {str(exc)}")
+
+    if "reel_video" not in files:
+        try:
+            reel_asset = generate_reel_asset(payload, duration_seconds=reel_duration, creative=creative)
+            files["reel_video"] = {
+                "path": str(reel_asset["file_path"]),
+                "filename": str(reel_asset["filename"]),
+                "content_type": "video/mp4",
+                "public_url": str(reel_asset.get("public_url") or ""),
+                "generated_from": "image_gallery",
+            }
+            poster_url = str(reel_asset.get("poster_url") or "")
+            if poster_url:
+                files["poster"] = {
+                    "path": str((Path(reel_asset["file_path"]).parent / Path(poster_url).name)),
+                    "filename": Path(poster_url).name,
+                    "content_type": "image/jpeg",
+                    "public_url": poster_url,
+                }
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Video base gerado por imagem indisponivel: {str(exc)}")
 
     if "tts_audio" in files and "reel_video" in files:
         try:
@@ -1207,13 +2073,6 @@ def build_shopee_video_package(*, draft_id: int | None = None, offer_id: int | N
             subtitled_video = _burn_subtitles_into_video(Path(narrated_video["path"]), Path(subtitle_entry["path"]), subtitled_path)
             files["reel_video_tts_subtitled"] = subtitled_video
             try:
-                attached_video = _attach_generated_video_to_offer(payload, Path(subtitled_video["path"]), label="video_legendado")
-            except Exception as exc:  # noqa: BLE001
-                warnings.append(f"Video legendado gerado, mas nao foi anexado na oferta do admin: {str(exc)}")
-            else:
-                files["offer_video_admin"] = attached_video
-                metadata_payload["offer_video_url"] = attached_video["public_url"]
-            try:
                 music_entry = _prepare_background_music(job_dir, payload)
             except Exception as exc:  # noqa: BLE001
                 music_entry = None
@@ -1226,8 +2085,42 @@ def build_shopee_video_package(*, draft_id: int | None = None, offer_id: int | N
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"Narracao automatica indisponivel: {str(exc)}")
 
-    source_video_url = _offer_video_url(payload)
-    if source_video_url:
+    if "tts_audio" not in files and metadata_payload["tts"]["generated"] and "reel_video" in files:
+        try:
+            audio_path = job_dir / "voiceover.mp3"
+            narrated_path = job_dir / (Path(files["reel_video"]["filename"]).stem + "-narrado.mp4")
+            narrated_video = _mux_video_with_audio(Path(files["reel_video"]["path"]), audio_path, narrated_path)
+            final_source = narrated_video
+            try:
+                music_entry = _prepare_background_music(job_dir, payload)
+            except Exception as exc:  # noqa: BLE001
+                music_entry = None
+                warnings.append(f"Trilha de fundo indisponivel: {str(exc)}")
+            final_path = job_dir / (Path(files["reel_video"]["filename"]).stem + "-final.mp4")
+            if music_entry:
+                files["music_bed"] = music_entry
+                final_video = _mix_background_music_with_ducking(Path(final_source["path"]), Path(music_entry["path"]), final_path)
+            else:
+                final_video = _copy_video_as_final(Path(final_source["path"]), final_path)
+            files["reel_video_final"] = {
+                **final_video,
+                "generated_from": "reel_video_tts",
+            }
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Narracao automatica indisponivel: {str(exc)}")
+
+    if "reel_video_final" not in files and "reel_video" in files:
+        try:
+            final_path = job_dir / (Path(files["reel_video"]["filename"]).stem + "-final.mp4")
+            final_video = _copy_video_as_final(Path(files["reel_video"]["path"]), final_path)
+            files["reel_video_final"] = {
+                **final_video,
+                "generated_from": "reel_video",
+            }
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Video final simplificado indisponivel: {str(exc)}")
+
+    if source_video_url and "source_video" not in files:
         try:
             source_video = download_source_video_asset(payload, source_video_url)
             files["source_video"] = {
@@ -1254,4 +2147,61 @@ def build_shopee_video_package(*, draft_id: int | None = None, offer_id: int | N
         "creative": creative,
         "files": files,
         "warnings": warnings,
+    }
+
+
+def build_shopee_social_video_asset(*, offer_id: int) -> dict[str, Any]:
+    payload = _fetch_social_offer_payload(offer_id=offer_id)
+    package = build_shopee_video_package(offer_id=offer_id)
+    files = package.get("files") if isinstance(package.get("files"), dict) else {}
+    creative = package.get("creative") if isinstance(package.get("creative"), dict) else {}
+    store = _store_label(payload.get("loja") or "Social")
+    best_ready_video = _best_ready_video_file(files)
+    if best_ready_video is None:
+        raise ValueError("Nao consegui gerar um video pronto para publicar no social.")
+
+    source_key, source_entry = best_ready_video
+    source_path = Path(str(source_entry.get("path") or "").strip())
+    if not source_path.is_file():
+        raise ValueError("O video escolhido para o social nao foi encontrado no disco.")
+
+    extension = source_path.suffix.lower()
+    if extension not in {".mp4", ".mov", ".m4v", ".webm"}:
+        extension = ".mp4"
+    target_filename = f"offer-{int(offer_id)}-{_slugify(store)}-social-{source_key}{extension}"
+    target_path = ensure_stories_dir() / target_filename
+    if source_path.resolve() != target_path.resolve():
+        shutil.copy2(source_path, target_path)
+
+    return {
+        "ok": True,
+        "offer_id": int(offer_id),
+        "filename": target_filename,
+        "file_path": str(target_path),
+        "public_url": story_public_url(target_filename),
+        "store": store,
+        "source_key": source_key,
+        "voiceover_script": _clean_text(creative.get("voiceover_script")),
+        "warnings": list(package.get("warnings") or []),
+        "package_job_id": str(package.get("job_id") or ""),
+    }
+
+
+def attach_generated_package_video(*, draft_id: int) -> dict[str, Any]:
+    payload = _fetch_offer_payload(draft_id=draft_id)
+    package_payload = payload.get("package_payload") if isinstance(payload.get("package_payload"), dict) else {}
+    files = package_payload.get("files") if isinstance(package_payload.get("files"), dict) else {}
+    best_ready_video = _best_ready_video_file(files)
+    if best_ready_video is None:
+        raise ValueError("Este pacote ainda nao tem video pronto para aplicar na oferta.")
+
+    attach_key, attach_entry = best_ready_video
+    attached_video = _attach_generated_video_to_offer(payload, Path(str(attach_entry["path"])), label=attach_key)
+    return {
+        "ok": True,
+        "draft_id": int(draft_id),
+        "offer_id": int(payload["id"]),
+        "video_source_key": attach_key,
+        "offer_video_url": attached_video["public_url"],
+        "attached": attached_video,
     }

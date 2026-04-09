@@ -7,13 +7,40 @@ const IMPORT_OPTIONS = [
   { key: "tiktok", label: "TikTok", note: "Conector futuro para catalogo social." },
 ];
 
+const IMPORT_BATCH_OPTIONS = [
+  { value: "1", label: "1 produto" },
+  { value: "5", label: "5 produtos" },
+  { value: "10", label: "10 produtos" },
+  { value: "50", label: "50 produtos" },
+  { value: "100", label: "100 produtos" },
+  { value: "all", label: "Todos" },
+];
+
+function parseImportRunLimit(value) {
+  if (value === "all" || value === "" || value == null) {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
+
+function formatImportRunLimitLabel(value) {
+  const parsed = parseImportRunLimit(value);
+  return parsed == null ? "todos" : String(parsed);
+}
+
 const SOCIAL_OPTIONS = [
   { key: "facebook:feed", label: "Facebook Feed", note: "Posta direto na pagina do projeto." },
   { key: "facebook:reel", label: "Facebook Reel", note: "Gera um MP4 vertical e publica na pagina do Facebook." },
+  { key: "both:reel_story", label: "Facebook + Instagram Reel + Story", note: "Publica reel e story nos dois canais para a mesma oferta." },
   { key: "both:reel", label: "Facebook + Instagram Reel", note: "Publica reel nos dois canais para a mesma oferta." },
   { key: "both:feed_story", label: "Facebook + Instagram Feed + Story", note: "Publica Facebook feed, Facebook story, Instagram feed e Instagram story na mesma execucao." },
   { key: "instagram:feed", label: "Instagram Feed", note: "Publica no feed do Instagram via Graph API." },
   { key: "instagram:reel", label: "Instagram Reel", note: "Usa video da Shopee quando existir e cai para MP4 gerado quando nao existir." },
+  { key: "instagram:reel_story", label: "Instagram Reel + Story", note: "Publica reel e story juntos para a mesma oferta." },
   { key: "instagram:feed_story", label: "Instagram Feed + Story", note: "Publica o feed e o story juntos para a mesma oferta." },
   { key: "instagram:story", label: "Instagram Story", note: "Usa a arte gerada automaticamente." },
   { key: "whatsapp:web", label: "WhatsApp Web Local", note: "Modo gratis: monta a mensagem e abre o WhatsApp Web para envio manual." },
@@ -24,13 +51,17 @@ const AUTO_SOCIAL_MODE_OPTIONS = {
   facebook: [
     { value: "feed", label: "Feed" },
     { value: "reel", label: "Reel" },
+    { value: "reel_story", label: "Reel + Story" },
   ],
   instagram: [
     { value: "feed", label: "Feed" },
     { value: "reel", label: "Reel" },
+    { value: "story", label: "Story" },
+    { value: "reel_story", label: "Reel + Story" },
   ],
   both: [
     { value: "reel", label: "Reel" },
+    { value: "reel_story", label: "Reel + Story" },
     { value: "feed_story", label: "Feed + Story" },
   ],
   whatsapp: [
@@ -288,8 +319,10 @@ function socialChannelPreviewTitle(platform, mode) {
   if (platform === "instagram" && mode === "feed") return "Preview Instagram Feed";
   if (platform === "instagram" && mode === "reel") return "Preview Instagram Reel";
   if (platform === "instagram" && mode === "story") return "Preview Instagram Story";
+  if (platform === "instagram" && mode === "reel_story") return "Preview Instagram Reel + Story";
   if (platform === "instagram" && mode === "feed_story") return "Preview Instagram Feed + Story";
   if ((platform === "both" || platform === "facebook_instagram") && mode === "reel") return "Preview Facebook + Instagram Reel";
+  if ((platform === "both" || platform === "facebook_instagram") && mode === "reel_story") return "Preview Facebook + Instagram Reel + Story";
   if ((platform === "both" || platform === "facebook_instagram") && mode === "feed") return "Preview Facebook + Instagram Feed";
   if ((platform === "both" || platform === "facebook_instagram") && mode === "feed_story") return "Preview Facebook + Instagram Feed + Story";
   return "Preview social";
@@ -485,6 +518,7 @@ function App() {
     keyword: "fone bluetooth",
     limit: 12,
     pages: 1,
+    runLimit: "5",
   });
   const [manualLinkText, setManualLinkText] = useState("");
   const [manualLinkProvider, setManualLinkProvider] = useState("auto");
@@ -572,7 +606,7 @@ function App() {
       ...overrides,
     });
   }
-  const [socialForm, setSocialForm] = useState({ selected: "both:feed_story", limit: 120, query: "" });
+  const [socialForm, setSocialForm] = useState({ selected: "both:reel_story", limit: 120, query: "" });
   const [socialFilters, setSocialFilters] = useState({ store: "all", category: "all" });
   const [activeSection, setActiveSection] = useState("painel");
   const [youtubeCutUrl, setYoutubeCutUrl] = useState("");
@@ -631,7 +665,7 @@ function App() {
     auto_social_enabled: true,
     auto_social_times: "07:00,13:00,19:00",
     auto_social_platform: "facebook",
-    auto_social_mode: "feed",
+    auto_social_mode: "reel_story",
     auto_social_limit: 3,
     auto_social_repeat_block_minutes: 1440,
     auto_story_enabled: false,
@@ -665,7 +699,7 @@ function App() {
     [settingsForm.auto_social_platform, settingsForm.auto_social_mode]
   );
   const autoSocialModeOptions = AUTO_SOCIAL_MODE_OPTIONS[normalizedAutoSocial.platform] || AUTO_SOCIAL_MODE_OPTIONS.facebook;
-  const isCombinedFeedStoryAuto = normalizedAutoSocial.platform === "both" && normalizedAutoSocial.mode === "feed_story";
+  const isCombinedStoryAuto = normalizedAutoSocial.platform === "both" && ["reel_story", "feed_story"].includes(normalizedAutoSocial.mode);
 
   const socialCandidates = useMemo(() => socialPreview?.items || [], [socialPreview]);
   const socialStoreOptions = useMemo(() => {
@@ -978,17 +1012,19 @@ function App() {
   async function handleImportRun() {
     setRunLoading((state) => ({ ...state, import: true }));
     try {
+      const limit = parseImportRunLimit(importForm.runLimit);
       const data = await fetchJson("/dashboard/api/import/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ providers: importForm.providers }),
+        body: JSON.stringify({ providers: importForm.providers, limit }),
       });
       const processed = (data.items || []).reduce((sum, item) => sum + Number(item.processed || item.imported || 0), 0);
       const created = (data.items || []).reduce((sum, item) => sum + Number(item.created || 0), 0);
       const updated = (data.items || []).reduce((sum, item) => sum + Number(item.updated || 0), 0);
+      const selected = (data.items || []).reduce((sum, item) => sum + Number(item.offers_selected || 0), 0);
       setToast({
         type: data.error ? "error" : "success",
-        message: `Importacao concluida: ${processed} processado(s), ${created} criado(s), ${updated} atualizado(s), ${data.error} erro(s).`,
+        message: `Importacao concluida: lote ${formatImportRunLimitLabel(importForm.runLimit)}, ${selected} selecionado(s), ${processed} processado(s), ${created} criado(s), ${updated} atualizado(s), ${data.error} erro(s).`,
       });
       await loadSnapshot();
     } catch (error) {
@@ -1690,6 +1726,27 @@ function App() {
       await loadSnapshot();
     } catch (error) {
       setToast({ type: "error", message: `Falha ao corrigir links da Shopee: ${error.message}` });
+    } finally {
+      setRunLoading((state) => ({ ...state, batch: false }));
+    }
+  }
+
+  async function handleShopeeReimportWithoutVideo() {
+    setRunLoading((state) => ({ ...state, batch: true }));
+    try {
+      const limit = parseImportRunLimit(importForm.runLimit);
+      const data = await fetchJson("/dashboard/api/import/store/shopee/reimport-without-video", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit }),
+      });
+      setToast({
+        type: "success",
+        message: `Shopee sem vídeo: lote ${formatImportRunLimitLabel(importForm.runLimit)}, ${Number(data.processed || 0)} processado(s), ${Number(data.updated || 0)} atualizado(s), ${Number(data.with_video || 0)} com vídeo, ${Number(data.without_video || 0)} ainda sem vídeo, ${Number(data.invalid || 0)} inválido(s).`,
+      });
+      await loadSnapshot();
+    } catch (error) {
+      setToast({ type: "error", message: `Falha ao reimportar Shopee sem vídeo: ${humanizeImportError(error.message)}` });
     } finally {
       setRunLoading((state) => ({ ...state, batch: false }));
     }
@@ -2520,11 +2577,11 @@ function App() {
               </div>
 
               <div className="field-grid" style={{ marginTop: 12 }}>
-                {isCombinedFeedStoryAuto ? (
+                {isCombinedStoryAuto ? (
                   <div className="field" style={{ gridColumn: "1 / -1" }}>
                     <label>Stories automaticos</label>
                     <div className="inline-note is-info">
-                      Com `both / feed_story`, o story ja roda junto no mesmo job automatico. O card separado de stories fica oculto para evitar duplicidade.
+                      Com `both / reel_story` ou `both / feed_story`, o story ja roda junto no mesmo job automatico. O card separado de stories fica oculto para evitar duplicidade.
                     </div>
                   </div>
                 ) : (
@@ -2692,6 +2749,12 @@ function App() {
                 <p className="panel-subtitle">Execute prévia, importação real e acompanhe o estado dos conectores.</p>
               </div>
               <div className="provider-actions">
+                <div className="field" style={{ minWidth: 132 }}>
+                  <label>Lote do job</label>
+                  <select value={importForm.runLimit} onChange={(e) => setImportForm((state) => ({ ...state, runLimit: e.target.value || "5" }))}>
+                    {IMPORT_BATCH_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
+                </div>
                 <button className="button is-primary" onClick={handleImportRun} disabled={runLoading.import || !importForm.providers.length}>{runLoading.import ? "Rodando importação..." : "Rodar importação"}</button>
               </div>
             </div>
@@ -2714,6 +2777,11 @@ function App() {
                         <input type="checkbox" checked={importForm.providers.includes(item.key)} onChange={() => toggleProvider(item.key)} />
                         Incluir na execução
                       </label>
+                      {item.key === "shopee" ? (
+                        <button className="button is-secondary" onClick={handleShopeeReimportWithoutVideo} disabled={runLoading.batch}>
+                          {runLoading.batch ? "Reimportando Shopee..." : "Reimportar sem vídeo"}
+                        </button>
+                      ) : null}
                     </div>
                   </div>
                 );
@@ -3821,7 +3889,7 @@ function App() {
                       <option value="">Selecione</option>
                       {youtubeChannelProfiles.map((profile) => (
                         <option key={`yt-channel-option-${profile.id}`} value={profile.id}>
-                          {profile.name}{profile.is_default ? " • padrao" : ""}{profile.is_active ? "" : " • inativo"}
+                          {profile.name}{profile.is_default ? " �?� padrao" : ""}{profile.is_active ? "" : " �?� inativo"}
                         </option>
                       ))}
                     </select>

@@ -95,6 +95,11 @@ def _is_meli_social_link(url: str) -> bool:
     return "/social/" in path or "matt_tool" in query
 
 
+def _is_meli_short_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return (parsed.netloc or "").lower() == "meli.la"
+
+
 def _is_meli_profile_or_list_social_url(url: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.netloc or "").lower()
@@ -294,6 +299,9 @@ def normalize_offer(raw: dict, store: str, affiliate_tag: str | None = None) -> 
         image_urls.insert(0, raw_image_url)
     elif not raw_image_url and image_urls:
         raw_image_url = image_urls[0]
+    if image_urls:
+        image_urls = image_urls[:5]
+        raw_image_url = image_urls[0]
 
     if raw_video_url and raw_video_url not in video_urls:
         video_urls.insert(0, raw_video_url)
@@ -302,6 +310,8 @@ def normalize_offer(raw: dict, store: str, affiliate_tag: str | None = None) -> 
 
     if clean_store.strip().lower() == "mercado livre":
         if social_url and not _is_meli_profile_or_list_social_url(social_url):
+            if not _is_meli_short_url(clean_url):
+                primary_url = social_url
             raw_tags = ",".join(part for part in [raw_tags, social_url] if part)
 
     if raw_video_url:

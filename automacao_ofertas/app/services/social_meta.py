@@ -4,16 +4,18 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import time
 from base64 import urlsafe_b64decode
 from hashlib import sha1
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import httpx
 import imageio.v2 as imageio
+import imageio_ffmpeg
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from sqlalchemy import bindparam, text
@@ -216,7 +218,11 @@ def _offer_source_video_url(offer: dict[str, Any]) -> str | None:
     manual_video_url = _decode_tag_url(offer.get("tags"), "offer_video_url:")
     if manual_video_url:
         return manual_video_url
-    return _decode_tag_url(offer.get("tags"), "shopee_video_url:")
+    shopee_video_url = _decode_tag_url(offer.get("tags"), "shopee_video_url:")
+    if shopee_video_url:
+        return shopee_video_url
+    gallery = _decode_offer_url_list(offer.get("video_urls") or offer.get("video_urls_json"))
+    return gallery[0] if gallery else None
 
 
 def _affiliate_audit(store: str, url: str) -> dict[str, str]:
@@ -227,6 +233,7 @@ def _affiliate_audit(store: str, url: str) -> dict[str, str]:
         return {"severity": "broken", "reason": "Sem link afiliado salvo."}
 
     if store_value == "mercado livre":
+        parsed_host = (urlparse(value).hostname or "").strip().lower()
         has_wid = "wid=" in value
         has_sid = "sid=affiliates" in value
         has_recos = "sid=recos" in value
@@ -234,6 +241,8 @@ def _affiliate_audit(store: str, url: str) -> dict[str, str]:
         has_affiliate_profile = "affiliate-profile" in value
         has_matt = "matt_tool=" in value
         has_social = "/social/" in value
+        if parsed_host == "meli.la":
+            return {"severity": "ok", "reason": "Shortlink oficial Mercado Livre."}
         if has_social or has_matt or has_wid or (has_wid and has_recos and has_affiliate_profile):
             return {"severity": "ok", "reason": "Link oficial Mercado Livre."}
         return {"severity": "broken", "reason": "Link ML sem marcador oficial."}
@@ -630,6 +639,38 @@ def _headline_for_offer(offer: dict[str, Any]) -> str:
     return f"{offer['titulo']} por {_money(offer['preco'])}"
 
 
+def _video_link_overlay_text(offer: dict[str, Any]) -> str:
+    destination_url = str(_destination_url(offer) or "").strip()
+    site_offer_url = str(_site_offer_url(offer) or "").strip()
+
+    candidates: list[str] = []
+    for raw_url in [destination_url, site_offer_url]:
+        if not raw_url:
+            continue
+        parsed = urlparse(raw_url)
+        host = (parsed.netloc or "").replace("www.", "").strip()
+        if not host:
+            continue
+        path = (parsed.path or "").rstrip("/")
+        query_slug = (parse_qs(parsed.query).get("slug") or [None])[0]
+        if query_slug:
+            visible = f"{host}{path}?slug={query_slug}"
+        elif path and path != "/":
+            visible = f"{host}{path}"
+        else:
+            visible = host
+        candidates.append(visible.strip())
+
+    for candidate in candidates:
+        if len(candidate) <= 60:
+            return candidate
+    for candidate in candidates:
+        compact = _display_url(f"https://{candidate}")
+        if compact:
+            return _truncate_text(compact, 60)
+    return _truncate_text(destination_url or site_offer_url, 60)
+
+
 def _caption_for_offer(offer: dict[str, Any]) -> str:
     price = _money(offer["preco"])
     store = _store_label(offer["loja"])
@@ -843,6 +884,110 @@ def _render_reel_frame(base_image: Image.Image, progress: float) -> Image.Image:
     return ImageOps.fit(resized, (width, height), method=Image.Resampling.LANCZOS, centering=(0.5, 0.4))
 
 
+def _render_video_link_badge(offer: dict[str, Any], *, canvas_width: int) -> Image.Image:
+    safe_width = max(240, int(canvas_width or 0))
+    scale = max(0.62, min(1.0, safe_width / 1080))
+    badge_width = min(max(int(safe_width - 56), 220), 940)
+    badge_height = max(88, int(round(122 * scale)))
+    badge = Image.new("RGBA", (badge_width, badge_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(badge)
+
+    shadow_box = (8, 10, badge_width - 8, badge_height - 2)
+    panel_box = (0, 0, badge_width - 16, badge_height - 12)
+    draw.rounded_rectangle(shadow_box, radius=34, fill=(7, 18, 46, 62))
+    draw.rounded_rectangle(panel_box, radius=32, fill=(255, 255, 255, 234), outline=(213, 226, 255, 250), width=3)
+
+    label_font = _load_font(max(14, int(round(22 * scale))), bold=True)
+    url_font = _load_font(max(18, int(round(28 * scale))), bold=True)
+    draw.text((max(18, int(round(28 * scale))), max(12, int(round(18 * scale)))), "LINK DO PRODUTO", font=label_font, fill="#2351b5")
+    draw.text((max(18, int(round(28 * scale))), max(38, int(round(54 * scale)))), _truncate_text(_video_link_overlay_text(offer), 62), font=url_font, fill="#08245f")
+    return badge
+
+
+def _apply_video_link_badge(frame: Image.Image, offer: dict[str, Any]) -> Image.Image:
+    badge = _render_video_link_badge(offer, canvas_width=frame.size[0])
+    composed = frame.convert("RGBA")
+    x = max(24, (frame.size[0] - badge.size[0]) // 2)
+    y = max(24, frame.size[1] - badge.size[1] - 42)
+    composed.alpha_composite(badge, (x, y))
+    return composed.convert("RGB")
+
+
+def _ffmpeg_command() -> list[str]:
+    system = shutil.which("ffmpeg")
+    if system:
+        return [system]
+    try:
+        return [imageio_ffmpeg.get_ffmpeg_exe()]
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("Nao consegui localizar o ffmpeg para processar o video social.") from exc
+
+
+def _burn_video_link_badge(source_path: Path, destination_path: Path, offer: dict[str, Any]) -> None:
+    badge_path = destination_path.with_suffix(".badge.png")
+    canvas_width = 1080
+    metadata_reader = imageio.get_reader(str(source_path))
+    try:
+        metadata = metadata_reader.get_meta_data() or {}
+        size = metadata.get("size") or ()
+        if isinstance(size, (tuple, list)) and size:
+            try:
+                canvas_width = int(size[0] or canvas_width)
+            except Exception:  # noqa: BLE001
+                canvas_width = 1080
+    finally:
+        metadata_reader.close()
+
+    badge = _render_video_link_badge(offer, canvas_width=canvas_width)
+    badge.save(badge_path, format="PNG", optimize=True)
+
+    video_args = [
+        ("libx264", ["-threads", "1", "-c:v", "libx264", "-preset", "veryfast", "-crf", "24"]),
+        ("mpeg4", ["-threads", "1", "-c:v", "mpeg4", "-q:v", "5"]),
+    ]
+    overlay_filter = "[0:v][1:v]overlay=(main_w-overlay_w)/2:main_h-overlay_h-42:shortest=1:format=auto[v]"
+    errors: list[str] = []
+
+    try:
+        for codec_label, codec_args in video_args:
+            destination_path.unlink(missing_ok=True)
+            command = _ffmpeg_command() + [
+                "-y",
+                "-i",
+                str(source_path),
+                "-loop",
+                "1",
+                "-i",
+                str(badge_path),
+                "-filter_complex",
+                overlay_filter,
+                "-map",
+                "[v]",
+                "-map",
+                "0:a?",
+                *codec_args,
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-shortest",
+                str(destination_path),
+            ]
+            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+            if completed.returncode == 0 and destination_path.is_file() and destination_path.stat().st_size > 0:
+                return
+            detail = (completed.stderr or completed.stdout or "ffmpeg sem detalhes").strip()
+            errors.append(f"{codec_label}: {detail[:240]}")
+    finally:
+        badge_path.unlink(missing_ok=True)
+
+    raise ValueError(f"Nao foi possivel gravar a marcacao de link no video. {' | '.join(errors[:2])}")
+
+
 def _default_reel_creative(offer: dict[str, Any]) -> dict[str, Any]:
     title = _truncate_text(str(offer.get("titulo") or "Oferta"), 72)
     price = _money(offer.get("preco"))
@@ -1031,7 +1176,7 @@ def _build_story_canvas(
     draw.ellipse((-120, 1450, 260, 1830), fill="#12398f")
     draw.rounded_rectangle((54, 54, 1026, 1866), radius=42, outline="#2f65db", width=4)
 
-    title_font = _load_font(56, bold=True)
+    title_font = _load_font(50, bold=True)
     price_font = _load_font(96, bold=True)
     old_price_font = _load_font(34)
     label_font = _load_font(30, bold=True)
@@ -1044,11 +1189,11 @@ def _build_story_canvas(
     if show_brand_label:
         draw.text((80, 120 + vertical_shift), "ZERO PRECO", font=label_font, fill="#dbe7ff")
 
-    title_lines = _wrap_text(offer["titulo"], 23)[:3]
+    title_lines = _wrap_text(offer["titulo"], 20)[:3]
     y = 250 + vertical_shift
     for line in title_lines:
         draw.text((80, y), line, font=title_font, fill="#f4f7fb")
-        y += 68
+        y += 62
 
     discount = _discount_percent(offer["preco"], offer.get("preco_antigo"))
 
@@ -1367,8 +1512,6 @@ def generate_reel_asset(
     destination = stories_dir / filename
     normalized_duration = max(1.5, float(duration_seconds or 0))
     total_frames = max(1, int(round(normalized_duration * fps)))
-    resolved_creative = creative or _default_reel_creative(offer)
-    scenes = list(resolved_creative.get("scene_overlays") or []) or list(_default_reel_creative(offer).get("scene_overlays") or [])
 
     _prefer_system_ffmpeg_for_imageio()
 
@@ -1391,9 +1534,6 @@ def generate_reel_asset(
                 if len(reel_frames) == 1:
                     progress = frame_index / max(total_frames - 1, 1)
                     frame = _render_reel_frame(reel_frames[0], progress)
-                    current_scene_index = min(int(progress * len(scenes)), len(scenes) - 1)
-                    scene = scenes[current_scene_index]
-                    scene_progress = (progress * len(scenes)) % 1.0
                 else:
                     timeline = (frame_index / max(total_frames - 1, 1)) * len(reel_frames)
                     segment_index = min(int(timeline), len(reel_frames) - 1)
@@ -1406,17 +1546,7 @@ def generate_reel_asset(
                         frame = Image.blend(current_frame, next_frame, blend)
                     else:
                         frame = current_frame
-                    current_scene_index = min(segment_index, len(scenes) - 1)
-                    scene = scenes[current_scene_index]
-                    scene_progress = segment_progress
-                frame = _apply_reel_overlay(
-                    frame,
-                    offer,
-                    scene,
-                    scene_progress=scene_progress,
-                    scene_index=current_scene_index,
-                    total_scenes=len(scenes),
-                )
+                frame = _apply_video_link_badge(frame, offer)
                 writer.append_data(np.asarray(frame))
         except Exception as exc:  # noqa: BLE001
             write_error = str(exc)
@@ -1445,7 +1575,7 @@ def generate_reel_asset(
         "destination_url": _destination_url(offer),
         "poster_url": story_public_url(poster_filename),
         "gallery_count": len(reel_frames),
-        "scene_count": len(scenes),
+        "scene_count": 0,
         "video_codec": selected_codec,
         "duration_seconds": round(normalized_duration, 2),
     }
@@ -1485,14 +1615,17 @@ def download_source_video_asset(offer: dict[str, Any], video_url: str) -> dict[s
         raise ValueError("Download do video da Shopee retornou arquivo vazio.")
 
     destination.write_bytes(content)
+    processed_filename = f"offer-{slug}-source-{url_hash}-linked.mp4"
+    processed_destination = stories_dir / processed_filename
+    _burn_video_link_badge(destination, processed_destination, offer)
 
     return {
         "ok": True,
         "offer_id": offer["id"],
-        "filename": filename,
-        "file_path": str(destination),
+        "filename": processed_filename,
+        "file_path": str(processed_destination),
         "source_url": normalized_url,
-        "public_url": story_public_url(filename),
+        "public_url": story_public_url(processed_filename),
     }
 
 
@@ -1586,6 +1719,8 @@ def build_meta_post_previews(
                 "promotion_text": offer.get("promocao_texto"),
                 "coupon": offer.get("cupom"),
                 "image_url": offer["imagem_url"],
+                "image_gallery_urls": _offer_image_gallery_urls(offer),
+                "video_gallery_urls": _decode_offer_url_list(offer.get("video_urls") or offer.get("video_urls_json")),
                 "video_url": _offer_source_video_url(offer),
                 "clicks": int(offer.get("clicks") or 0),
                 "offer_url": _offer_url(offer["slug"]),

@@ -130,11 +130,11 @@ def story_public_url(filename: str) -> str:
 
 
 def _generated_story_asset_retention_days() -> int:
-    raw = (os.getenv("GENERATED_STORY_ASSET_RETENTION_DAYS") or "7").strip() or "7"
+    raw = (os.getenv("GENERATED_STORY_ASSET_RETENTION_DAYS") or "1").strip() or "1"
     try:
         days = int(raw)
     except ValueError:
-        return 7
+        return 1
     return max(0, days)
 
 
@@ -400,6 +400,10 @@ def deploy_stories_via_sftp(
             "skipped_count": len(skipped),
             "items": uploaded,
             "skipped_items": skipped,
+            "cleanup": {
+                "local": prune_local_generated_story_assets(),
+                "remote": prune_remote_generated_story_assets(sftp_factory=factory),
+            },
         }
     finally:
         client.close()

@@ -121,13 +121,18 @@ if ($search !== '') {
 if ($mode === 'ml_invalidos') {
   $where[] = "LOWER(o.loja) = 'mercado livre'";
   $where[] = "(
-    o.url_afiliado NOT LIKE '%/social/%'
-    AND o.url_afiliado NOT LIKE '%matt_tool=%'
-    AND o.url_afiliado NOT LIKE '%affiliate-profile%'
-    AND o.url_afiliado NOT LIKE '%polycard_client=affiliates%'
-    AND (
-      o.url_afiliado NOT LIKE '%wid=%'
-      OR o.url_afiliado NOT LIKE '%sid=affiliates%'
+    o.url_afiliado LIKE '%social-profile-middleend%'
+    OR o.url_afiliado LIKE '%sid=storefronts%'
+    OR (
+      LOWER(o.url_afiliado) NOT LIKE 'https://meli.la/%'
+      AND o.url_afiliado NOT LIKE '%/social/%'
+      AND o.url_afiliado NOT LIKE '%matt_tool=%'
+      AND o.url_afiliado NOT LIKE '%affiliate-profile%'
+      AND o.url_afiliado NOT LIKE '%polycard_client=affiliates%'
+      AND (
+        o.url_afiliado NOT LIKE '%wid=%'
+        OR o.url_afiliado NOT LIKE '%sid=affiliates%'
+      )
     )
   )";
 } elseif ($mode === 'com_video') {
@@ -281,7 +286,9 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
       <div class="admin-offers-grid">
         <?php foreach ($ofertas as $o): ?>
           <?php $isMeli = strtolower((string) $o['loja']) === 'mercado livre'; ?>
-          <?php $isAffiliateOk = $isMeli ? admin_is_meli_affiliate_url($o['url_afiliado']) : false; ?>
+          <?php $meliAudit = $isMeli ? admin_meli_affiliate_audit($o['url_afiliado']) : null; ?>
+          <?php $meliSeverity = $isMeli ? (string) ($meliAudit['severity'] ?? '') : ''; ?>
+          <?php $isAffiliateOk = $isMeli ? $meliSeverity === 'ok' : false; ?>
           <?php $tagParts = admin_offer_tag_parts($o['tags']); ?>
           <?php $tagChips = array_values(array_filter($tagParts, 'admin_offer_tag_is_not_url')); ?>
           <?php $manualVideoUrl = tag_url_decode($o['tags'] ?? '', 'offer_video_url:'); ?>
@@ -329,7 +336,13 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                   <span class="admin-status <?= ((int) $o['destaque'] === 1) ? 'ok' : 'off' ?>"><?= ((int) $o['destaque'] === 1) ? 'Destaque' : 'Normal' ?></span>
                   <span class="admin-status <?= $hasVideo ? 'ok' : 'off' ?>"><?= h($videoStatusLabel) ?></span>
                   <?php if ($isMeli): ?>
-                    <span class="admin-status <?= $isAffiliateOk ? 'ok' : 'warn' ?>"><?= $isAffiliateOk ? 'ML afiliado ok' : 'Revisar link ML' ?></span>
+                    <?php if ($meliSeverity === 'ok'): ?>
+                      <span class="admin-status ok">ML afiliado ok</span>
+                    <?php elseif ($meliSeverity === 'suspect'): ?>
+                      <span class="admin-status off">ML suspeito</span>
+                    <?php else: ?>
+                      <span class="admin-status warn">Revisar link ML</span>
+                    <?php endif; ?>
                   <?php endif; ?>
                   <span class="admin-meta-chip admin-meta-chip-soft"><?= h((string) $o['atualizado_em']) ?> • <?= h((string) ($o['criado_por_login'] ?: 'nao identificado')) ?></span>
                 </div>
@@ -351,6 +364,10 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                   <strong>Acoes</strong>
                   <div class="admin-card-actions" style="margin-top: 10px;">
                     <a class="btn-link" href="/admin/oferta_editar.php?id=<?= (int) $o['id'] ?>">Editar</a>
+                    <?php if ($hasVideo && strtolower((string) $o['loja']) === 'shopee'): ?>
+                      <a class="btn-link primary" href="/admin/shopee_video_download.php?offer_id=<?= (int) $o['id'] ?>&type=video&download=1">Baixar video</a>
+                      <button class="btn-link" type="button" data-copy-text="<?= h(admin_shopee_video_default_caption($o)) ?>">Copiar legenda</button>
+                    <?php endif; ?>
                     <form method="post">
                       <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
                       <input type="hidden" name="id" value="<?= (int) $o['id'] ?>">
@@ -402,6 +419,64 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
 
     window.addEventListener('resize', syncMenuState);
     syncMenuState();
+  })();
+
+  (function () {
+    var copyButtons = document.querySelectorAll('[data-copy-text]');
+    if (!copyButtons.length) {
+      return;
+    }
+
+    function fallbackCopy(text) {
+      var field = document.createElement('textarea');
+      field.value = text;
+      field.setAttribute('readonly', 'readonly');
+      field.style.position = 'fixed';
+      field.style.opacity = '0';
+      document.body.appendChild(field);
+      field.focus();
+      field.select();
+      var copied = false;
+      try {
+        copied = document.execCommand('copy');
+      } catch (error) {
+        copied = false;
+      }
+      document.body.removeChild(field);
+      return copied;
+    }
+
+    function flashCopied(button) {
+      var original = button.textContent;
+      button.textContent = 'Copiado';
+      window.setTimeout(function () {
+        button.textContent = original;
+      }, 1400);
+    }
+
+    copyButtons.forEach(function (button) {
+      button.addEventListener('click', function () {
+        var text = button.getAttribute('data-copy-text') || '';
+        if (!text) {
+          return;
+        }
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () {
+            flashCopied(button);
+          }).catch(function () {
+            if (fallbackCopy(text)) {
+              flashCopied(button);
+            }
+          });
+          return;
+        }
+
+        if (fallbackCopy(text)) {
+          flashCopied(button);
+        }
+      });
+    });
   })();
 </script>
 </body>

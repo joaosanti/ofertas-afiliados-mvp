@@ -4,10 +4,10 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 
 AUTO_SOCIAL_SUPPORTED_MODES: dict[str, tuple[str, ...]] = {
-    "facebook": ("feed", "reel", "feed_story_reel"),
-    "instagram": ("feed", "reel", "feed_story", "feed_story_reel"),
-    "both": ("feed", "reel", "feed_story", "feed_story_reel"),
-    "facebook_instagram": ("feed", "reel", "feed_story", "feed_story_reel"),
+    "facebook": ("feed", "reel", "reel_story", "feed_story_reel"),
+    "instagram": ("feed", "reel", "story", "reel_story", "feed_story", "feed_story_reel"),
+    "both": ("feed", "reel", "reel_story", "feed_story", "feed_story_reel"),
+    "facebook_instagram": ("feed", "reel", "reel_story", "feed_story", "feed_story_reel"),
     "whatsapp": ("group",),
 }
 
@@ -99,20 +99,20 @@ class AutomationScheduler:
     def social_platform(self) -> str:
         platform, _ = _normalize_auto_social_action(
             os.getenv("AUTO_SOCIAL_PLATFORM") or "facebook",
-            os.getenv("AUTO_SOCIAL_MODE") or "feed_story_reel",
+            os.getenv("AUTO_SOCIAL_MODE") or "reel_story",
         )
         return platform
 
     def social_mode(self) -> str:
         _, mode = _normalize_auto_social_action(
             os.getenv("AUTO_SOCIAL_PLATFORM") or "facebook",
-            os.getenv("AUTO_SOCIAL_MODE") or "feed_story_reel",
+            os.getenv("AUTO_SOCIAL_MODE") or "reel_story",
         )
         return mode
 
     def social_limit(self) -> int:
         configured = _int_env("AUTO_SOCIAL_LIMIT", 1)
-        if self.social_platform() in {"both", "facebook_instagram"} and self.social_mode() in {"feed_story", "feed_story_reel"}:
+        if self.social_platform() in {"both", "facebook_instagram"} and self.social_mode() in {"reel_story", "feed_story", "feed_story_reel"}:
             return 1
         return configured
 

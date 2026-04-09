@@ -150,7 +150,18 @@ function site_remote_video_url_is_available($url) {
 }
 
 function site_offer_preferred_affiliate_url($offer) {
+  $store = strtolower(trim((string) ($offer['loja'] ?? '')));
   $affiliateUrl = trim((string) ($offer['url_afiliado'] ?? ''));
+  if ($store === 'mercado livre' || $store === 'mercadolivre') {
+    $host = strtolower((string) parse_url($affiliateUrl, PHP_URL_HOST));
+    if ($host === 'meli.la') {
+      return $affiliateUrl;
+    }
+    $socialUrl = site_decode_tag_url($offer['tags'] ?? '', 'meli_social_url:');
+    if ($socialUrl !== '') {
+      return $socialUrl;
+    }
+  }
   return $affiliateUrl;
 }
 

@@ -17,9 +17,29 @@ function ml_bulk_extract_product_id($url) {
   return null;
 }
 
+function ml_bulk_is_short_url($url) {
+  return strtolower((string) parse_url((string) $url, PHP_URL_HOST)) === 'meli.la';
+}
+
 function ml_bulk_is_profile_social_url($url) {
   $value = (string) $url;
   return str_contains($value, '/social/') && ml_bulk_extract_product_id($value) === null;
+}
+
+function ml_bulk_is_storefront_affiliate_url($url) {
+  $value = strtolower((string) $url);
+  return str_contains($value, 'social-profile-middleend') || str_contains($value, 'sid=storefronts');
+}
+
+function ml_bulk_is_deep_social_url($url) {
+  $value = (string) $url;
+  if (!str_contains($value, '/social/')) {
+    return false;
+  }
+  if (ml_bulk_is_profile_social_url($value)) {
+    return false;
+  }
+  return str_contains($value, 'ref=');
 }
 
 function ml_bulk_is_product_specific_affiliate_url($url) {
@@ -79,6 +99,12 @@ function ml_bulk_fetch_invalid_items(PDO $pdo) {
 
 function ml_bulk_link_status($url) {
   $value = (string) $url;
+  if (ml_bulk_is_short_url($value)) {
+    return 'meli_short';
+  }
+  if (ml_bulk_is_storefront_affiliate_url($value)) {
+    return 'storefronts';
+  }
   $hasWid = str_contains($value, 'wid=');
   $hasSidAffiliates = str_contains($value, 'sid=affiliates');
   $hasSidRecos = str_contains($value, 'sid=recos');
@@ -218,12 +244,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         continue;
       }
 
-      if (ml_bulk_is_profile_social_url($url)) {
-        $errorLines[] = "Oferta #$id: use a URL oficial do produto, nao o link geral /social/ do perfil.";
+      if (ml_bulk_is_profile_social_url($url) && !ml_bulk_is_deep_social_url($url)) {
+        $errorLines[] = "Oferta #$id: use o shortlink meli.la, o link social profundo do produto ou a URL oficial do produto. Nao use o /social/ generico do perfil.";
         continue;
       }
-      if (!ml_bulk_is_product_specific_affiliate_url($url)) {
-        $errorLines[] = "Oferta #$id: use uma URL oficial do produto com /p/MLB..., nao um link generico.";
+      if (!ml_bulk_is_short_url($url) && !ml_bulk_is_deep_social_url($url) && !ml_bulk_is_product_specific_affiliate_url($url)) {
+        $errorLines[] = "Oferta #$id: use um meli.la oficial, um /social/ do produto com ref= ou uma URL do produto com /p/MLB....";
         continue;
       }
 
@@ -260,6 +286,8 @@ $statusOptions = [
   'wid_recos_affiliate_profile' => 'wid + recos + affiliate-profile',
   'wid_sid_affiliates' => 'wid + sid=affiliates',
   'wid_polycard_affiliates' => 'wid + polycard',
+  'storefronts' => 'social-profile-middleend',
+  'meli_short' => 'meli.la',
   'matt_tool' => 'matt_tool',
   'social' => 'social',
 ];
@@ -314,7 +342,7 @@ $statusOptions = [
   <?php endif; ?>
   <section class="panel">
     <h2>Colar em lote</h2>
-    <div class="helper">Cole uma linha por oferta no formato `ID | URL oficial`. Neste fluxo, use a URL oficial do produto (`/p/MLB...`) gerada no ambiente do afiliado. Nao use o link geral do perfil `/social/`.</div>
+    <div class="helper">Cole uma linha por oferta no formato `ID | URL oficial`. Neste fluxo, aceite `meli.la`, o link social profundo do produto (`/social/...&ref=...`) ou a URL oficial do produto (`/p/MLB...`). Nao use o link geral do perfil `/social/` sem produto.</div>
     <div class="actions">
       <span class="badge">ML total: <?= (int) $summary['total'] ?></span>
       <span class="badge">Com link oficial: <?= (int) $summary['valid'] ?></span>
@@ -336,7 +364,7 @@ $statusOptions = [
     <form method="post">
       <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
       <input type="hidden" name="mode" value="bulk_text">
-      <textarea name="bulk_links" placeholder="123 | https://www.mercadolivre.com.br/produto-exemplo/p/MLB12345678#reco_client=home_affiliate-profile&source=affiliate-profile&wid=MLB1234567890&sid=recos"></textarea>
+      <textarea name="bulk_links" placeholder="123 | https://meli.la/2CyXge8"></textarea>
       <div class="actions">
         <button class="btn" type="submit">Salvar links em lote</button>
         <a class="badge" href="/admin/ml_corrigir_lote.php?export=csv">Exportar CSV pendente</a>
@@ -347,7 +375,7 @@ $statusOptions = [
 
   <section class="panel">
     <h3>Lista para corrigir</h3>
-    <div class="helper"><?= (int) $invalidCount ?> oferta(s) do Mercado Livre ainda sem link oficial detectado. Preencha so as URLs que voce ja gerou no portal do afiliado.</div>
+      <div class="helper"><?= (int) $invalidCount ?> oferta(s) do Mercado Livre ainda sem link oficial detectado. Priorize a fila `social-profile-middleend`, porque ela costuma ser a que perdeu o `meli.la` correto.</div>
     <div class="actions">
       <?php foreach ($statusOptions as $statusValue => $statusLabel): ?>
         <?php
@@ -363,7 +391,7 @@ $statusOptions = [
       <div class="ok">Nenhuma oferta invalida do Mercado Livre pendente.</div>
     <?php else: ?>
       <div style="margin-top:14px;">
-      <div class="helper">Linhas prontas para copiar e completar com a URL oficial do afiliado. Esta fila agora inclui os links quebrados e os suspeitos vindos da API/automacao.</div>
+      <div class="helper">Linhas prontas para copiar e completar com a URL oficial do afiliado. Esta fila inclui os links quebrados e os suspeitos vindos da API/automacao, inclusive os casos `social-profile-middleend/storefronts`.</div>
         <textarea class="copy-helper" readonly><?php foreach ($items as $item): ?><?= (int) $item['id'] ?> | <?= h(ml_bulk_link_status($item['url_afiliado'])) ?> | <?= h($item['titulo']) ?> | https://zeropreco.com.br<?= h(site_offer_href($item['slug'])) ?> | 
 <?php endforeach; ?></textarea>
       </div>
@@ -403,10 +431,10 @@ $statusOptions = [
                       <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
                       <input type="hidden" name="mode" value="single">
                       <input type="hidden" name="single_id" value="<?= (int) $item['id'] ?>">
-                      <input type="url" name="single_url" placeholder="Cole aqui a URL oficial do afiliado">
+                      <input type="url" name="single_url" placeholder="Cole aqui o meli.la ou a URL oficial do afiliado">
                       <button class="badge" type="submit" style="justify-self:flex-start;">Salvar</button>
                     </form>
-                    <span class="field-note">Aceita URL oficial do produto com `/p/MLB...` e sinais do afiliado (`matt_*`, `wid`, `affiliate-profile`). Nao use o `/social/` generico.</span>
+                    <span class="field-note">Aceita `meli.la`, `/social/` profundo do produto com `ref=` e URL oficial com `/p/MLB...`. Nao use o `/social/` generico do perfil.</span>
                   </td>
                 </tr>
               <?php endforeach; ?>

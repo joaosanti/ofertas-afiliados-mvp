@@ -11,7 +11,8 @@ $page = max(1, (int) ($_GET['page'] ?? 1));
 $onlyWithVideo = (string) ($_GET['com_video'] ?? '1') !== '0';
 $draftStatus = trim((string) ($_GET['draft_status'] ?? ''));
 $view = trim((string) ($_GET['view'] ?? 'queue'));
-if (!in_array($view, ['queue', 'drafts', 'packages'], true)) {
+$pendingPackageJob = $_SESSION['admin_shopee_video_pending_job'] ?? null;
+if (!in_array($view, ['queue', 'drafts', 'publish', 'packages'], true)) {
   $view = 'queue';
 }
 
@@ -41,6 +42,75 @@ function shopee_video_extra_gallery_urls($item) {
     return [];
   }
   return array_slice($gallery, 1, 5);
+}
+
+function shopee_video_best_package_video_type($packagePayload) {
+  $files = is_array($packagePayload['files'] ?? null) ? $packagePayload['files'] : [];
+  foreach (['reel_video_final', 'reel_video_tts_subtitled', 'reel_video_tts', 'reel_video', 'source_video'] as $key) {
+    if (is_array($files[$key] ?? null) && !empty($files[$key]['path'])) {
+      return $key;
+    }
+  }
+  return '';
+}
+
+function shopee_video_best_package_video_entry($packagePayload) {
+  $files = is_array($packagePayload['files'] ?? null) ? $packagePayload['files'] : [];
+  foreach (['reel_video_final', 'reel_video_tts_subtitled', 'reel_video_tts', 'reel_video', 'source_video'] as $key) {
+    if (is_array($files[$key] ?? null) && !empty($files[$key]['path'])) {
+      return $files[$key];
+    }
+  }
+  return null;
+}
+
+function shopee_video_public_relative_path_from_local($path) {
+  $realPath = realpath((string) $path);
+  $publicRoot = realpath(dirname(__DIR__));
+  if ($realPath === false || $publicRoot === false) {
+    return null;
+  }
+
+  $normalizedRealPath = str_replace('\\', '/', $realPath);
+  $normalizedRoot = rtrim(str_replace('\\', '/', $publicRoot), '/');
+  foreach (['/uploads/', '/stories/'] as $prefix) {
+    $fullPrefix = $normalizedRoot . $prefix;
+    if (str_starts_with($normalizedRealPath, $fullPrefix)) {
+      return substr($normalizedRealPath, strlen($normalizedRoot));
+    }
+  }
+  return null;
+}
+
+function shopee_video_package_video_preview_url($packagePayload) {
+  $entry = shopee_video_best_package_video_entry($packagePayload);
+  if (!is_array($entry)) {
+    return '';
+  }
+  $publicPath = shopee_video_public_relative_path_from_local((string) ($entry['path'] ?? ''));
+  return $publicPath !== null ? $publicPath : '';
+}
+
+function shopee_video_present_warnings($warnings) {
+  $warnings = is_array($warnings) ? $warnings : [];
+  $presented = [];
+  foreach ($warnings as $warning) {
+    $text = trim((string) $warning);
+    if ($text === '') {
+      continue;
+    }
+    if (stripos($text, 'marcacao de link no video') !== false || stripos($text, 'Video original nao baixado') !== false) {
+      $presented['source_video'] = 'Aviso tecnico no video original da Shopee. O pacote final foi gerado com fallback.';
+      continue;
+    }
+    $presented[] = $text;
+  }
+  return array_values(array_unique(array_filter(array_map('strval', $presented))));
+}
+
+function shopee_video_present_package_error($message) {
+  $items = shopee_video_present_warnings([(string) $message]);
+  return $items ? implode(' | ', $items) : trim((string) $message);
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -80,24 +150,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       if ($draftId <= 0) {
         throw new RuntimeException('Rascunho invalido para gerar pacote.');
       }
-      $resultPayload = admin_run_python_job([
+      $redirectUrl = '/admin/shopee_video.php?' . shopee_video_admin_query(['view' => 'drafts', 'page' => 1]);
+      $started = admin_start_python_job_async([
         'shopee-video-package',
         '--draft-id',
         (string) $draftId,
+      ], [
+        'kind' => 'shopee_video_package',
+        'target_tab' => 'shopee_video',
+        'draft_id' => $draftId,
+        'redirect_url' => $redirectUrl,
       ]);
-      if (empty($resultPayload['ok']) || !is_array($resultPayload['result'] ?? null)) {
-        $errorMessage = (string) ($resultPayload['error'] ?? 'Falha ao gerar o pacote profissional.');
+      if (empty($started['ok'])) {
+        $errorMessage = (string) ($started['error'] ?? 'Falha ao iniciar o pacote profissional.');
         admin_mark_shopee_video_package_error($pdo, $draftId, $errorMessage);
         throw new RuntimeException($errorMessage);
       }
-      $storedPackage = admin_store_shopee_video_package_result($pdo, $draftId, (array) $resultPayload['result']);
-      if (($storedPackage['status'] ?? '') === 'ready') {
-        admin_flash_set('success', 'Pacote profissional gerado com sucesso para o draft #' . $draftId . '.');
-      } elseif (($storedPackage['status'] ?? '') === 'partial') {
-        admin_flash_set('warn', 'Pacote do draft #' . $draftId . ' foi gerado parcialmente. ' . (string) ($storedPackage['error'] ?? 'Verifique os avisos do pacote.'));
-      } else {
-        admin_flash_set('error', 'Pacote do draft #' . $draftId . ' nao gerou o video base. ' . (string) ($storedPackage['error'] ?? ''));
-      }
+      admin_mark_shopee_video_package_running($pdo, $draftId, (string) ($started['job_id'] ?? ''));
+      $_SESSION['admin_shopee_video_pending_job'] = [
+        'job_id' => (string) ($started['job_id'] ?? ''),
+        'kind' => 'shopee_video_package',
+        'draft_id' => $draftId,
+        'redirect_url' => $redirectUrl,
+      ];
+      header('Location: ' . $redirectUrl);
+      exit;
     } elseif ($action === 'delete_package') {
       $draftId = (int) ($_POST['draft_id'] ?? 0);
       if ($draftId <= 0) {
@@ -107,6 +184,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         throw new RuntimeException('Nao consegui excluir esse pacote agora.');
       }
       admin_flash_set('success', 'Pacote do draft #' . $draftId . ' removido com sucesso.');
+    } elseif ($action === 'apply_package_video') {
+      $draftId = (int) ($_POST['draft_id'] ?? 0);
+      if ($draftId <= 0) {
+        throw new RuntimeException('Draft invalido para aplicar o video gerado.');
+      }
+      $resultPayload = admin_run_python_job([
+        'shopee-video-attach-generated',
+        '--draft-id',
+        (string) $draftId,
+      ]);
+      if (empty($resultPayload['ok']) || !is_array($resultPayload['result'] ?? null)) {
+        $errorMessage = (string) ($resultPayload['error'] ?? 'Falha ao trocar o video atual pelo video do pacote.');
+        throw new RuntimeException($errorMessage);
+      }
+      admin_flash_set('success', 'Video do pacote aplicado na oferta com sucesso para o draft #' . $draftId . '.');
     } elseif ($action === 'delete_all_packages') {
       $deletedCount = admin_delete_all_active_shopee_video_packages($pdo, $search);
       if ($deletedCount <= 0) {
@@ -145,6 +237,7 @@ $page = (int) ($candidatesPayload['page'] ?? $page);
 $totalPages = (int) ($candidatesPayload['pages'] ?? 1);
 $drafts = admin_fetch_shopee_video_drafts($pdo, $draftStatus, 30);
 $packages = admin_fetch_shopee_video_packages($pdo, $search, 60);
+$publishSocialOffers = admin_fetch_recent_social_reel_assets($pdo, 'Shopee', $search, 60);
 $packageTtlHours = admin_shopee_video_package_ttl_hours();
 $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
 ?>
@@ -164,6 +257,20 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
 <main class="container admin-shell">
   <?php if ($flash): ?>
     <div class="admin-alert <?= h((string) ($flash['type'] ?? '')) ?>"><?= h((string) ($flash['message'] ?? '')) ?></div>
+  <?php endif; ?>
+  <?php if (is_array($pendingPackageJob) && !empty($pendingPackageJob['job_id'])): ?>
+    <section class="admin-panel" id="shopee-video-package-progress" data-job-id="<?= h((string) $pendingPackageJob['job_id']) ?>">
+      <div class="admin-panel-head">
+        <div>
+          <h2 class="admin-section-title">Pacote profissional em andamento</h2>
+          <p>O servidor esta montando o video final da Shopee.</p>
+        </div>
+      </div>
+      <div class="admin-help" id="shopee-video-package-progress-label">Preparando o video final...</div>
+      <div style="margin-top:12px; background:#dbe7ff; border-radius:999px; overflow:hidden; height:14px;">
+        <div id="shopee-video-package-progress-bar" style="width:8%; height:14px; background:linear-gradient(90deg,#1947d1,#4f7dff); transition:width .3s ease;"></div>
+      </div>
+    </section>
   <?php endif; ?>
   <?php if ($expiredPackageCount > 0): ?>
     <div class="admin-alert warn"><?= (int) $expiredPackageCount ?> pacote(s) pro expiraram e foram removidos automaticamente do servidor.</div>
@@ -191,6 +298,9 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
     </a>
     <a class="admin-subnav-link <?= $view === 'drafts' ? 'is-active' : '' ?>" href="/admin/shopee_video.php?<?= h(shopee_video_admin_query(['view' => 'drafts', 'page' => 1])) ?>">
       Rascunhos recentes
+    </a>
+    <a class="admin-subnav-link <?= $view === 'publish' ? 'is-active' : '' ?>" href="/admin/shopee_video.php?<?= h(shopee_video_admin_query(['view' => 'publish', 'page' => 1])) ?>">
+      Publicar
     </a>
     <a class="admin-subnav-link <?= $view === 'packages' ? 'is-active' : '' ?>" href="/admin/shopee_video.php?<?= h(shopee_video_admin_query(['view' => 'packages', 'page' => 1])) ?>">
       Pacotes pro ativos
@@ -308,6 +418,9 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                     <?php if (!empty($offer['video_gallery_urls'])): ?>
                       <span class="admin-meta-chip"><?= count((array) $offer['video_gallery_urls']) ?> video(s)</span>
                     <?php endif; ?>
+                    <?php if (!empty($offer['atualizado_em'])): ?>
+                      <span class="admin-meta-chip">Atualizado <?= h((string) $offer['atualizado_em']) ?></span>
+                    <?php endif; ?>
                     <?php if (!empty($offer['cupom'])): ?>
                       <span class="admin-meta-chip">cupom <?= h((string) $offer['cupom']) ?></span>
                     <?php endif; ?>
@@ -326,8 +439,11 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                     <a class="btn-link" href="<?= h((string) $offer['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Link afiliado</a>
                     <?php if (!empty($offer['video_url'])): ?>
                       <a class="btn-link" href="<?= h((string) $offer['video_url']) ?>" target="_blank" rel="noopener">Abrir video</a>
-                      <a class="btn-link primary" href="/admin/shopee_video_download.php?offer_id=<?= (int) $offer['id'] ?>&type=video">Baixar video</a>
+                      <a class="btn-link primary" href="/admin/shopee_video_download.php?offer_id=<?= (int) $offer['id'] ?>&type=video&download=1">Baixar video</a>
                       <a class="btn-link" href="/admin/shopee_video_download.php?offer_id=<?= (int) $offer['id'] ?>&type=caption">Baixar legenda .txt</a>
+                      <button class="btn-link" type="button" data-copy-text="<?= h(admin_shopee_video_default_caption($offer)) ?>">Copiar legenda</button>
+                      <a class="btn-link" href="/admin/shopee_video_download.php?offer_id=<?= (int) $offer['id'] ?>&type=caption_short">Baixar descricao curta</a>
+                      <button class="btn-link" type="button" data-copy-text="<?= h(admin_shopee_video_short_caption($offer)) ?>">Copiar descricao curta</button>
                     <?php endif; ?>
                   </div>
                 </div>
@@ -341,6 +457,8 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                   <div class="admin-side-card">
                     <strong>Legenda sugerida</strong>
                     <div class="admin-help" style="margin-top:10px; white-space:pre-wrap;"><?= h(admin_shopee_video_default_caption($offer)) ?></div>
+                    <strong style="display:block; margin-top:14px;">Descricao curta Shopee</strong>
+                    <div class="admin-help" style="margin-top:10px; white-space:pre-wrap;"><?= h(admin_shopee_video_short_caption($offer)) ?></div>
                   </div>
                 </div>
               </div>
@@ -439,6 +557,9 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                   <span class="admin-status <?= h((string) $draft['status_class']) ?>"><?= h((string) $draft['status_label']) ?></span>
                   <span class="admin-status <?= h((string) ($draft['package_status_class'] ?? 'warn')) ?>"><?= h((string) ($draft['package_status_label'] ?? 'Pacote pendente')) ?></span>
                   <span class="admin-meta-chip">Atualizado <?= h((string) $draft['updated_at']) ?></span>
+                  <?php if (!empty($draft['oferta_atualizado_em'])): ?>
+                    <span class="admin-meta-chip">Oferta <?= h((string) $draft['oferta_atualizado_em']) ?></span>
+                  <?php endif; ?>
                   <?php if (!empty($draft['image_gallery_urls'])): ?>
                     <span class="admin-meta-chip"><?= count((array) $draft['image_gallery_urls']) ?> imagem(ns)</span>
                   <?php endif; ?>
@@ -477,14 +598,18 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                   <?php endif; ?>
                 <?php endif; ?>
                 <div class="admin-help" style="margin-top:12px; white-space:pre-wrap;"><?= h((string) ($draft['caption'] ?? '')) ?></div>
+                <?php if (!empty(($creative['short_caption'] ?? ''))): ?>
+                  <div class="admin-help" style="margin-top:10px;"><strong>Descricao curta Shopee:</strong> <?= h((string) $creative['short_caption']) ?></div>
+                <?php endif; ?>
                 <?php if (!empty($draft['notes'])): ?>
                   <div class="admin-help" style="margin-top:12px;"><?= h((string) $draft['notes']) ?></div>
                 <?php endif; ?>
                 <?php if (!empty($draft['package_error'])): ?>
-                  <div class="admin-alert error" style="margin-top:12px;"><?= h((string) $draft['package_error']) ?></div>
+                  <div class="admin-alert error" style="margin-top:12px;"><?= h(shopee_video_present_package_error((string) $draft['package_error'])) ?></div>
                 <?php endif; ?>
-                <?php if (!empty(($draft['package_payload']['warnings'] ?? [])) && is_array($draft['package_payload']['warnings'])): ?>
-                  <div class="admin-alert warn" style="margin-top:12px;"><?= h(implode(' | ', array_filter(array_map('strval', (array) $draft['package_payload']['warnings'])))) ?></div>
+                <?php $draftWarnings = shopee_video_present_warnings((array) ($draft['package_payload']['warnings'] ?? [])); ?>
+                <?php if ($draftWarnings): ?>
+                  <div class="admin-alert warn" style="margin-top:12px;"><?= h(implode(' | ', $draftWarnings)) ?></div>
                 <?php endif; ?>
                 <?php if (!empty($draft['last_error'])): ?>
                   <div class="admin-alert error" style="margin-top:12px;"><?= h((string) $draft['last_error']) ?></div>
@@ -492,7 +617,7 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                 <div class="admin-card-actions" style="margin-top:12px;">
                   <?php if (!empty($draft['video_source_url'])): ?>
                     <a class="btn-link primary" href="<?= h((string) $draft['video_source_url']) ?>" target="_blank" rel="noopener">Abrir video</a>
-                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=video">Baixar video</a>
+                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=video&download=1">Baixar video</a>
                     <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=package">Baixar pacote</a>
                   <?php endif; ?>
                   <a class="btn-link" href="<?= h((string) $draft['affiliate_url']) ?>" target="_blank" rel="noopener sponsored nofollow">Link afiliado</a>
@@ -500,14 +625,19 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                     <a class="btn-link" href="<?= h((string) $draft['offer_url']) ?>" target="_blank" rel="noopener">Pagina da oferta</a>
                   <?php endif; ?>
                   <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=caption">Baixar legenda .txt</a>
+                  <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=caption_short">Baixar descricao curta</a>
                   <?php if (($draft['package_status'] ?? '') === 'ready'): ?>
+                    <?php $readyVideoType = shopee_video_best_package_video_type($draft['package_payload'] ?? null); ?>
+                    <?php if ($readyVideoType !== ''): ?>
+                      <a class="btn-link primary" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=ready_video&download=1">Video pronto</a>
+                    <?php endif; ?>
                     <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=brief">Brief</a>
                     <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=checklist">Checklist</a>
                     <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=voiceover">Narracao</a>
                     <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=metadata">Metadata</a>
                     <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=poster">Poster</a>
                     <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=square_card">Card</a>
-                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=reel_video">Video base</a>
+                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=reel_video">Video base sem narracao</a>
                     <?php if (!empty(($draft['package_payload']['files']['tts_audio']['path'] ?? ''))): ?>
                       <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=tts_audio">Audio IA</a>
                     <?php endif; ?>
@@ -518,19 +648,30 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                       <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=subtitle_srt">Legenda SRT</a>
                     <?php endif; ?>
                     <?php if (!empty(($draft['package_payload']['files']['reel_video_tts_subtitled']['path'] ?? ''))): ?>
-                      <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=reel_video_tts_subtitled">Video legendado</a>
+                      <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=reel_video_tts_subtitled&download=1">Video legendado</a>
                     <?php endif; ?>
                     <?php if (!empty(($draft['package_payload']['files']['music_bed']['path'] ?? ''))): ?>
                       <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=music_bed">Trilha</a>
                     <?php endif; ?>
                     <?php if (!empty(($draft['package_payload']['files']['reel_video_final']['path'] ?? ''))): ?>
-                      <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=reel_video_final">Video final</a>
+                      <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=reel_video_final&download=1">Video final</a>
                     <?php endif; ?>
                     <?php if (!empty(($draft['package_payload']['files']['source_video']['path'] ?? ''))): ?>
                       <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $draft['id'] ?>&type=source_video">Video original</a>
                     <?php endif; ?>
                   <?php endif; ?>
+                  <?php if (($draft['package_status'] ?? '') === 'ready' && $readyVideoType !== ''): ?>
+                    <form method="post" style="display:inline-flex;">
+                      <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+                      <input type="hidden" name="acao" value="apply_package_video">
+                      <input type="hidden" name="draft_id" value="<?= (int) $draft['id'] ?>">
+                      <button class="btn-link primary" type="submit" onclick="return confirm('Trocar o video atual da oferta pelo video gerado neste pacote agora?');">Trocar video atual pelo gerado</button>
+                    </form>
+                  <?php endif; ?>
                   <button class="btn-link" type="button" data-copy-text="<?= h((string) ($draft['caption'] ?? '')) ?>">Copiar legenda</button>
+                  <?php if (!empty(($creative['short_caption'] ?? ''))): ?>
+                    <button class="btn-link" type="button" data-copy-text="<?= h((string) $creative['short_caption']) ?>">Copiar descricao curta</button>
+                  <?php endif; ?>
                   <?php if (!empty($draft['video_source_url'])): ?>
                     <button class="btn-link" type="button" data-copy-text="<?= h((string) $draft['video_source_url']) ?>">Copiar URL do video</button>
                   <?php endif; ?>
@@ -596,6 +737,194 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
       </div>
     <?php endif; ?>
   </section>
+  <?php elseif ($view === 'publish'): ?>
+  <section class="admin-panel">
+    <div class="admin-panel-head">
+      <div>
+        <h2 class="admin-section-title">Publicar no app da Shopee</h2>
+        <p>Esta aba junta somente os pacotes prontos para postagem manual: video completo, legenda e descricao curta para baixar antes de subir no Shopee Video.</p>
+      </div>
+    </div>
+
+    <form method="get" class="admin-filter-form">
+      <div class="admin-field-grid admin-field-grid-compact">
+        <div class="admin-field">
+          <label for="q_publish">Buscar</label>
+          <input id="q_publish" name="q" value="<?= h($search) ?>" placeholder="Titulo, categoria ou tag">
+        </div>
+        <div class="admin-field admin-field-submit">
+          <label>&nbsp;</label>
+          <button class="btn-link primary" type="submit">Filtrar publicacao</button>
+        </div>
+      </div>
+      <input type="hidden" name="view" value="publish">
+    </form>
+
+    <?php if (!$packages): ?>
+      <?php $packages = []; ?>
+    <?php endif; ?>
+    <?php
+      $packageOfferIds = [];
+      foreach ($packages as $packageRow) {
+        $packageOfferIds[(int) ($packageRow['oferta_id'] ?? 0)] = true;
+      }
+      $publishDirectOffers = [];
+      foreach ($publishSocialOffers as $socialRow) {
+        $socialOfferId = (int) ($socialRow['id'] ?? 0);
+        if ($socialOfferId <= 0 || isset($packageOfferIds[$socialOfferId])) {
+          continue;
+        }
+        $publishDirectOffers[] = $socialRow;
+      }
+    ?>
+    <?php if (!$packages && !$publishDirectOffers): ?>
+      <div class="admin-empty" style="margin-top:18px;">Nenhum item pronto para publicar agora.</div>
+    <?php else: ?>
+      <div class="admin-meta-row" style="margin-top:18px;">
+        <span class="admin-meta-chip"><?= count($packages) ?> pacote(s) pronto(s)</span>
+        <span class="admin-meta-chip"><?= count($publishDirectOffers) ?> oferta(s) com video pronto</span>
+        <span class="admin-meta-chip">Expiracao automatica em <?= (int) $packageTtlHours ?>h</span>
+      </div>
+
+      <div class="admin-offers-grid" style="margin-top:18px;">
+        <?php foreach ($packages as $package): ?>
+          <?php $publishCreative = is_array($package['creative_payload'] ?? null) ? (array) $package['creative_payload'] : []; ?>
+          <?php $publishVideoType = shopee_video_best_package_video_type($package['package_payload'] ?? null); ?>
+          <?php $publishVideoPreviewUrl = shopee_video_package_video_preview_url($package['package_payload'] ?? null); ?>
+          <article class="admin-offer-card">
+            <div class="admin-offer-layout">
+              <div>
+                <?php if ($publishVideoPreviewUrl !== ''): ?>
+                  <video controls preload="metadata" playsinline style="width:220px; max-width:100%; border-radius:18px; background:#0f172a;" src="<?= h($publishVideoPreviewUrl) ?>"></video>
+                <?php else: ?>
+                  <img class="admin-offer-thumb" src="<?= h((string) ($package['image_url'] ?: $package['imagem_url'])) ?>" alt="<?= h((string) $package['title_snapshot']) ?>">
+                <?php endif; ?>
+              </div>
+              <div>
+                <div class="admin-card-topline">
+                  <div>
+                    <h3 class="admin-card-title"><?= h((string) $package['title_snapshot']) ?></h3>
+                    <div class="admin-card-subtitle">Draft #<?= (int) $package['id'] ?> · Oferta #<?= (int) $package['oferta_id'] ?> · pacote pronto para publicacao</div>
+                  </div>
+                </div>
+                <div class="admin-meta-row" style="margin-top:12px;">
+                  <span class="admin-status ok">Pronto para publicar</span>
+                  <?php if (!empty($package['package_generated_at'])): ?>
+                    <span class="admin-meta-chip">Gerado <?= h((string) $package['package_generated_at']) ?></span>
+                  <?php endif; ?>
+                  <?php if ($publishVideoType !== ''): ?>
+                    <span class="admin-meta-chip">Video <?= h((string) $publishVideoType) ?></span>
+                  <?php endif; ?>
+                  <?php if (!empty($package['expires_at'])): ?>
+                    <span class="admin-meta-chip">Expira <?= h((string) $package['expires_at']) ?></span>
+                  <?php endif; ?>
+                </div>
+                <?php $publishWarnings = shopee_video_present_warnings((array) ($package['package_payload']['warnings'] ?? [])); ?>
+                <?php if ($publishWarnings): ?>
+                  <div class="admin-alert warn" style="margin-top:12px;"><?= h(implode(' | ', $publishWarnings)) ?></div>
+                <?php endif; ?>
+                <div class="admin-help" style="margin-top:12px;"><strong>Descricao para o Shopee Video</strong></div>
+                <div class="admin-help" style="margin-top:8px; white-space:pre-wrap;"><?= h((string) ($publishCreative['short_caption'] ?? $package['caption'] ?? '')) ?></div>
+                <div class="admin-help" style="margin-top:12px;"><strong>Legenda completa</strong></div>
+                <div class="admin-help" style="margin-top:8px; white-space:pre-wrap;"><?= h((string) ($package['caption'] ?? '')) ?></div>
+                <div class="admin-card-actions" style="margin-top:12px;">
+                  <?php if ($publishVideoType !== ''): ?>
+                    <a class="btn-link primary" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=ready_video&download=1">Baixar video completo</a>
+                  <?php endif; ?>
+                  <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=caption">Baixar legenda .txt</a>
+                  <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=caption_short">Baixar descricao Shopee Video</a>
+                  <button class="btn-link" type="button" data-copy-text="<?= h((string) ($package['caption'] ?? '')) ?>">Copiar legenda</button>
+                  <button class="btn-link" type="button" data-copy-text="<?= h((string) (($publishCreative['short_caption'] ?? '') !== '' ? $publishCreative['short_caption'] : ($package['caption'] ?? ''))) ?>">Copiar descricao Shopee Video</button>
+                  <a class="btn-link" href="<?= h((string) $package['affiliate_url']) ?>" target="_blank" rel="noopener sponsored nofollow">Link afiliado</a>
+                  <form method="post" style="display:inline-flex;">
+                    <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+                    <input type="hidden" name="acao" value="update_draft_status">
+                    <input type="hidden" name="draft_id" value="<?= (int) $package['id'] ?>">
+                    <input type="hidden" name="status" value="published">
+                    <button class="btn-link primary" type="submit">Marcar publicado</button>
+                  </form>
+                </div>
+              </div>
+              <div class="admin-mini-grid">
+                <div class="admin-side-card">
+                  <strong>Checklist rapido</strong>
+                  <div class="admin-help" style="margin-top:10px;">1. Baixe o video completo. 2. Baixe ou copie a descricao. 3. Poste no app da Shopee Video. 4. Volte aqui e marque como publicado.</div>
+                </div>
+                <div class="admin-side-card">
+                  <strong>Downloads</strong>
+                  <div class="admin-card-actions" style="margin-top:10px; flex-direction:column; align-items:flex-start;">
+                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=package">Baixar pacote pro</a>
+                    <?php if (!empty(($package['package_payload']['files']['reel_video_final']['path'] ?? ''))): ?>
+                      <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=reel_video_final&download=1">Baixar video final</a>
+                    <?php endif; ?>
+                    <?php if (!empty(($package['package_payload']['files']['source_video']['path'] ?? ''))): ?>
+                      <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=source_video&download=1">Baixar video original</a>
+                    <?php endif; ?>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </article>
+        <?php endforeach; ?>
+        <?php foreach ($publishDirectOffers as $offer): ?>
+          <article class="admin-offer-card">
+            <div class="admin-offer-layout">
+              <div>
+                <video controls preload="metadata" playsinline style="width:220px; max-width:100%; border-radius:18px; background:#0f172a;" src="/admin/shopee_video_download.php?offer_id=<?= (int) $offer['id'] ?>&type=social_video"></video>
+              </div>
+              <div>
+                <div class="admin-card-topline">
+                  <div>
+                    <h3 class="admin-card-title"><?= h((string) $offer['titulo']) ?></h3>
+                    <div class="admin-card-subtitle">Oferta #<?= (int) $offer['id'] ?> · reel criado no social · sem pacote pro</div>
+                  </div>
+                </div>
+                <div class="admin-meta-row" style="margin-top:12px;">
+                  <span class="admin-status ok">Reel social pronto</span>
+                  <?php if (!empty($offer['social_created_at'])): ?>
+                    <span class="admin-meta-chip">Publicado <?= h((string) $offer['social_created_at']) ?></span>
+                  <?php endif; ?>
+                  <?php if (!empty($offer['categoria'])): ?>
+                    <span class="admin-meta-chip"><?= h((string) $offer['categoria']) ?></span>
+                  <?php endif; ?>
+                  <?php if (!empty($offer['social_mode'])): ?>
+                    <span class="admin-meta-chip"><?= h((string) $offer['social_channel']) ?>/<?= h((string) $offer['social_mode']) ?></span>
+                  <?php endif; ?>
+                </div>
+                <div class="admin-help" style="margin-top:12px;"><strong>Descricao para o Shopee Video</strong></div>
+                <div class="admin-help" style="margin-top:8px; white-space:pre-wrap;"><?= h(admin_shopee_video_short_caption($offer)) ?></div>
+                <div class="admin-help" style="margin-top:12px;"><strong>Legenda completa</strong></div>
+                <div class="admin-help" style="margin-top:8px; white-space:pre-wrap;"><?= h(admin_shopee_video_default_caption($offer)) ?></div>
+                <div class="admin-card-actions" style="margin-top:12px;">
+                  <a class="btn-link primary" href="/admin/shopee_video_download.php?offer_id=<?= (int) $offer['id'] ?>&type=social_video&download=1">Baixar video completo</a>
+                  <a class="btn-link" href="/admin/shopee_video_download.php?offer_id=<?= (int) $offer['id'] ?>&type=caption">Baixar legenda .txt</a>
+                  <a class="btn-link" href="/admin/shopee_video_download.php?offer_id=<?= (int) $offer['id'] ?>&type=caption_short">Baixar descricao Shopee Video</a>
+                  <button class="btn-link" type="button" data-copy-text="<?= h(admin_shopee_video_default_caption($offer)) ?>">Copiar legenda</button>
+                  <button class="btn-link" type="button" data-copy-text="<?= h(admin_shopee_video_short_caption($offer)) ?>">Copiar descricao Shopee Video</button>
+                  <a class="btn-link" href="<?= h((string) $offer['url_afiliado']) ?>" target="_blank" rel="noopener sponsored nofollow">Link afiliado</a>
+                </div>
+              </div>
+              <div class="admin-mini-grid">
+                <div class="admin-side-card">
+                  <strong>Checklist rapido</strong>
+                  <div class="admin-help" style="margin-top:10px;">1. Baixe o reel criado no social. 2. Copie ou baixe a descricao curta. 3. Poste no app da Shopee Video. 4. Se quiser pacote pro depois, gere um rascunho nesta mesma oferta.</div>
+                </div>
+                <div class="admin-side-card">
+                  <strong>Atalhos</strong>
+                  <div class="admin-card-actions" style="margin-top:10px; flex-direction:column; align-items:flex-start;">
+                    <?php if (!empty($offer['social_reel_public_url'])): ?>
+                      <a class="btn-link" href="<?= h((string) $offer['social_reel_public_url']) ?>" target="_blank" rel="noopener">Abrir video social</a>
+                    <?php endif; ?>
+                    <a class="btn-link" href="/admin/shopee_video.php?<?= h(shopee_video_admin_query(['view' => 'queue', 'page' => 1, 'q' => (string) $offer['titulo']])) ?>">Abrir na fila</a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </article>
+        <?php endforeach; ?>
+      </div>
+    <?php endif; ?>
+  </section>
   <?php else: ?>
   <section class="admin-panel">
     <div class="admin-panel-head">
@@ -650,6 +979,9 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                 <div class="admin-meta-row" style="margin-top:12px;">
                   <span class="admin-status <?= h((string) ($package['package_status_class'] ?? 'ok')) ?>"><?= h((string) ($package['package_status_label'] ?? 'Pacote pronto')) ?></span>
                   <span class="admin-meta-chip">Gerado <?= h((string) ($package['package_generated_at'] ?? '')) ?></span>
+                  <?php if (!empty($package['oferta_atualizado_em'])): ?>
+                    <span class="admin-meta-chip">Oferta <?= h((string) $package['oferta_atualizado_em']) ?></span>
+                  <?php endif; ?>
                   <span class="admin-meta-chip"><?= h((string) ($package['categoria'] ?? 'Shopee')) ?></span>
                   <?php if (!empty($package['image_gallery_urls'])): ?>
                     <span class="admin-meta-chip"><?= count((array) $package['image_gallery_urls']) ?> imagem(ns)</span>
@@ -674,41 +1006,61 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
                 <?php if (!empty($creative['cover_text'])): ?>
                   <div class="admin-help" style="margin-top:8px;"><strong>Capa:</strong> <?= h((string) $creative['cover_text']) ?></div>
                 <?php endif; ?>
-                <?php if (!empty(($package['package_payload']['warnings'] ?? [])) && is_array($package['package_payload']['warnings'])): ?>
-                  <div class="admin-alert warn" style="margin-top:12px;"><?= h(implode(' | ', array_filter(array_map('strval', (array) $package['package_payload']['warnings'])))) ?></div>
+                <?php $packageWarnings = shopee_video_present_warnings((array) ($package['package_payload']['warnings'] ?? [])); ?>
+                <?php if ($packageWarnings): ?>
+                  <div class="admin-alert warn" style="margin-top:12px;"><?= h(implode(' | ', $packageWarnings)) ?></div>
                 <?php endif; ?>
                 <div class="admin-help" style="margin-top:12px; white-space:pre-wrap;"><?= h((string) ($package['caption'] ?? '')) ?></div>
+                <?php if (!empty(($creative['short_caption'] ?? ''))): ?>
+                  <div class="admin-help" style="margin-top:10px;"><strong>Descricao curta Shopee:</strong> <?= h((string) $creative['short_caption']) ?></div>
+                <?php endif; ?>
                 <div class="admin-card-actions" style="margin-top:12px;">
                   <a class="btn-link primary" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=package">Baixar pacote pro</a>
+                  <?php $packageReadyVideoType = shopee_video_best_package_video_type($package['package_payload'] ?? null); ?>
+                  <?php if ($packageReadyVideoType !== ''): ?>
+                    <a class="btn-link primary" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=ready_video&download=1">Video pronto</a>
+                  <?php endif; ?>
                   <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=brief">Brief</a>
                   <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=checklist">Checklist</a>
                   <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=voiceover">Narracao</a>
                   <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=metadata">Metadata</a>
                   <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=poster">Poster</a>
                   <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=square_card">Card</a>
-                  <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=reel_video">Video base</a>
+                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=reel_video&download=1">Video base sem narracao</a>
                   <?php if (!empty(($package['package_payload']['files']['tts_audio']['path'] ?? ''))): ?>
                     <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=tts_audio">Audio IA</a>
                   <?php endif; ?>
                   <?php if (!empty(($package['package_payload']['files']['reel_video_tts']['path'] ?? ''))): ?>
-                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=reel_video_tts">Video narrado</a>
+                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=reel_video_tts&download=1">Video narrado</a>
                   <?php endif; ?>
                   <?php if (!empty(($package['package_payload']['files']['subtitle_srt']['path'] ?? ''))): ?>
                     <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=subtitle_srt">Legenda SRT</a>
                   <?php endif; ?>
                   <?php if (!empty(($package['package_payload']['files']['reel_video_tts_subtitled']['path'] ?? ''))): ?>
-                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=reel_video_tts_subtitled">Video legendado</a>
+                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=reel_video_tts_subtitled&download=1">Video legendado</a>
                   <?php endif; ?>
                   <?php if (!empty(($package['package_payload']['files']['music_bed']['path'] ?? ''))): ?>
                     <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=music_bed">Trilha</a>
                   <?php endif; ?>
                   <?php if (!empty(($package['package_payload']['files']['reel_video_final']['path'] ?? ''))): ?>
-                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=reel_video_final">Video final</a>
+                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=reel_video_final&download=1">Video final</a>
+                  <?php endif; ?>
+                  <?php if ($packageReadyVideoType !== ''): ?>
+                    <form method="post" style="display:inline-flex;">
+                      <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+                      <input type="hidden" name="acao" value="apply_package_video">
+                      <input type="hidden" name="draft_id" value="<?= (int) $package['id'] ?>">
+                      <button class="btn-link primary" type="submit" onclick="return confirm('Trocar o video atual da oferta pelo video gerado neste pacote agora?');">Trocar video atual pelo gerado</button>
+                    </form>
                   <?php endif; ?>
                   <?php if (!empty(($package['package_payload']['files']['source_video']['path'] ?? ''))): ?>
-                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=source_video">Video original</a>
+                    <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=source_video&download=1">Video original</a>
                   <?php endif; ?>
+                  <a class="btn-link" href="/admin/shopee_video_download.php?draft_id=<?= (int) $package['id'] ?>&type=caption_short">Descricao curta</a>
                   <button class="btn-link" type="button" data-copy-text="<?= h((string) ($package['caption'] ?? '')) ?>">Copiar legenda</button>
+                  <?php if (!empty(($creative['short_caption'] ?? ''))): ?>
+                    <button class="btn-link" type="button" data-copy-text="<?= h((string) $creative['short_caption']) ?>">Copiar descricao curta</button>
+                  <?php endif; ?>
                   <?php if (!empty($creative['hook'])): ?>
                     <button class="btn-link" type="button" data-copy-text="<?= h((string) $creative['hook']) ?>">Copiar hook</button>
                   <?php endif; ?>
@@ -769,6 +1121,45 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
 
     window.addEventListener('resize', syncMenuState);
     syncMenuState();
+  })();
+
+  (function () {
+    var progressRoot = document.getElementById('shopee-video-package-progress');
+    if (!progressRoot) {
+      return;
+    }
+    var jobId = progressRoot.getAttribute('data-job-id');
+    var bar = document.getElementById('shopee-video-package-progress-bar');
+    var label = document.getElementById('shopee-video-package-progress-label');
+    if (!jobId || !bar || !label) {
+      return;
+    }
+
+    function poll() {
+      window.fetch('/admin/shopee_video_job_status.php?job_id=' + encodeURIComponent(jobId), { credentials: 'same-origin' })
+        .then(function (response) { return response.json(); })
+        .then(function (payload) {
+          if (!payload || payload.ok !== true) {
+            throw new Error((payload && payload.error) || 'Falha ao consultar o pacote.');
+          }
+          bar.style.width = String(payload.progress_percent || 10) + '%';
+          label.textContent = payload.progress_label || 'Gerando video final no servidor';
+          if (payload.status === 'running') {
+            window.setTimeout(poll, 2500);
+            return;
+          }
+          if (payload.redirect_url) {
+            window.location.href = payload.redirect_url;
+            return;
+          }
+          window.location.reload();
+        })
+        .catch(function () {
+          label.textContent = 'Nao consegui acompanhar o pacote. Atualize a pagina em alguns segundos.';
+        });
+    }
+
+    window.setTimeout(poll, 1200);
   })();
 
   (function () {
@@ -917,8 +1308,35 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
 
   (function () {
     var copyButtons = document.querySelectorAll('[data-copy-text]');
-    if (!copyButtons.length || !navigator.clipboard || !navigator.clipboard.writeText) {
+    if (!copyButtons.length) {
       return;
+    }
+
+    function fallbackCopy(text) {
+      var field = document.createElement('textarea');
+      field.value = text;
+      field.setAttribute('readonly', 'readonly');
+      field.style.position = 'fixed';
+      field.style.opacity = '0';
+      document.body.appendChild(field);
+      field.focus();
+      field.select();
+      var copied = false;
+      try {
+        copied = document.execCommand('copy');
+      } catch (error) {
+        copied = false;
+      }
+      document.body.removeChild(field);
+      return copied;
+    }
+
+    function flashCopied(button) {
+      var original = button.textContent;
+      button.textContent = 'Copiado';
+      window.setTimeout(function () {
+        button.textContent = original;
+      }, 1400);
     }
 
     copyButtons.forEach(function (button) {
@@ -928,13 +1346,20 @@ $adminCssVersion = (string) @filemtime(__DIR__ . '/../assets/css/admin.css');
           return;
         }
 
-        navigator.clipboard.writeText(text).then(function () {
-          var original = button.textContent;
-          button.textContent = 'Copiado';
-          window.setTimeout(function () {
-            button.textContent = original;
-          }, 1400);
-        });
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () {
+            flashCopied(button);
+          }).catch(function () {
+            if (fallbackCopy(text)) {
+              flashCopied(button);
+            }
+          });
+          return;
+        }
+
+        if (fallbackCopy(text)) {
+          flashCopied(button);
+        }
       });
     });
   })();

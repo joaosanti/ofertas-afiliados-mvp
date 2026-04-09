@@ -25,6 +25,14 @@ function admin_social_progress_snapshot($platform, $mode, $elapsedSeconds) {
       ['after' => 28, 'percent' => 78, 'label' => 'Publicando reels com video'],
       ['after' => 42, 'percent' => 94, 'label' => 'Fechando job social'],
     ];
+  } elseif ($mode === 'reel_story') {
+    $stages = [
+      ['after' => 0, 'percent' => 8, 'label' => 'Separando ofertas selecionadas'],
+      ['after' => 4, 'percent' => 26, 'label' => 'Preparando stories e assets de reel'],
+      ['after' => 12, 'percent' => 52, 'label' => 'Publicando stories'],
+      ['after' => 24, 'percent' => 78, 'label' => 'Publicando reels com video'],
+      ['after' => 38, 'percent' => 94, 'label' => 'Fechando job social'],
+    ];
   } elseif ($mode === 'reel') {
     $stages = [
       ['after' => 0, 'percent' => 10, 'label' => 'Separando ofertas selecionadas'],
@@ -100,10 +108,10 @@ function admin_social_success_message($result, $pending) {
   if ($instagramFeedCount > 0 && in_array($mode, ['feed_story', 'feed_story_reel'], true)) {
     $parts[] = "Feed IG: {$instagramFeedCount}.";
   }
-  if ($instagramStoryCount > 0 && in_array($mode, ['story', 'feed_story', 'feed_story_reel'], true)) {
+  if ($instagramStoryCount > 0 && in_array($mode, ['story', 'reel_story', 'feed_story', 'feed_story_reel'], true)) {
     $parts[] = "Stories IG: {$instagramStoryCount}.";
   }
-  if ($facebookReelCount > 0 && in_array($mode, ['reel', 'feed_story_reel'], true)) {
+  if ($facebookReelCount > 0 && in_array($mode, ['reel', 'reel_story', 'feed_story_reel'], true)) {
     $parts[] = "Reels FB: {$facebookReelCount}.";
   }
 

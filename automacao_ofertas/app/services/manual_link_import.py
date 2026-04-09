@@ -565,7 +565,11 @@ def _extract_ml_social_embedded_offer(html_text: str, affiliate_url: str) -> dic
         float(previous_price_match.group(1)) if previous_price_match else None,
     )
 
-    social_source_url = affiliate_url if _is_ml_social_link(affiliate_url) else ""
+    social_source_url = (
+        affiliate_url
+        if _is_ml_social_link(affiliate_url) and not _is_ml_profile_or_list_social_url(affiliate_url)
+        else ""
+    )
 
     return {
         "provider": "mercadolivre",
@@ -634,7 +638,11 @@ def _build_ml_offer_from_api(item_id: str, affiliate_url: str, fallback_html: st
         commerce_metadata["shipping"] = "Frete gr?tis"
     if not commerce_metadata.get("discount_percent"):
         commerce_metadata["discount_percent"] = _discount_percent(price, old_price)
-    social_source_url = affiliate_url if _is_ml_social_link(affiliate_url) else ""
+    social_source_url = (
+        affiliate_url
+        if _is_ml_social_link(affiliate_url) and not _is_ml_profile_or_list_social_url(affiliate_url)
+        else ""
+    )
 
     return {
         "provider": "mercadolivre",
@@ -643,7 +651,7 @@ def _build_ml_offer_from_api(item_id: str, affiliate_url: str, fallback_html: st
         "description": description,
         "price": price,
         "old_price": old_price,
-        "url": canonical_hint if social_source_url else affiliate_url,
+        "url": social_source_url or affiliate_url,
         "canonical_url": canonical_hint,
         "image": image,
         "category": infer_category_label(title, description or title, social_source_url or affiliate_url, canonical_hint, default="ofertas"),
@@ -700,7 +708,10 @@ def _resolve_ml_social_offer(link: str) -> dict[str, Any]:
             try:
                 resolved_item_id = _extract_ml_item_id_from_url(product_link) or _extract_ml_trigger_item_id_from_html(html_text)
                 if resolved_item_id:
-                    return _build_ml_offer_from_api(resolved_item_id, link, social_html)
+                    item = _build_ml_offer_from_api(resolved_item_id, link, social_html)
+                    item["social_url"] = social_url
+                    item["canonical_url"] = item.get("canonical_url") or item.get("url") or social_url
+                    return item
             except Exception:
                 pass
 
@@ -1102,8 +1113,10 @@ def preview_manual_affiliate_links(links: list[str]) -> list[dict[str, Any]]:
                 item = _resolve_ml_social_offer(link)
                 if urlparse(original_link).netloc.lower() == "meli.la" and bool(_meli_affiliate_meta(original_link)["detected"]):
                     item["url"] = original_link
-                elif _is_ml_social_link(str(item.get("url") or "")):
-                    item["url"] = str(item.get("canonical_url") or item.get("url") or link)
+                else:
+                    social_url = str(item.get("social_url") or "").strip()
+                    if social_url and not _is_ml_profile_or_list_social_url(social_url):
+                        item["url"] = social_url
                 items.append(item)
             except Exception:
                 try:
