@@ -777,10 +777,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'run_auto_cut_publish') {
       $args = [
         'youtube-auto-cut-publish',
-          '--recent-limit', '12',
-          '--videos-per-topic', '8',
+        '--recent-limit', '16',
+        '--videos-per-topic', '8',
         '--cut-limit', '5',
-        '--retry-candidates', '4',
+        '--retry-candidates', '8',
       ];
       if ($channelProfileId > 0) {
         $args[] = '--channel-profile-id';

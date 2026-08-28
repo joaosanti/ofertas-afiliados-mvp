@@ -3995,7 +3995,7 @@ def execute_youtube_auto_cut_publish(
             reused_source_fallback = True
 
         attempts: list[dict[str, Any]] = []
-        max_attempts = max(1, min(int(retry_candidates or 4), len(candidates)))
+        max_attempts = max(1, min(max(int(retry_candidates or 8), 12), len(candidates)))
         for candidate in candidates[:max_attempts]:
             source_video_id = str(candidate.get("video_id") or "").strip()
             source_duration_seconds = int(candidate.get("duration_seconds") or 0)
