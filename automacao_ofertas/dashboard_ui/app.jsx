@@ -611,7 +611,7 @@ function App() {
   const [activeSection, setActiveSection] = useState("painel");
   const [youtubeCutUrl, setYoutubeCutUrl] = useState("");
   const [youtubeCutMode, setYoutubeCutMode] = useState("short");
-  const [youtubeShortSelectionStrategy, setYoutubeShortSelectionStrategy] = useState("openai_heuristica");
+  const [youtubeShortSelectionStrategy, setYoutubeShortSelectionStrategy] = useState("gemini_heuristica");
   const [youtubeCutAnalysis, setYoutubeCutAnalysis] = useState(null);
   const [youtubeCutLoading, setYoutubeCutLoading] = useState(false);
   const [youtubeCutsPhase2, setYoutubeCutsPhase2] = useState(null);
@@ -686,6 +686,9 @@ function App() {
     youtube_redirect_uri: "",
     ytdlp_cookies_from_browser: "",
     ytdlp_cookies_file: "",
+    gemini_api_key: "",
+    gemini_model: "gemini-2.0-flash",
+    openai_api_key: "",
   });
 
   const socialSplit = useMemo(() => {
@@ -700,6 +703,7 @@ function App() {
   );
   const autoSocialModeOptions = AUTO_SOCIAL_MODE_OPTIONS[normalizedAutoSocial.platform] || AUTO_SOCIAL_MODE_OPTIONS.facebook;
   const isCombinedStoryAuto = normalizedAutoSocial.platform === "both" && ["reel_story", "feed_story"].includes(normalizedAutoSocial.mode);
+  const isCombinedFeedStoryAuto = isCombinedStoryAuto;
 
   const socialCandidates = useMemo(() => socialPreview?.items || [], [socialPreview]);
   const socialStoreOptions = useMemo(() => {
@@ -882,6 +886,9 @@ function App() {
       youtube_redirect_uri: settings.youtube?.redirect_uri || "",
       ytdlp_cookies_from_browser: settings.youtube?.cookies_from_browser || "",
       ytdlp_cookies_file: settings.youtube?.cookies_file || "",
+      gemini_api_key: "",
+      gemini_model: settings.ai?.gemini_model || "gemini-2.0-flash",
+      openai_api_key: "",
     }));
     const channels = settings.youtube?.channels || [];
     setYoutubeChannelProfiles(channels);
@@ -1947,6 +1954,9 @@ function App() {
         youtube_redirect_uri: settingsForm.youtube_redirect_uri,
         ytdlp_cookies_from_browser: settingsForm.ytdlp_cookies_from_browser,
         ytdlp_cookies_file: settingsForm.ytdlp_cookies_file,
+        gemini_api_key: settingsForm.gemini_api_key || null,
+        gemini_model: settingsForm.gemini_model || null,
+        openai_api_key: settingsForm.openai_api_key || null,
       };
       const data = await fetchJson("/dashboard/api/settings", {
         method: "POST",
@@ -2376,7 +2386,7 @@ function App() {
               </div>
             </div>
             <div className="status-grid">
-              {["import", "social", "story"].filter((jobKey) => !(jobKey === "story" && isCombinedFeedStoryAuto)).map((jobKey) => {
+              {["import", "social", "story"].filter((jobKey) => !(jobKey === "story" && isCombinedStoryAuto)).map((jobKey) => {
                 const job = automation?.jobs?.[jobKey] || {};
                 return (
                   <article className={`status-card ${job.last_status === "error" ? "is-error" : job.last_status === "success" ? "is-success" : ""}`} key={jobKey}>
@@ -2386,7 +2396,7 @@ function App() {
                           ? "Job de importacao"
                           : jobKey === "story"
                             ? "Job de stories"
-                            : isCombinedFeedStoryAuto
+                            : isCombinedStoryAuto
                               ? "Job automatico Feed + Story"
                               : "Job de feed"}
                       </h4>
@@ -2481,22 +2491,34 @@ function App() {
               </div>
               <div className="field-grid" style={{ marginTop: 12 }}>
                 <div className="field">
-                  <label>yt-dlp cookies do navegador</label>
+                  <label>Google Gemini API Key {snapshot?.settings?.ai?.gemini_api_key_configured ? <span className="badge is-success" style={{ marginLeft: 6 }}>Chave salva</span> : <span className="badge is-warning" style={{ marginLeft: 6 }}>Chave ausente</span>}</label>
                   <input
-                    type="text"
-                    value={settingsForm.ytdlp_cookies_from_browser}
-                    onChange={(e) => setSettingsForm((state) => ({ ...state, ytdlp_cookies_from_browser: e.target.value }))}
+                    type="password"
+                    placeholder={snapshot?.settings?.ai?.gemini_api_key_configured ? "Chave ja configurada (deixe vazio para manter)" : "Cole sua GEMINI_API_KEY do Google AI Studio"}
+                    value={settingsForm.gemini_api_key}
+                    onChange={(e) => setSettingsForm((state) => ({ ...state, gemini_api_key: e.target.value }))}
                   />
-                  <small>Ex.: chrome:Default,chrome:Profile 1,edge:Default</small>
+                  <small>Usada para transcricao de audio e selecao viral dos cortes de YouTube.</small>
                 </div>
                 <div className="field">
-                  <label>yt-dlp cookies.txt</label>
+                  <label>Modelo Gemini</label>
+                  <select
+                    value={settingsForm.gemini_model}
+                    onChange={(e) => setSettingsForm((state) => ({ ...state, gemini_model: e.target.value }))}
+                  >
+                    <option value="gemini-2.0-flash">gemini-2.0-flash (Recomendado - Rapido e Inteligente)</option>
+                    <option value="gemini-1.5-flash">gemini-1.5-flash</option>
+                    <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label>OpenAI API Key (Opcional/Fallback) {snapshot?.settings?.ai?.openai_api_key_configured ? <span className="badge is-success" style={{ marginLeft: 6 }}>Salva</span> : null}</label>
                   <input
-                    type="text"
-                    value={settingsForm.ytdlp_cookies_file}
-                    onChange={(e) => setSettingsForm((state) => ({ ...state, ytdlp_cookies_file: e.target.value }))}
+                    type="password"
+                    placeholder={snapshot?.settings?.ai?.openai_api_key_configured ? "Chave ja configurada" : "Opcional (caso queira manter como fallback)"}
+                    value={settingsForm.openai_api_key}
+                    onChange={(e) => setSettingsForm((state) => ({ ...state, openai_api_key: e.target.value }))}
                   />
-                  <small>Use um cookies.txt exportado do navegador se o YouTube pedir confirmacao anti-bot.</small>
                 </div>
               </div>
 
@@ -2608,7 +2630,7 @@ function App() {
               </div>
 
               <div className="field-grid" style={{ marginTop: 12 }}>
-                {!isCombinedFeedStoryAuto ? (
+                {!isCombinedStoryAuto ? (
                   <div className="field">
                     <label>Limite do story</label>
                     <input type="number" min="1" max="10" value={settingsForm.auto_story_limit} onChange={(e) => setSettingsForm((state) => ({ ...state, auto_story_limit: Number(e.target.value || 1) }))} />
@@ -4039,9 +4061,11 @@ function App() {
                     <div className="field">
                       <label>Selecao dos shorts</label>
                       <select value={youtubeShortSelectionStrategy} onChange={(e) => setYoutubeShortSelectionStrategy(e.target.value)}>
+                        <option value="gemini_heuristica">Gemini + Heuristica (Recomendado)</option>
+                        <option value="gemini">Gemini puro</option>
+                        <option value="heuristica">Heuristica local (Sem IA / Gratis)</option>
                         <option value="openai_heuristica">OpenAI + Heuristica</option>
-                        <option value="openai">OpenAI</option>
-                        <option value="heuristica">Heuristica melhorada</option>
+                        <option value="openai">OpenAI puro</option>
                       </select>
                     </div>
                   ) : null}

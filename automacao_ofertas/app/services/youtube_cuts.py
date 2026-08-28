@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import configparser
+import base64
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -414,11 +415,68 @@ def _site_base_url() -> str:
     return (os.getenv("SITE_BASE_URL") or "https://zeropreco.com.br").rstrip("/")
 
 
+def _gemini_api_key() -> str:
+    return (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
+
+
+def _gemini_model() -> str:
+    model = (os.getenv("GEMINI_MODEL") or "gemini-2.0-flash").strip()
+    if model.startswith("models/"):
+        model = model[len("models/"):]
+    return model or "gemini-2.0-flash"
+
+
+def _call_gemini_generate_content(
+    *,
+    contents: list[dict[str, Any]],
+    system_instruction: str | None = None,
+    response_mime_type: str = "application/json",
+    temperature: float = 0.2,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    api_key = _gemini_api_key()
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY nao configurada.")
+    model = _gemini_model()
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    payload: dict[str, Any] = {
+        "contents": contents,
+        "generationConfig": {
+            "temperature": temperature,
+        },
+    }
+    if response_mime_type:
+        payload["generationConfig"]["responseMimeType"] = response_mime_type
+    if system_instruction:
+        payload["systemInstruction"] = {
+            "parts": [{"text": system_instruction}]
+        }
+    with httpx.Client(timeout=timeout) as client:
+        response = client.post(
+            url,
+            params={"key": api_key},
+            json=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+def _extract_gemini_text(response_payload: dict[str, Any]) -> str:
+    candidates = response_payload.get("candidates") or []
+    if not candidates:
+        return ""
+    content = candidates[0].get("content") or {}
+    parts = content.get("parts") or []
+    texts = [str(p.get("text") or "") for p in parts if isinstance(p, dict) and "text" in p]
+    return "\n".join(texts).strip()
+
+
 def _openai_api_key() -> str:
     api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise ValueError(
-            "OPENAI_API_KEY nao configurada. Sem legenda do YouTube, o fallback de transcricao por audio precisa dessa chave."
+            "OPENAI_API_KEY nao configurada."
         )
     return api_key
 
@@ -644,8 +702,15 @@ def _normalize_cut_mode(mode: str | None) -> str:
 
 
 def _normalize_short_selection_strategy(value: str | None) -> str:
-    normalized = (value or "openai_heuristica").strip().lower()
-    return normalized if normalized in {"openai", "heuristica", "openai_heuristica"} else "openai_heuristica"
+    normalized = (value or "").strip().lower()
+    allowed = {"gemini_heuristica", "gemini", "openai_heuristica", "openai", "heuristica"}
+    if normalized in allowed:
+        return normalized
+    if _gemini_api_key():
+        return "gemini_heuristica"
+    if (os.getenv("OPENAI_API_KEY") or "").strip():
+        return "openai_heuristica"
+    return "heuristica"
 
 
 def _normalize_cut_risk_profile(value: str | None) -> str:
@@ -2358,6 +2423,199 @@ def _rerank_short_candidates_with_openai(
     return selected
 
 
+def _rerank_short_candidates_with_gemini(
+    video: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    *,
+    limit: int = 5,
+    selection_strategy: str = "gemini_heuristica",
+    editorial_profile: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+
+    shortlist = candidates[: max(limit * 2, 8)]
+    payload_candidates = [_short_candidate_summary(item) for item in shortlist]
+    profile = editorial_profile or EDITORIAL_PROFILE
+    preferred_terms = list(profile.get("preferred_terms") or [])
+    avoid_terms = list(profile.get("avoid_terms") or [])
+    viral_tone = str(profile.get("viral_tone") or "").strip()
+    preferred_terms_text = ", ".join(preferred_terms[:8])
+    avoid_terms_text = ", ".join(avoid_terms[:8])
+    system_prompt = (
+        "Voce e um editor senior de shorts para YouTube. "
+        f"O canal e focado em {profile['positioning']}. "
+        "Escolha os melhores cortes com foco em gancho forte no primeiro segundo, contexto suficiente, clareza, retencao e vontade de ver o episodio completo. "
+        "Prefira trechos com fala ativa e continua, sem buracos longos de silencio, sem abertura no meio da frase e com a pessoa sustentando a ideia no corte. "
+        "Evite publi, encerramento, agradecimentos, trechos sem contexto, respostas genericas, frases muito internas e cortes com pausas longas. "
+        "Prefira trechos de 28 a 45 segundos com tese clara, conflito, explicacao, previsao, risco ou revelacao. "
+        f"Use a formula editorial: {profile['title_formula']}. "
+        f"{f'Priorize cortes com termos como: {preferred_terms_text}. ' if preferred_terms_text else ''}"
+        f"{f'Evite selecionar ou destacar termos como: {avoid_terms_text}. ' if avoid_terms_text else ''}"
+        f"{f'Tom viral pedido pelo canal: {viral_tone}. Puxe mais reacao, zoacao, brincadeira, provocacao ou sentimento quando isso aparecer de forma natural no trecho. ' if viral_tone else ''}"
+        "Nao use titulos vagos ou genericos. "
+        "Retorne estritamente um JSON valido com a chave 'selected_candidates' contendo a lista dos melhores itens."
+    )
+    user_prompt = {
+        "video_title": str(video.get("title") or ""),
+        "channel": str(video.get("author_name") or ""),
+        "target_count": int(limit),
+        "channel_preferences": {
+            "preferred_terms": preferred_terms,
+            "avoid_terms": avoid_terms,
+            "viral_tone": viral_tone,
+        },
+        "instruction": (
+            "Selecione os melhores candidatos em ordem de prioridade. "
+            "Para cada item escolhido, devolva candidate_id, score_ia (0-100), title, hook, first_frame_text e reason. "
+            "O title deve ficar natural, clicavel, especifico e deixar clara a consequencia do tema. "
+            "O hook deve resumir o gancho do corte em uma frase curta. "
+            "O first_frame_text deve ter entre 3 e 6 palavras e funcionar como texto forte na abertura. "
+            "Nao escolha candidatos com baixa speech_coverage, lead_pause alto ou max_pause muito longo."
+        ),
+        "candidates": payload_candidates,
+    }
+
+    raw_response = _call_gemini_generate_content(
+        contents=[{"parts": [{"text": json.dumps(user_prompt, ensure_ascii=False)}]}],
+        system_instruction=system_prompt,
+        response_mime_type="application/json",
+        temperature=0.2,
+        timeout=90.0,
+    )
+    content = _extract_gemini_text(raw_response)
+    if not content:
+        return candidates[:limit]
+
+    parsed = json.loads(content)
+    picks = parsed.get("selected_candidates") or parsed.get("selected") or parsed.get("items") or []
+    if not isinstance(picks, list):
+        return candidates[:limit]
+
+    indexed = {int(item.get("candidate_id") or 0): item for item in shortlist}
+    selected: list[dict[str, Any]] = []
+    used_ids: set[int] = set()
+    for raw in picks:
+        if not isinstance(raw, dict):
+            continue
+        candidate_id = int(raw.get("candidate_id") or 0)
+        if candidate_id <= 0 or candidate_id in used_ids or candidate_id not in indexed:
+            continue
+        used_ids.add(candidate_id)
+        base = dict(indexed[candidate_id])
+        heuristic_score = max(1, min(99, int(base.get("score") or 0)))
+        ai_score = max(1, min(99, int(raw.get("score_ia") or heuristic_score)))
+        title = _clean_sentence_for_title(str(raw.get("title") or ""))[:100] or str(base.get("title") or "")
+        hook = _clean_sentence_for_title(str(raw.get("hook") or ""))[:160] or str(base.get("hook") or "")
+        first_frame_text = _clean_sentence_for_title(str(raw.get("first_frame_text") or ""))[:52] or str(base.get("first_frame_text") or "")
+        reason = _clean_sentence_for_title(str(raw.get("reason") or ""))[:220]
+        hybrid_score = round((ai_score * 0.6) + (heuristic_score * 0.4))
+        base["heuristic_score"] = heuristic_score
+        base["ai_score"] = ai_score
+        base["score"] = ai_score if selection_strategy == "gemini" else hybrid_score
+        base["title"] = title or str(base.get("title") or "")
+        base["hook"] = hook or str(base.get("hook") or "")
+        base["first_frame_text"] = first_frame_text or str(base.get("first_frame_text") or "")
+        base["title_variants"] = _short_title_variants(base["transcript_excerpt"], base["title"])
+        if reason:
+            base["ai_reason"] = reason
+        base["selection_source"] = selection_strategy
+        selected.append(base)
+        if len(selected) >= limit:
+            break
+
+    if not selected:
+        return candidates[:limit]
+
+    if selection_strategy in {"gemini_heuristica", "openai_heuristica"}:
+        selected.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
+
+    return selected
+
+
+def _rerank_short_candidates_with_ai(
+    video: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    *,
+    limit: int = 5,
+    selection_strategy: str = "gemini_heuristica",
+    editorial_profile: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+    strategy = _normalize_short_selection_strategy(selection_strategy)
+    if strategy == "heuristica":
+        return candidates[:limit]
+
+    if strategy in {"gemini", "gemini_heuristica"}:
+        if _gemini_api_key():
+            try:
+                return _rerank_short_candidates_with_gemini(
+                    video,
+                    candidates,
+                    limit=limit,
+                    selection_strategy=strategy,
+                    editorial_profile=editorial_profile,
+                )
+            except Exception as gemini_err:
+                if (os.getenv("OPENAI_API_KEY") or "").strip():
+                    try:
+                        return _rerank_short_candidates_with_openai(
+                            video,
+                            candidates,
+                            limit=limit,
+                            selection_strategy="openai_heuristica" if strategy == "gemini_heuristica" else "openai",
+                            editorial_profile=editorial_profile,
+                        )
+                    except Exception:
+                        pass
+                raise gemini_err
+        elif (os.getenv("OPENAI_API_KEY") or "").strip():
+            return _rerank_short_candidates_with_openai(
+                video,
+                candidates,
+                limit=limit,
+                selection_strategy="openai_heuristica" if strategy == "gemini_heuristica" else "openai",
+                editorial_profile=editorial_profile,
+            )
+        else:
+            return candidates[:limit]
+
+    # Strategy is openai / openai_heuristica
+    if (os.getenv("OPENAI_API_KEY") or "").strip():
+        try:
+            return _rerank_short_candidates_with_openai(
+                video,
+                candidates,
+                limit=limit,
+                selection_strategy=strategy,
+                editorial_profile=editorial_profile,
+            )
+        except Exception as openai_err:
+            if _gemini_api_key():
+                try:
+                    return _rerank_short_candidates_with_gemini(
+                        video,
+                        candidates,
+                        limit=limit,
+                        selection_strategy="gemini_heuristica" if strategy == "openai_heuristica" else "gemini",
+                        editorial_profile=editorial_profile,
+                    )
+                except Exception:
+                    pass
+            raise openai_err
+    elif _gemini_api_key():
+        return _rerank_short_candidates_with_gemini(
+            video,
+            candidates,
+            limit=limit,
+            selection_strategy="gemini_heuristica" if strategy == "openai_heuristica" else "gemini",
+            editorial_profile=editorial_profile,
+        )
+
+    return candidates[:limit]
+
+
 def _build_short_cut_candidates(
     segments: list[dict[str, Any]],
     *,
@@ -3745,54 +4003,125 @@ def _transcribe_audio_chunk_via_openai(chunk_path: Path) -> dict[str, Any]:
             return response.json()
 
 
-def _transcribe_audio_via_openai(source_video: Path, job_dir: Path) -> tuple[list[dict[str, Any]], str]:
+def _transcribe_audio_chunk_via_gemini(chunk_path: Path) -> dict[str, Any]:
+    mime_type = "audio/mp3" if chunk_path.suffix.lower() == ".mp3" else "audio/wav"
+    audio_bytes = chunk_path.read_bytes()
+    encoded = base64.b64encode(audio_bytes).decode("utf-8")
+    prompt = (
+        "Transcreva com maxima fidelidade todo o audio fornecido em portugues brasileiro. "
+        "Divida a fala em segmentos cronologicos coerentes (cada segmento com aproximadamente 2 a 8 segundos). "
+        "Para cada segmento, informe o tempo exato de inicio ('start' em segundos, float) e fim ('end' em segundos, float), o texto falado ('text') e opcionalmente a lista de palavras ('words': [{'word': '...', 'start': 0.0, 'end': 0.5}]). "
+        "Retorne estritamente um objeto JSON com a seguinte estrutura: "
+        "{\"text\": \"transcricao completa\", \"segments\": [{\"start\": 0.0, \"end\": 3.5, \"text\": \"frase falada\", \"words\": [{\"word\": \"frase\", \"start\": 0.0, \"end\": 0.5}]}]}"
+    )
+    raw_response = _call_gemini_generate_content(
+        contents=[
+            {
+                "parts": [
+                    {
+                        "inlineData": {
+                            "mimeType": mime_type,
+                            "data": encoded,
+                        }
+                    },
+                    {
+                        "text": prompt,
+                    },
+                ]
+            }
+        ],
+        response_mime_type="application/json",
+        temperature=0.0,
+        timeout=180.0,
+    )
+    text_content = _extract_gemini_text(raw_response)
+    if not text_content:
+        return {"text": "", "segments": []}
+    try:
+        return json.loads(text_content)
+    except Exception:
+        return {"text": text_content, "segments": []}
+
+
+def _transcribe_audio_via_ai(source_video: Path, job_dir: Path) -> tuple[list[dict[str, Any]], str, str]:
     chunks = _extract_audio_chunks(source_video, job_dir)
-    all_segments: list[dict[str, Any]] = []
-    transcript_blocks: list[str] = []
-    chunk_offset = 0.0
+    has_gemini = bool(_gemini_api_key())
+    has_openai = bool((os.getenv("OPENAI_API_KEY") or "").strip())
 
-    for chunk_path in chunks:
-        payload = _transcribe_audio_chunk_via_openai(chunk_path)
-        payload_segments = payload.get("segments") or []
-        payload_words = _normalize_timed_words(payload.get("words") or [], offset=chunk_offset)
-        payload_word_cursor = 0
-        if isinstance(payload.get("text"), str) and payload["text"].strip():
-            transcript_blocks.append(payload["text"].strip())
-        for item in payload_segments:
-            if not isinstance(item, dict):
-                continue
-            text = _clean_vtt_text(str(item.get("text") or ""))
-            if not text:
-                continue
-            start = float(item.get("start") or 0) + chunk_offset
-            end = float(item.get("end") or start) + chunk_offset
-            segment_words = _normalize_timed_words(item.get("words") or [], offset=chunk_offset)
-            if not segment_words and payload_words:
-                lower_bound = start - 0.08
-                upper_bound = end + 0.08
-                while payload_word_cursor < len(payload_words) and float(payload_words[payload_word_cursor].get("end") or 0.0) < lower_bound:
-                    payload_word_cursor += 1
-                probe = payload_word_cursor
-                while probe < len(payload_words):
-                    word = payload_words[probe]
-                    word_start = float(word.get("start") or 0.0)
-                    if word_start > upper_bound:
-                        break
-                    word_end = float(word.get("end") or word_start)
-                    if word_end >= lower_bound:
-                        segment_words.append(word)
-                    probe += 1
-            segment_payload: dict[str, Any] = {"start": start, "end": end, "text": text}
-            if segment_words:
-                segment_payload["words"] = segment_words
-            all_segments.append(segment_payload)
-        chunk_offset += 900.0
+    if not has_gemini and not has_openai:
+        raise ValueError(
+            "Nenhuma chave de IA configurada (GEMINI_API_KEY ou OPENAI_API_KEY). "
+            "Como o YouTube nao forneceu legenda automatica para este video, configure a chave no .env para transcrever o audio."
+        )
 
-    if not all_segments:
-        raise ValueError("A transcricao por audio nao retornou segmentos suficientes para montar os cortes.")
+    def _run_transcribe_chunks(transcribe_chunk_fn) -> tuple[list[dict[str, Any]], str]:
+        all_segments: list[dict[str, Any]] = []
+        transcript_blocks: list[str] = []
+        chunk_offset = 0.0
 
-    transcript_text = "\n".join(block for block in transcript_blocks if block).strip() or _transcript_text(all_segments)
-    return all_segments, transcript_text
+        for chunk_path in chunks:
+            payload = transcribe_chunk_fn(chunk_path)
+            payload_segments = payload.get("segments") or []
+            payload_words = _normalize_timed_words(payload.get("words") or [], offset=chunk_offset)
+            payload_word_cursor = 0
+            if isinstance(payload.get("text"), str) and payload["text"].strip():
+                transcript_blocks.append(payload["text"].strip())
+            for item in payload_segments:
+                if not isinstance(item, dict):
+                    continue
+                text = _clean_vtt_text(str(item.get("text") or ""))
+                if not text:
+                    continue
+                start = float(item.get("start") or 0) + chunk_offset
+                end = float(item.get("end") or start) + chunk_offset
+                segment_words = _normalize_timed_words(item.get("words") or [], offset=chunk_offset)
+                if not segment_words and payload_words:
+                    lower_bound = start - 0.08
+                    upper_bound = end + 0.08
+                    while payload_word_cursor < len(payload_words) and float(payload_words[payload_word_cursor].get("end") or 0.0) < lower_bound:
+                        payload_word_cursor += 1
+                    probe = payload_word_cursor
+                    while probe < len(payload_words):
+                        word = payload_words[probe]
+                        word_start = float(word.get("start") or 0.0)
+                        if word_start > upper_bound:
+                            break
+                        word_end = float(word.get("end") or word_start)
+                        if word_end >= lower_bound:
+                            segment_words.append(word)
+                        probe += 1
+                segment_payload: dict[str, Any] = {"start": start, "end": end, "text": text}
+                if segment_words:
+                    segment_payload["words"] = segment_words
+                all_segments.append(segment_payload)
+            chunk_offset += 900.0
+
+        if not all_segments:
+            raise ValueError("A transcricao por audio nao retornou segmentos suficientes para montar os cortes.")
+
+        transcript_text = "\n".join(block for block in transcript_blocks if block).strip() or _transcript_text(all_segments)
+        return all_segments, transcript_text
+
+    if has_gemini:
+        try:
+            segments, text_val = _run_transcribe_chunks(_transcribe_audio_chunk_via_gemini)
+            return segments, text_val, "gemini_audio"
+        except Exception as gemini_err:
+            if not has_openai:
+                raise gemini_err
+            try:
+                segments, text_val = _run_transcribe_chunks(_transcribe_audio_chunk_via_openai)
+                return segments, text_val, "openai_audio"
+            except Exception:
+                raise gemini_err
+
+    segments, text_val = _run_transcribe_chunks(_transcribe_audio_chunk_via_openai)
+    return segments, text_val, "openai_audio"
+
+
+def _transcribe_audio_via_openai(source_video: Path, job_dir: Path) -> tuple[list[dict[str, Any]], str]:
+    segments, text_val, _ = _transcribe_audio_via_ai(source_video, job_dir)
+    return segments, text_val
 
 
 def _write_job_manifest(job_dir: Path, payload: dict[str, Any]) -> None:
@@ -4219,9 +4548,8 @@ def process_youtube_video_for_cuts(
         transcript_segments = _parse_vtt_segments(subtitle_file)
         transcript_text = _transcript_text(transcript_segments)
     else:
-        transcript_source = "openai_audio"
         transcript_warning = subtitle_error
-        transcript_segments, transcript_text = _transcribe_audio_via_openai(source_video, job_dir)
+        transcript_segments, transcript_text, transcript_source = _transcribe_audio_via_ai(source_video, job_dir)
     cut_candidates = _build_cut_candidates(
         transcript_segments,
         limit=limit,
@@ -4229,9 +4557,9 @@ def process_youtube_video_for_cuts(
         editorial_profile=editorial_profile,
         allow_series=not (normalized_mode == "short" and normalized_risk_profile == "conservative"),
     )
-    if normalized_mode == "short" and normalized_strategy in {"openai", "openai_heuristica"}:
+    if normalized_mode == "short" and normalized_strategy != "heuristica":
         try:
-            cut_candidates = _rerank_short_candidates_with_openai(
+            cut_candidates = _rerank_short_candidates_with_ai(
                 video,
                 cut_candidates,
                 limit=limit,
@@ -4460,7 +4788,7 @@ def process_youtube_video_for_cuts(
         },
         "video": video | {"source_filename": source_video.name, "subtitle_filename": subtitle_file.name if subtitle_file else None},
         "transcript": {
-            "language_hint": subtitle_file.suffix.lstrip(".") if subtitle_file else "openai-whisper-1",
+            "language_hint": subtitle_file.suffix.lstrip(".") if subtitle_file else ("gemini-2.0-flash" if "gemini" in str(transcript_source) else "openai-whisper-1"),
             "segments_count": len(transcript_segments),
             "text": transcript_text,
             "source": transcript_source,

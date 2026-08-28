@@ -332,7 +332,7 @@ class DashboardYoutubeCutsProcessPayload(BaseModel):
     url: str
     limit: int = 5
     mode: str = "short"
-    selection_strategy: str = "openai_heuristica"
+    selection_strategy: str = "gemini_heuristica"
     risk_profile: str = "default"
     channel_profile_id: int | None = None
     burn_subtitles: bool = True
@@ -395,6 +395,10 @@ class DashboardSettingsPayload(BaseModel):
     youtube_redirect_uri: str | None = None
     ytdlp_cookies_from_browser: str | None = None
     ytdlp_cookies_file: str | None = None
+    gemini_api_key: str | None = None
+    gemini_model: str | None = None
+    openai_api_key: str | None = None
+    openai_shorts_rerank_model: str | None = None
 
 
 class DashboardStoreRecategorizePayload(BaseModel):
@@ -1231,6 +1235,12 @@ def _env_settings_snapshot() -> dict:
         "auto_story_limit": max(1, int((os.getenv("AUTO_STORY_LIMIT") or "1").strip() or "1")),
         "whatsapp": whatsapp_settings_snapshot(),
         "sftp": sftp_settings_snapshot(),
+        "ai": {
+            "gemini_api_key_configured": bool((os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()),
+            "gemini_model": os.getenv("GEMINI_MODEL") or "gemini-2.0-flash",
+            "openai_api_key_configured": bool((os.getenv("OPENAI_API_KEY") or "").strip()),
+            "openai_shorts_rerank_model": os.getenv("OPENAI_SHORTS_RERANK_MODEL") or "gpt-4.1-mini",
+        },
         "youtube": {
             "client_id": os.getenv("YOUTUBE_CLIENT_ID") or "",
             "client_secret_configured": bool((os.getenv("YOUTUBE_CLIENT_SECRET") or "").strip()),
@@ -3601,7 +3611,7 @@ def execute_youtube_cuts_process(
     *,
     limit: int = 5,
     mode: str = "short",
-    selection_strategy: str = "openai_heuristica",
+    selection_strategy: str = "gemini_heuristica",
     risk_profile: str = "default",
     channel_profile_id: int | None = None,
     burn_subtitles: bool = True,
@@ -3647,7 +3657,7 @@ def execute_youtube_cut_private_test(
     url: str,
     *,
     limit: int = 3,
-    selection_strategy: str = "openai_heuristica",
+    selection_strategy: str = "gemini_heuristica",
     channel_profile_id: int | None = None,
     burn_subtitles: bool = True,
 ) -> dict[str, Any]:
@@ -4999,6 +5009,14 @@ def dashboard_api_settings_save(payload: DashboardSettingsPayload, _: str = Depe
         updates["YTDLP_COOKIES_FROM_BROWSER"] = payload.ytdlp_cookies_from_browser.strip()
     if payload.ytdlp_cookies_file is not None:
         updates["YTDLP_COOKIES_FILE"] = payload.ytdlp_cookies_file.strip()
+    if payload.gemini_api_key is not None and payload.gemini_api_key.strip() != "":
+        updates["GEMINI_API_KEY"] = payload.gemini_api_key.strip()
+    if payload.gemini_model is not None and payload.gemini_model.strip() != "":
+        updates["GEMINI_MODEL"] = payload.gemini_model.strip()
+    if payload.openai_api_key is not None and payload.openai_api_key.strip() != "":
+        updates["OPENAI_API_KEY"] = payload.openai_api_key.strip()
+    if payload.openai_shorts_rerank_model is not None and payload.openai_shorts_rerank_model.strip() != "":
+        updates["OPENAI_SHORTS_RERANK_MODEL"] = payload.openai_shorts_rerank_model.strip()
 
     if not updates:
         return {"ok": True, "message": "Nenhuma alteracao recebida.", "settings": _env_settings_snapshot(), "reauth_required": False}

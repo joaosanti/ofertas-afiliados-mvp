@@ -1292,7 +1292,7 @@ def main() -> int:
     yt_process_parser.add_argument("--url", required=True)
     yt_process_parser.add_argument("--limit", type=int, default=5)
     yt_process_parser.add_argument("--mode", default="short")
-    yt_process_parser.add_argument("--selection-strategy", default="openai_heuristica")
+    yt_process_parser.add_argument("--selection-strategy", default="gemini_heuristica")
     yt_process_parser.add_argument("--risk-profile", default="default")
     yt_process_parser.add_argument("--channel-profile-id", type=int, default=None)
     yt_process_parser.add_argument("--no-burn-subtitles", action="store_true")
@@ -1300,7 +1300,7 @@ def main() -> int:
     yt_private_test_parser = subparsers.add_parser("youtube-cut-private-test", help="Gera um short com preset conservador e sobe como privado para revisao.")
     yt_private_test_parser.add_argument("--url", required=True)
     yt_private_test_parser.add_argument("--limit", type=int, default=3)
-    yt_private_test_parser.add_argument("--selection-strategy", default="openai_heuristica")
+    yt_private_test_parser.add_argument("--selection-strategy", default="gemini_heuristica")
     yt_private_test_parser.add_argument("--channel-profile-id", type=int, default=None)
     yt_private_test_parser.add_argument("--no-burn-subtitles", action="store_true")
 
@@ -1332,7 +1332,7 @@ def main() -> int:
     yt_auto_publish_parser.add_argument("--cut-limit", type=int, default=5)
     yt_auto_publish_parser.add_argument("--retry-candidates", type=int, default=4)
     yt_auto_publish_parser.add_argument("--lookback-days", type=int, default=14)
-    yt_auto_publish_parser.add_argument("--selection-strategy", default="openai_heuristica")
+    yt_auto_publish_parser.add_argument("--selection-strategy", default="gemini_heuristica")
 
     args = parser.parse_args()
 
