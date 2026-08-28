@@ -282,10 +282,10 @@ CONTEXTLESS_OPENERS = [
     "elas",
 ]
 
-SHORT_SUBTITLE_MARGIN_H = 68
-SHORT_SUBTITLE_MARGIN_V = 248
-SHORT_VIDEO_WIDTH = 608
-SHORT_VIDEO_HEIGHT = 1080
+SHORT_SUBTITLE_MARGIN_H = 80
+SHORT_SUBTITLE_MARGIN_V = 420
+SHORT_VIDEO_WIDTH = 1080
+SHORT_VIDEO_HEIGHT = 1920
 SHORT_SMART_CROP_ANALYSIS_HEIGHT = 360
 SHORT_SMART_CROP_ANALYSIS_FPS = 2
 SHORT_SMART_CROP_ANALYSIS_MAX_SECONDS = 6.0
@@ -1724,11 +1724,17 @@ def _ffmpeg_h264_video_args(*, mode: str) -> list[str]:
         "30",
         "-c:v",
         "libx264",
+        "-crf",
+        "18",
+        "-profile:v",
+        "high",
+        "-level",
+        "4.1",
         # DreamHost's static ffmpeg/libx264 build becomes unstable with overlay + multithreaded x264.
         "-threads",
         "1",
         "-preset",
-        "slow",
+        "medium",
         "-pix_fmt",
         "yuv420p",
     ]
@@ -1739,7 +1745,7 @@ def _ffmpeg_aac_audio_args() -> list[str]:
         "-c:a",
         "aac",
         "-b:a",
-        "160k",
+        "192k",
         "-ar",
         "48000",
         "-movflags",
@@ -3015,7 +3021,7 @@ def _format_ass_timestamp(value: float) -> str:
     return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
 
 
-def _split_subtitle_text(text: str, *, max_words: int = 5) -> list[str]:
+def _split_subtitle_text(text: str, *, max_words: int = 3) -> list[str]:
     cleaned = re.sub(r"\s+", " ", (text or "").strip())
     if not cleaned:
         return []
@@ -3039,12 +3045,12 @@ def _ass_escape_text(text: str) -> str:
     return escaped.replace("\n", r"\N")
 
 
-def _word_highlight_markup(words: list[str], active_index: int) -> str:
+def _word_highlight_markup(words: list[str], active_index: int, active_color: str = "&H0000E6FF&") -> str:
     rendered: list[str] = []
     for index, word in enumerate(words):
         escaped_word = _ass_escape_text(str(word or "").upper())
         if index == active_index:
-            rendered.append(r"{\c&H00FF8C3A&}" + escaped_word + r"{\c&H00FFFFFF&}")
+            rendered.append(r"{\c" + active_color + r"\b1}" + escaped_word + r"{\c&H00FFFFFF&\b0}")
         else:
             rendered.append(escaped_word)
     return " ".join(rendered)
@@ -3053,8 +3059,8 @@ def _word_highlight_markup(words: list[str], active_index: int) -> str:
 def _group_timed_words_for_subtitles(
     word_entries: list[dict[str, Any]],
     *,
-    max_words: int = 5,
-    max_gap: float = 0.75,
+    max_words: int = 3,
+    max_gap: float = 0.70,
 ) -> list[list[dict[str, Any]]]:
     groups: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
@@ -3076,13 +3082,13 @@ def _write_cut_ass(job_dir: Path, cut_id: int, start_time: float, end_time: floa
     rows = [
         "[Script Info]",
         "ScriptType: v4.00+",
-        "PlayResX: 608",
-        "PlayResY: 1080",
+        "PlayResX: 1080",
+        "PlayResY: 1920",
         "ScaledBorderAndShadow: yes",
         "",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Punch,Arial,50,&H00FFFFFF,&H00FF8C3A,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,4,0,2,{SHORT_SUBTITLE_MARGIN_H},{SHORT_SUBTITLE_MARGIN_H},{SHORT_SUBTITLE_MARGIN_V},1",
+        f"Style: Punch,Arial Black,72,&H00FFFFFF,&H0000E6FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5.5,2.5,2,{SHORT_SUBTITLE_MARGIN_H},{SHORT_SUBTITLE_MARGIN_H},{SHORT_SUBTITLE_MARGIN_V},1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -3228,7 +3234,7 @@ def _generate_hook_overlay_asset(
     editorial_profile: dict[str, Any] | None = None,
 ) -> Path:
     normalized_mode = _normalize_cut_mode(mode)
-    size = (608, 1080) if normalized_mode == "short" else (1920, 1080)
+    size = (1080, 1920) if normalized_mode == "short" else (1920, 1080)
     filename = f"hook-{cut_id:02d}-{normalized_mode}.png"
     destination = job_dir / filename
 
