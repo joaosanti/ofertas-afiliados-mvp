@@ -3943,7 +3943,7 @@ def execute_youtube_auto_cut_publish(
     cut_limit: int = 5,
     retry_candidates: int = 4,
     lookback_days: int = 14,
-    selection_strategy: str = "openai_heuristica",
+    selection_strategy: str = "gemini_heuristica",
 ) -> dict[str, Any]:
     db = SessionLocal()
     run_id = 0
