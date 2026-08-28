@@ -1218,9 +1218,60 @@ def _refresh_existing_store_offers(
         db.close()
 
 
+def _refresh_catalog(
+    *,
+    amazon_limit: int = 0,
+    mercadolivre_limit: int = 0,
+    shopee_limit: int = 0,
+    shopee_video_state: str = "all",
+    max_images: int = 5,
+) -> dict:
+    stores_to_run = [
+        ("Amazon", amazon_limit),
+        ("Mercado Livre", mercadolivre_limit),
+        ("Shopee", shopee_limit),
+    ]
+    results = []
+    totals = {
+        "processed": 0,
+        "updated": 0,
+        "skipped": 0,
+        "invalid": 0,
+        "with_video": 0,
+        "without_video": 0,
+    }
+    for store_name, limit_val in stores_to_run:
+        actual_limit = None if limit_val in (0, None, "") else int(limit_val)
+        try:
+            res = _refresh_existing_store_offers(
+                store=store_name,
+                limit=actual_limit,
+                shopee_video_state=shopee_video_state,
+                max_images=max_images,
+            )
+            results.append({"store": store_name, "ok": True, "limit": limit_val, "result": res})
+            totals["processed"] += int(res.get("processed") or 0)
+            totals["updated"] += int(res.get("updated") or 0)
+            totals["skipped"] += int(res.get("skipped") or 0)
+            totals["invalid"] += int(res.get("invalid") or 0)
+            totals["with_video"] += int(res.get("with_video") or 0)
+            totals["without_video"] += int(res.get("without_video") or 0)
+        except Exception as exc:  # noqa: BLE001
+            results.append({"store": store_name, "ok": False, "limit": limit_val, "error": str(exc)})
+
+    return {"stores": results, "totals": totals}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Executa jobs da automacao via CLI.")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    refresh_catalog_parser = subparsers.add_parser("refresh-catalog", help="Reimporta e atualiza o catalogo de todas as lojas.")
+    refresh_catalog_parser.add_argument("--amazon-limit", type=int, default=0)
+    refresh_catalog_parser.add_argument("--mercadolivre-limit", type=int, default=0)
+    refresh_catalog_parser.add_argument("--shopee-limit", type=int, default=0)
+    refresh_catalog_parser.add_argument("--shopee-video-state", choices=["all", "with", "without"], default="all")
+    refresh_catalog_parser.add_argument("--max-images", type=int, default=5)
 
     social_parser = subparsers.add_parser("social", help="Publica ofertas nas redes sociais.")
     social_parser.add_argument("--platform", required=True)
@@ -1337,6 +1388,16 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        if args.command == "refresh-catalog":
+            result = _refresh_catalog(
+                amazon_limit=args.amazon_limit,
+                mercadolivre_limit=args.mercadolivre_limit,
+                shopee_limit=args.shopee_limit,
+                shopee_video_state=args.shopee_video_state,
+                max_images=args.max_images,
+            )
+            return _emit({"ok": True, "command": "refresh-catalog", "result": result})
+
         if args.command == "social":
             result = execute_social_run(
                 platform=args.platform,
