@@ -1479,7 +1479,7 @@ def _build_creative_payload(offer: dict[str, Any]) -> dict[str, Any]:
         "short_caption": _compact_caption(offer, 150),
         "shot_plan": shot_plan,
         "scene_overlays": scene_overlays,
-        "voiceover_script": " ".join([line for line in voiceover_lines if line]).strip(),
+        "voiceover_script": _generate_voiceover_script_with_gemini(offer) or " ".join([line for line in voiceover_lines if line]).strip(),
         "edit_notes": edit_notes,
         "publish_checklist": publish_checklist,
     }
@@ -1548,6 +1548,94 @@ def _build_voiceover_text(creative: dict[str, Any]) -> str:
     ).strip()
 
 
+def _generate_voiceover_script_with_gemini(offer: dict[str, Any]) -> str:
+    gemini_key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
+    if not gemini_key:
+        return ""
+
+    title = _clean_text(offer.get("titulo") or offer.get("title_snapshot") or "Oferta")
+    price = _money(offer.get("preco"))
+    old_price_value = float(offer.get("preco_antigo") or 0) if offer.get("preco_antigo") not in (None, "") else 0.0
+    old_price = _money(old_price_value) if old_price_value > 0 else ""
+    coupon = _clean_text(offer.get("cupom"))
+    store = _store_label(offer.get("loja") or offer.get("store"))
+    category = _clean_text(offer.get("categoria") or "Achadinhos")
+
+    prompt = (
+        "Escreva um roteiro curto e falado para um video promocional estilo 'Achadinho' nas redes sociais (Instagram Reels / TikTok / Shopee Video) em portugues do Brasil. "
+        "O tom deve ser empolgante, direto e natural de quem esta indicando uma compra imperdivel. "
+        "Tamanho ideal: 18 a 30 palavras (para dar entre 6 a 9 segundos de fala). "
+        f"Produto: {title}\n"
+        f"Loja: {store}\n"
+        f"Preco: {price}" + (f" (estava {old_price})" if old_price else "") + "\n" +
+        (f"Cupom: {coupon}\n" if coupon else "") +
+        f"Categoria: {category}\n\n"
+        "Estrutura do roteiro:\n"
+        "- Comece com um gancho atrativo como: 'Olha esse achadinho que acabei de encontrar!' ou 'Se liga nesse achado imperdivel!' ou 'Gente, olha o preco desse produto!'\n"
+        "- Fale o produto e o preco promocional de forma fluida.\n"
+        "- Finalize chamando para clicar no link da bio ou nos comentarios.\n"
+        "Retorne APENAS o texto puro do roteiro a ser narrado, sem aspas, titulos ou explicacoes."
+    )
+
+    model = os.getenv("GEMINI_MODEL") or "gemini-2.0-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 150},
+    }
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.post(url, json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                candidates = data.get("candidates") or []
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts") or []
+                    if parts and "text" in parts[0]:
+                        script = parts[0]["text"].strip().strip('"').replace("\n", " ")
+                        if len(script) >= 15:
+                            return script
+    except Exception:
+        pass
+    return ""
+
+
+def _generate_edge_tts_audio(script_text: str, output_path: Path, *, voice: str) -> dict[str, Any]:
+    import asyncio
+    import edge_tts
+
+    voice_map = {
+        "coral": "pt-BR-FranciscaNeural",
+        "nova": "pt-BR-FranciscaNeural",
+        "shimmer": "pt-BR-ThalitaNeural",
+        "sage": "pt-BR-AntonioNeural",
+        "alloy": "pt-BR-AntonioNeural",
+        "echo": "pt-BR-FabioNeural",
+        "onyx": "pt-BR-FabioNeural",
+        "female": "pt-BR-FranciscaNeural",
+        "male": "pt-BR-AntonioNeural",
+    }
+    target_voice = voice_map.get(voice.lower(), voice if "pt-br" in voice.lower() else "pt-BR-FranciscaNeural")
+
+    async def _run():
+        communicate = edge_tts.Communicate(_clean_text(script_text), target_voice)
+        await communicate.save(str(output_path))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    asyncio.run(_run())
+
+    if not output_path.is_file() or output_path.stat().st_size == 0:
+        raise ValueError("Falha ao gerar audio via sintetizador neural edge-tts.")
+
+    return {
+        "path": str(output_path),
+        "filename": output_path.name,
+        "content_type": "audio/mpeg",
+        "provider": "edge_tts",
+        "voice": target_voice,
+    }
+
+
 def _generate_openai_tts_audio(script_text: str, output_path: Path, *, voice: str, instructions: str) -> dict[str, Any]:
     api_key = _openai_api_key_optional()
     if not api_key:
@@ -1595,7 +1683,23 @@ def _generate_openai_tts_audio(script_text: str, output_path: Path, *, voice: st
         "path": str(output_path),
         "filename": output_path.name,
         "content_type": "audio/mpeg",
+        "provider": "openai",
     }
+
+
+def _generate_tts_audio(script_text: str, output_path: Path, *, voice: str, instructions: str) -> dict[str, Any]:
+    # 1. Tentar edge-tts primeiro (gratuito, sem limites, vozes neurais brasileiras ultra-realistas)
+    try:
+        return _generate_edge_tts_audio(script_text, output_path, voice=voice)
+    except Exception as edge_err:
+        # 2. Fallback para OpenAI se disponivel
+        api_key = _openai_api_key_optional()
+        if api_key:
+            try:
+                return _generate_openai_tts_audio(script_text, output_path, voice=voice, instructions=instructions)
+            except Exception:
+                pass
+        raise edge_err
 
 
 def _mux_video_with_audio(video_path: Path, audio_path: Path, output_path: Path) -> dict[str, Any]:
@@ -1980,7 +2084,7 @@ def build_shopee_video_package(*, draft_id: int | None = None, offer_id: int | N
                 selected_voice = _tts_voice_for_offer(payload)
                 selected_instructions = _tts_instructions_for_offer(payload)
                 metadata_payload["tts"]["voice"] = selected_voice
-                tts_audio = _generate_openai_tts_audio(
+                tts_audio = _generate_tts_audio(
                     voiceover_script,
                     audio_path,
                     voice=selected_voice,
@@ -1988,6 +2092,7 @@ def build_shopee_video_package(*, draft_id: int | None = None, offer_id: int | N
                 )
                 if not simple_mode:
                     files["tts_audio"] = tts_audio
+                metadata_payload["tts"]["provider"] = tts_audio.get("provider", "edge_tts")
                 metadata_payload["tts"]["generated"] = True
                 narration_duration = _probe_media_duration_seconds(Path(tts_audio["path"]))
                 metadata_payload["tts"]["duration_seconds"] = round(narration_duration, 2)

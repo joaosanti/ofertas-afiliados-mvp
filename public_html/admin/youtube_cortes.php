@@ -17,7 +17,7 @@ if (!in_array($youtubeTab, ['gerar', 'historico'], true)) {
 $youtubeForm = $_SESSION['admin_youtube_cuts_form'] ?? [
   'url' => '',
   'mode' => 'short',
-  'selection_strategy' => 'openai_heuristica',
+  'selection_strategy' => 'gemini_heuristica',
   'risk_profile' => 'default',
   'channel_profile_id' => $selectedChannelProfileId,
   'burn_subtitles' => true,
@@ -28,7 +28,7 @@ function admin_youtube_reset_profile_view_state($channelProfileId = 0) {
   $freshForm = [
     'url' => '',
     'mode' => 'short',
-    'selection_strategy' => 'openai_heuristica',
+    'selection_strategy' => 'gemini_heuristica',
     'risk_profile' => 'default',
     'channel_profile_id' => $normalizedProfileId,
     'burn_subtitles' => true,
@@ -657,7 +657,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   if (in_array($action, ['analyze_video', 'generate_cuts', 'run_private_test'], true)) {
     $youtubeUrl = trim((string) ($_POST['youtube_url'] ?? ''));
     $youtubeMode = trim((string) ($_POST['youtube_mode'] ?? 'short'));
-    $youtubeStrategy = trim((string) ($_POST['selection_strategy'] ?? 'openai_heuristica'));
+    $youtubeStrategy = trim((string) ($_POST['selection_strategy'] ?? 'gemini_heuristica'));
     $youtubeRiskProfile = trim((string) ($_POST['risk_profile'] ?? 'default'));
     if (!in_array($youtubeRiskProfile, ['default', 'conservative'], true)) {
       $youtubeRiskProfile = 'default';
@@ -1237,9 +1237,11 @@ function admin_cuts_format_bytes($bytes) {
         <div class="admin-field">
           <label for="selection_strategy">Selecao dos shorts</label>
           <select id="selection_strategy" name="selection_strategy">
-            <option value="openai_heuristica" <?= ($youtubeForm['selection_strategy'] ?? 'openai_heuristica') === 'openai_heuristica' ? 'selected' : '' ?>>OpenAI + Heuristica</option>
-            <option value="openai" <?= ($youtubeForm['selection_strategy'] ?? '') === 'openai' ? 'selected' : '' ?>>OpenAI</option>
-            <option value="heuristica" <?= ($youtubeForm['selection_strategy'] ?? '') === 'heuristica' ? 'selected' : '' ?>>Heuristica</option>
+            <option value="gemini_heuristica" <?= ($youtubeForm['selection_strategy'] ?? 'gemini_heuristica') === 'gemini_heuristica' ? 'selected' : '' ?>>Gemini + Heuristica (Recomendado)</option>
+            <option value="gemini" <?= ($youtubeForm['selection_strategy'] ?? '') === 'gemini' ? 'selected' : '' ?>>Gemini puro</option>
+            <option value="heuristica" <?= ($youtubeForm['selection_strategy'] ?? '') === 'heuristica' ? 'selected' : '' ?>>Heuristica local (Sem IA)</option>
+            <option value="openai_heuristica" <?= ($youtubeForm['selection_strategy'] ?? '') === 'openai_heuristica' ? 'selected' : '' ?>>OpenAI + Heuristica</option>
+            <option value="openai" <?= ($youtubeForm['selection_strategy'] ?? '') === 'openai' ? 'selected' : '' ?>>OpenAI puro</option>
           </select>
         </div>
         <div class="admin-field">

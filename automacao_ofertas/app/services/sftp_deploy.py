@@ -6,10 +6,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from dotenv import load_dotenv
 import paramiko
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+AUTOMATION_DIR = PROJECT_ROOT / "automacao_ofertas"
+ENV_FILE = AUTOMATION_DIR / ".env"
+if ENV_FILE.exists():
+    load_dotenv(ENV_FILE, override=False)
+else:
+    load_dotenv(override=False)
+
 PUBLIC_HTML_DIR = PROJECT_ROOT / "public_html"
 AUTOMATION_DIR = PROJECT_ROOT / "automacao_ofertas"
 STORIES_DIR = PUBLIC_HTML_DIR / "stories"
