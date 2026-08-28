@@ -1117,7 +1117,7 @@ function admin_cuts_format_bytes($bytes) {
             </select>
           </label>
           <button class="btn-link primary" type="submit" name="acao" value="load_trends">Carregar radar</button>
-          <button class="btn-link" type="button" data-confirm-auto-job>Rodar auto job</button>
+          <button class="btn-link" type="button" data-confirm-auto-job onclick="window.openAutoJobModal && window.openAutoJobModal()">Rodar auto job</button>
           <button class="btn-link" type="submit" name="acao" value="test_youtube_auth">Testar autenticacao</button>
           <button class="btn-link" type="submit" name="acao" value="reconnect_youtube">Reconectar YouTube</button>
         </form>
@@ -1719,6 +1719,100 @@ function admin_cuts_format_bytes($bytes) {
   <?php endif; ?>
 </main>
 
+<!-- Modal Customizado de Confirmacao do Auto Job -->
+<div class="admin-modal-backdrop" id="autoJobConfirmModal" style="display:none;">
+  <div class="admin-confirm-modal-box">
+    <div class="admin-confirm-icon-wrap">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+      </svg>
+    </div>
+    <h3 class="admin-confirm-title">Executar Auto Job do Canal</h3>
+    <p class="admin-confirm-text">
+      Deseja iniciar o processo automatizado de varredura no radar, análise de retenção com <strong>Google Gemini</strong>, geração de vídeo vertical Full HD e publicação para <strong id="autoJobModalChannelName">este canal</strong>?
+    </p>
+    <div class="admin-confirm-actions">
+      <button type="button" class="btn-link" id="autoJobModalCancel" onclick="window.closeAutoJobModal && window.closeAutoJobModal()">Cancelar</button>
+      <button type="button" class="btn-link primary" id="autoJobModalConfirm" style="background:#2563eb; color:#ffffff; border-color:#2563eb;">⚡ Iniciar Auto Job</button>
+    </div>
+  </div>
+</div>
+
+<style>
+.admin-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(15, 23, 42, 0.65);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: adminFadeIn 0.2s ease-out;
+}
+.admin-confirm-modal-box {
+  background: #ffffff;
+  border-radius: 24px;
+  padding: 32px 28px 24px;
+  max-width: 460px;
+  width: 100%;
+  box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.25), 0 0 0 1px rgba(226, 232, 240, 0.8);
+  text-align: center;
+  animation: adminModalScale 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.admin-confirm-icon-wrap {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 16px;
+  border-radius: 18px;
+  background: #eff6ff;
+  color: #2563eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.admin-confirm-title {
+  margin: 0 0 8px;
+  font-size: 1.22rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+.admin-confirm-text {
+  margin: 0 0 24px;
+  font-size: 0.92rem;
+  color: #64748b;
+  line-height: 1.55;
+}
+.admin-confirm-text strong {
+  color: #1e293b;
+  font-weight: 600;
+}
+.admin-confirm-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+.admin-confirm-actions button {
+  flex: 1;
+  padding: 12px 18px;
+  font-size: 0.94rem;
+  font-weight: 600;
+  border-radius: 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+@keyframes adminFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes adminModalScale {
+  from { opacity: 0; transform: scale(0.94) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+</style>
+
 <script>
   document.querySelector('[data-admin-menu-toggle]')?.addEventListener('click', function () {
     const expanded = this.getAttribute('aria-expanded') === 'true';
@@ -1802,177 +1896,96 @@ function admin_cuts_format_bytes($bytes) {
     });
   })();
 
-  (function () {
-    const radarForm = document.querySelector('.admin-inline-form-radar');
-    const autoJobButton = radarForm?.querySelector('[data-confirm-auto-job]');
-    const channelSelect = radarForm?.querySelector('#radar_channel_profile_id');
-    const confirmModal = document.getElementById('autoJobConfirmModal');
+  function openAutoJobModal() {
+    const channelSelect = document.getElementById('radar_channel_profile_id');
+    const modal = document.getElementById('autoJobConfirmModal');
     const modalChannelName = document.getElementById('autoJobModalChannelName');
-    const modalCancel = document.getElementById('autoJobModalCancel');
+    if (!modal) return;
+    
+    let channelName = 'Canal configurado';
+    if (channelSelect && channelSelect.options && channelSelect.selectedIndex >= 0) {
+      const opt = channelSelect.options[channelSelect.selectedIndex];
+      if (opt && opt.text) channelName = opt.text.trim();
+    }
+    if (modalChannelName) {
+      modalChannelName.textContent = channelName;
+    }
+    modal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeAutoJobModal() {
+    const modal = document.getElementById('autoJobConfirmModal');
+    if (!modal) return;
+    modal.style.display = 'none';
+    document.body.style.overflow = '';
+  }
+
+  window.openAutoJobModal = openAutoJobModal;
+  window.closeAutoJobModal = closeAutoJobModal;
+
+  document.addEventListener('DOMContentLoaded', function () {
+    const radarForm = document.querySelector('.admin-inline-form-radar');
+    const channelSelect = document.getElementById('radar_channel_profile_id');
+    const autoJobBtn = document.querySelector('[data-confirm-auto-job]');
+    const confirmModal = document.getElementById('autoJobConfirmModal');
     const modalConfirm = document.getElementById('autoJobModalConfirm');
+    const modalCancel = document.getElementById('autoJobModalCancel');
 
-    if (!radarForm || !channelSelect) {
-      return;
+    if (channelSelect && radarForm) {
+      channelSelect.addEventListener('change', function () {
+        const targetUrl = channelSelect.dataset.profileSwitchUrl || '/admin/youtube_cortes.php';
+        const nextUrl = new URL(targetUrl, window.location.origin);
+        nextUrl.searchParams.set('tab', radarForm.dataset.currentTab || 'gerar');
+        nextUrl.searchParams.set('channel_profile_id', channelSelect.value || '0');
+        window.location.href = nextUrl.toString();
+      });
     }
 
-    channelSelect.addEventListener('change', function () {
-      const targetUrl = channelSelect.dataset.profileSwitchUrl || '/admin/youtube_cortes.php';
-      const nextUrl = new URL(targetUrl, window.location.origin);
-      nextUrl.searchParams.set('tab', radarForm.dataset.currentTab || 'gerar');
-      nextUrl.searchParams.set('channel_profile_id', channelSelect.value || '0');
-      window.location.href = nextUrl.toString();
-    });
-
-    if (!autoJobButton || !confirmModal) {
-      return;
+    if (autoJobBtn) {
+      autoJobBtn.addEventListener('click', function (e) {
+        e.preventDefault();
+        openAutoJobModal();
+      });
     }
 
-    function openModal() {
-      const option = channelSelect.options[channelSelect.selectedIndex];
-      const channelName = option && option.text ? option.text.trim() : 'Canal configurado';
-      if (modalChannelName) {
-        modalChannelName.textContent = channelName;
-      }
-      confirmModal.hidden = false;
-      document.body.style.overflow = 'hidden';
+    if (modalCancel) {
+      modalCancel.addEventListener('click', function (e) {
+        e.preventDefault();
+        closeAutoJobModal();
+      });
     }
 
-    function closeModal() {
-      confirmModal.hidden = true;
-      document.body.style.overflow = '';
+    if (confirmModal) {
+      confirmModal.addEventListener('click', function (e) {
+        if (e.target === confirmModal) {
+          closeAutoJobModal();
+        }
+      });
     }
-
-    autoJobButton.addEventListener('click', function (e) {
-      e.preventDefault();
-      openModal();
-    });
-
-    modalCancel?.addEventListener('click', function () {
-      closeModal();
-    });
-
-    confirmModal.addEventListener('click', function (e) {
-      if (e.target === confirmModal) {
-        closeModal();
-      }
-    });
 
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && !confirmModal.hidden) {
-        closeModal();
+      if (e.key === 'Escape') {
+        closeAutoJobModal();
       }
     });
 
-    modalConfirm?.addEventListener('click', function () {
-      let actionInput = radarForm.querySelector('input[name="acao"]');
-      if (!actionInput) {
-        actionInput = document.createElement('input');
-        actionInput.type = 'hidden';
-        actionInput.name = 'acao';
-        radarForm.appendChild(actionInput);
-      }
-      actionInput.value = 'run_auto_cut_publish';
-      closeModal();
-      radarForm.submit();
-    });
-  })();
+    if (modalConfirm && radarForm) {
+      modalConfirm.addEventListener('click', function (e) {
+        e.preventDefault();
+        let actionInput = radarForm.querySelector('input[name="acao"]');
+        if (!actionInput) {
+          actionInput = document.createElement('input');
+          actionInput.type = 'hidden';
+          actionInput.name = 'acao';
+          radarForm.appendChild(actionInput);
+        }
+        actionInput.value = 'run_auto_cut_publish';
+        closeAutoJobModal();
+        radarForm.submit();
+      });
+    }
+  });
 </script>
-
-<!-- Modal Customizado de Confirmacao do Auto Job -->
-<div class="admin-modal-backdrop" id="autoJobConfirmModal" hidden>
-  <div class="admin-confirm-modal-box">
-    <div class="admin-confirm-icon-wrap">
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-      </svg>
-    </div>
-    <h3 class="admin-confirm-title">Executar Auto Job do Canal</h3>
-    <p class="admin-confirm-text">
-      Deseja iniciar o processo automatizado de varredura no radar, análise de retenção com <strong>Google Gemini</strong>, geração de vídeo vertical Full HD e publicação para <strong id="autoJobModalChannelName">este canal</strong>?
-    </p>
-    <div class="admin-confirm-actions">
-      <button type="button" class="btn-link" id="autoJobModalCancel">Cancelar</button>
-      <button type="button" class="btn-link primary" id="autoJobModalConfirm" style="background:#2563eb; color:#ffffff; border-color:#2563eb;">⚡ Iniciar Auto Job</button>
-    </div>
-  </div>
-</div>
-
-<style>
-.admin-modal-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 9999;
-  background: rgba(15, 23, 42, 0.65);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  animation: adminFadeIn 0.2s ease-out;
-}
-.admin-modal-backdrop[hidden] {
-  display: none !important;
-}
-.admin-confirm-modal-box {
-  background: #ffffff;
-  border-radius: 24px;
-  padding: 32px 28px 24px;
-  max-width: 460px;
-  width: 100%;
-  box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.25), 0 0 0 1px rgba(226, 232, 240, 0.8);
-  text-align: center;
-  animation: adminModalScale 0.22s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.admin-confirm-icon-wrap {
-  width: 56px;
-  height: 56px;
-  margin: 0 auto 16px;
-  border-radius: 18px;
-  background: #eff6ff;
-  color: #2563eb;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.admin-confirm-title {
-  margin: 0 0 8px;
-  font-size: 1.22rem;
-  font-weight: 700;
-  color: #0f172a;
-}
-.admin-confirm-text {
-  margin: 0 0 24px;
-  font-size: 0.92rem;
-  color: #64748b;
-  line-height: 1.55;
-}
-.admin-confirm-text strong {
-  color: #1e293b;
-  font-weight: 600;
-}
-.admin-confirm-actions {
-  display: flex;
-  gap: 12px;
-  justify-content: center;
-}
-.admin-confirm-actions button {
-  flex: 1;
-  padding: 12px 18px;
-  font-size: 0.94rem;
-  font-weight: 600;
-  border-radius: 14px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-@keyframes adminFadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-@keyframes adminModalScale {
-  from { opacity: 0; transform: scale(0.94) translateY(8px); }
-  to { opacity: 1; transform: scale(1) translateY(0); }
-}
-</style>
 </body>
 </html>
