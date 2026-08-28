@@ -420,10 +420,10 @@ def _gemini_api_key() -> str:
 
 
 def _gemini_model() -> str:
-    model = (os.getenv("GEMINI_MODEL") or "gemini-2.0-flash").strip()
+    model = (os.getenv("GEMINI_MODEL") or "gemini-3.5-flash").strip()
     if model.startswith("models/"):
         model = model[len("models/"):]
-    return model or "gemini-2.0-flash"
+    return model or "gemini-3.5-flash"
 
 
 def _call_gemini_generate_content(
@@ -452,14 +452,23 @@ def _call_gemini_generate_content(
             "parts": [{"text": system_instruction}]
         }
     with httpx.Client(timeout=timeout) as client:
-        response = client.post(
-            url,
-            params={"key": api_key},
-            json=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = client.post(
+                url,
+                params={"key": api_key},
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as err:
+            status = err.response.status_code
+            if status in {400, 403, 404}:
+                raise ValueError(
+                    f"A GEMINI_API_KEY configurada retornou erro HTTP {status}. "
+                    "Verifique se você copiou a chave de API correta do Google AI Studio (https://aistudio.google.com/app/apikey) que geralmente começa com 'AIzaSy...'."
+                ) from err
+            raise
 
 
 def _extract_gemini_text(response_payload: dict[str, Any]) -> str:

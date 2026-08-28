@@ -1577,7 +1577,10 @@ def _generate_voiceover_script_with_gemini(offer: dict[str, Any]) -> str:
         "Retorne APENAS o texto puro do roteiro a ser narrado, sem aspas, titulos ou explicacoes."
     )
 
-    model = os.getenv("GEMINI_MODEL") or "gemini-2.0-flash"
+    model = (os.getenv("GEMINI_MODEL") or "gemini-3.5-flash").strip()
+    if model.startswith("models/"):
+        model = model[len("models/"):]
+    model = model or "gemini-3.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
