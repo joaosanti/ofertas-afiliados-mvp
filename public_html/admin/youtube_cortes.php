@@ -1117,12 +1117,42 @@ function admin_cuts_format_bytes($bytes) {
             </select>
           </label>
           <button class="btn-link primary" type="submit" name="acao" value="load_trends">Carregar radar</button>
-          <button class="btn-link" type="submit" name="acao" value="run_auto_cut_publish" data-confirm-auto-job>Rodar auto job</button>
+          <button class="btn-link" type="button" data-confirm-auto-job>Rodar auto job</button>
           <button class="btn-link" type="submit" name="acao" value="test_youtube_auth">Testar autenticacao</button>
           <button class="btn-link" type="submit" name="acao" value="reconnect_youtube">Reconectar YouTube</button>
         </form>
       </div>
     </div>
+
+    <?php if (is_array($pendingYoutubeJob) && !empty($pendingYoutubeJob['job_id'])): ?>
+    <div class="admin-side-card admin-progress-card-inline" id="youtube-cuts-progress-card" data-job-id="<?= h((string) $pendingYoutubeJob['job_id']) ?>" data-status-url="/admin/youtube_cortes_job_status.php?job_id=<?= urlencode((string) $pendingYoutubeJob['job_id']) ?>" style="margin-bottom:16px; border: 1.5px solid #3b82f6; background: linear-gradient(135deg, rgba(239, 246, 255, 0.95), rgba(255, 255, 255, 0.98)); box-shadow: 0 10px 25px -5px rgba(59, 130, 246, 0.12); border-radius: 20px; padding: 18px 22px;">
+      <div class="admin-panel-head" style="padding:0; margin-bottom:12px;">
+        <div>
+          <?php
+            $pendingKind = (string) ($pendingYoutubeJob['kind'] ?? '');
+            $progressTitle = 'Gerando cortes';
+            if ($pendingKind === 'analyze_video') {
+              $progressTitle = 'Analisando video';
+            } elseif ($pendingKind === 'auto_cut_publish') {
+              $progressTitle = '⚡ Rodando auto job do canal em tempo real';
+            }
+          ?>
+          <strong style="font-size:1.02rem; color:#1e3a8a; display:flex; align-items:center; gap:8px;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+            <?= h($progressTitle) ?>
+          </strong>
+          <p id="youtube-cuts-progress-label" style="margin-top:4px; font-size:0.88rem; color:#475569;">Preparando o processamento no servidor.</p>
+        </div>
+        <div class="admin-meta-row">
+          <span class="admin-meta-chip admin-meta-chip-soft" id="youtube-cuts-progress-time" style="font-weight:600; background:#dbeafe; color:#1e40af;">0s</span>
+        </div>
+      </div>
+      <div class="admin-progress-bar" aria-hidden="true" style="height:10px; background:#e2e8f0; border-radius:999px; overflow:hidden;">
+        <div class="admin-progress-bar-fill" id="youtube-cuts-progress-fill" style="width: 10%; height:100%; background:linear-gradient(90deg, #2563eb, #3b82f6); border-radius:999px; transition:width 0.4s ease;"></div>
+      </div>
+    </div>
+    <?php endif; ?>
+
     <article class="admin-side-card" style="margin-bottom:16px;">
       <div class="admin-panel-head" style="padding:0; margin-bottom:10px;">
         <div>
@@ -1188,32 +1218,6 @@ function admin_cuts_format_bytes($bytes) {
       <div class="admin-empty">Clique em "Carregar radar" para listar videos recentes com potencial de corte.</div>
     <?php endif; ?>
   </section>
-  <?php if (is_array($pendingYoutubeJob) && !empty($pendingYoutubeJob['job_id'])): ?>
-  <section class="admin-panel admin-progress-card" id="youtube-cuts-progress-card" data-job-id="<?= h((string) $pendingYoutubeJob['job_id']) ?>" data-status-url="/admin/youtube_cortes_job_status.php?job_id=<?= urlencode((string) $pendingYoutubeJob['job_id']) ?>">
-    <div class="admin-panel-head">
-      <div>
-        <?php
-          $pendingKind = (string) ($pendingYoutubeJob['kind'] ?? '');
-          $progressTitle = 'Gerando cortes';
-          if ($pendingKind === 'analyze_video') {
-            $progressTitle = 'Analisando video';
-          } elseif ($pendingKind === 'auto_cut_publish') {
-            $progressTitle = 'Rodando auto job do canal';
-          }
-        ?>
-        <h2 class="admin-section-title"><?= h($progressTitle) ?></h2>
-        <p id="youtube-cuts-progress-label">Preparando o processamento no servidor.</p>
-      </div>
-      <div class="admin-meta-row">
-        <span class="admin-meta-chip admin-meta-chip-soft" id="youtube-cuts-progress-time">0s</span>
-      </div>
-    </div>
-    <div class="admin-progress-bar" aria-hidden="true">
-      <div class="admin-progress-bar-fill" id="youtube-cuts-progress-fill" style="width: 10%;"></div>
-    </div>
-    <p class="admin-card-subtitle">A tela nao fica mais presa. No celular, pode deixar aberta que o andamento continua sendo atualizado automaticamente.</p>
-  </section>
-  <?php endif; ?>
   <?php endif; ?>
 
   <?php if ($youtubeTab === 'gerar'): ?>
@@ -1802,6 +1806,11 @@ function admin_cuts_format_bytes($bytes) {
     const radarForm = document.querySelector('.admin-inline-form-radar');
     const autoJobButton = radarForm?.querySelector('[data-confirm-auto-job]');
     const channelSelect = radarForm?.querySelector('#radar_channel_profile_id');
+    const confirmModal = document.getElementById('autoJobConfirmModal');
+    const modalChannelName = document.getElementById('autoJobModalChannelName');
+    const modalCancel = document.getElementById('autoJobModalCancel');
+    const modalConfirm = document.getElementById('autoJobModalConfirm');
+
     if (!radarForm || !channelSelect) {
       return;
     }
@@ -1814,19 +1823,156 @@ function admin_cuts_format_bytes($bytes) {
       window.location.href = nextUrl.toString();
     });
 
-    if (!autoJobButton) {
+    if (!autoJobButton || !confirmModal) {
       return;
     }
 
-    autoJobButton.addEventListener('click', function (event) {
+    function openModal() {
       const option = channelSelect.options[channelSelect.selectedIndex];
-      const channelName = option && option.text ? option.text.trim() : 'este canal';
-      const confirmed = window.confirm(`Voce quer rodar o auto job agora para ${channelName}?`);
-      if (!confirmed) {
-        event.preventDefault();
+      const channelName = option && option.text ? option.text.trim() : 'Canal configurado';
+      if (modalChannelName) {
+        modalChannelName.textContent = channelName;
       }
+      confirmModal.hidden = false;
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeModal() {
+      confirmModal.hidden = true;
+      document.body.style.overflow = '';
+    }
+
+    autoJobButton.addEventListener('click', function (e) {
+      e.preventDefault();
+      openModal();
+    });
+
+    modalCancel?.addEventListener('click', function () {
+      closeModal();
+    });
+
+    confirmModal.addEventListener('click', function (e) {
+      if (e.target === confirmModal) {
+        closeModal();
+      }
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !confirmModal.hidden) {
+        closeModal();
+      }
+    });
+
+    modalConfirm?.addEventListener('click', function () {
+      let actionInput = radarForm.querySelector('input[name="acao"]');
+      if (!actionInput) {
+        actionInput = document.createElement('input');
+        actionInput.type = 'hidden';
+        actionInput.name = 'acao';
+        radarForm.appendChild(actionInput);
+      }
+      actionInput.value = 'run_auto_cut_publish';
+      closeModal();
+      radarForm.submit();
     });
   })();
 </script>
+
+<!-- Modal Customizado de Confirmacao do Auto Job -->
+<div class="admin-modal-backdrop" id="autoJobConfirmModal" hidden>
+  <div class="admin-confirm-modal-box">
+    <div class="admin-confirm-icon-wrap">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+      </svg>
+    </div>
+    <h3 class="admin-confirm-title">Executar Auto Job do Canal</h3>
+    <p class="admin-confirm-text">
+      Deseja iniciar o processo automatizado de varredura no radar, análise de retenção com <strong>Google Gemini</strong>, geração de vídeo vertical Full HD e publicação para <strong id="autoJobModalChannelName">este canal</strong>?
+    </p>
+    <div class="admin-confirm-actions">
+      <button type="button" class="btn-link" id="autoJobModalCancel">Cancelar</button>
+      <button type="button" class="btn-link primary" id="autoJobModalConfirm" style="background:#2563eb; color:#ffffff; border-color:#2563eb;">⚡ Iniciar Auto Job</button>
+    </div>
+  </div>
+</div>
+
+<style>
+.admin-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(15, 23, 42, 0.65);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: adminFadeIn 0.2s ease-out;
+}
+.admin-modal-backdrop[hidden] {
+  display: none !important;
+}
+.admin-confirm-modal-box {
+  background: #ffffff;
+  border-radius: 24px;
+  padding: 32px 28px 24px;
+  max-width: 460px;
+  width: 100%;
+  box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.25), 0 0 0 1px rgba(226, 232, 240, 0.8);
+  text-align: center;
+  animation: adminModalScale 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.admin-confirm-icon-wrap {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 16px;
+  border-radius: 18px;
+  background: #eff6ff;
+  color: #2563eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.admin-confirm-title {
+  margin: 0 0 8px;
+  font-size: 1.22rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+.admin-confirm-text {
+  margin: 0 0 24px;
+  font-size: 0.92rem;
+  color: #64748b;
+  line-height: 1.55;
+}
+.admin-confirm-text strong {
+  color: #1e293b;
+  font-weight: 600;
+}
+.admin-confirm-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+.admin-confirm-actions button {
+  flex: 1;
+  padding: 12px 18px;
+  font-size: 0.94rem;
+  font-weight: 600;
+  border-radius: 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+@keyframes adminFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes adminModalScale {
+  from { opacity: 0; transform: scale(0.94) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+</style>
 </body>
 </html>
