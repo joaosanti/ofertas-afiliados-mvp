@@ -465,13 +465,18 @@ def youtube_redirect_uri(explicit_value: str | None = None) -> str:
 
 def _youtube_api_get(access_token: str, path: str, *, params: dict[str, Any]) -> dict[str, Any]:
     with httpx.Client(timeout=30) as client:
-        response = client.get(
-            f"{YOUTUBE_API_URL}/{path.lstrip('/')}",
-            params=params,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = client.get(
+                f"{YOUTUBE_API_URL}/{path.lstrip('/')}",
+                params=params,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as err:
+            if err.response.status_code == 429:
+                return {"items": [], "error": "rate_limited"}
+            raise
 
 
 def _normalize_search_text(text: str) -> str:
@@ -808,6 +813,55 @@ def _fetch_subscribed_channels(access_token: str, *, max_results: int = 20) -> l
     return channels
 
 
+KNOWN_CHANNEL_MAP: dict[str, dict[str, str]] = {
+    "flowsportclub": {
+        "channel_id": "UC5-aueB1RqpUc-EeAjtx9Lw",
+        "title": "Flow Sport Club",
+        "custom_url": "FlowSportClub",
+    },
+    "tntsportsbr": {
+        "channel_id": "UCs-6sCz2LJm1PrWQN4ErsPw",
+        "title": "TNT Sports Brasil",
+        "custom_url": "TNTSportsBR",
+    },
+    "cazetv": {
+        "channel_id": "UCZiYbVptd3PVPf4f6eR6UaQ",
+        "title": "CazéTV",
+        "custom_url": "CazeTV",
+    },
+    "desimpedidos": {
+        "channel_id": "UCFjrDmEnxrG5TRGVO0TPHLA",
+        "title": "Desimpedidos",
+        "custom_url": "Desimpedidos",
+    },
+    "osdonosdabola": {
+        "channel_id": "UCa5lS5z3E70d2gZ59l3Z9Rw",
+        "title": "Os Donos da Bola",
+        "custom_url": "OsDonosDaBola",
+    },
+    "ge": {
+        "channel_id": "UCXf9kCcfHhVdZ1n_e24G6tA",
+        "title": "ge",
+        "custom_url": "ge",
+    },
+    "flowpodcast": {
+        "channel_id": "UC4ncvgh5hFr5O83MH7-jRJg",
+        "title": "Flow Podcast",
+        "custom_url": "flowpodcast",
+    },
+    "podpah": {
+        "channel_id": "UCv2UuC1qG0c7zC-F-c4c0qA",
+        "title": "Podpah",
+        "custom_url": "podpah",
+    },
+    "inteligencialtda": {
+        "channel_id": "UC6wF_4gT9-88gZ1N27FwZqQ",
+        "title": "Inteligência Ltda.",
+        "custom_url": "inteligencialtda",
+    },
+}
+
+
 def _resolve_manual_source_channels(
     access_token: str,
     source_entries: list[str],
@@ -824,45 +878,87 @@ def _resolve_manual_source_channels(
         if not lookup or not value:
             continue
 
+        normalized_slug = _normalize_search_text(value).replace("@", "").strip()
+        if normalized_slug in KNOWN_CHANNEL_MAP:
+            known = KNOWN_CHANNEL_MAP[normalized_slug]
+            channel_id = known["channel_id"]
+            if channel_id not in seen_channel_ids:
+                seen_channel_ids.add(channel_id)
+                resolved.append(
+                    {
+                        "channel_id": channel_id,
+                        "title": known["title"],
+                        "custom_url": known["custom_url"],
+                        "description": "",
+                        "source_label": str(reference.get("label") or value).strip(),
+                    }
+                )
+            continue
+
         channel_rows: list[dict[str, Any]] = []
-        if lookup == "id":
-            payload = _youtube_api_get(
-                access_token,
-                "/channels",
-                params={
-                    "part": "snippet,contentDetails",
-                    "id": value,
-                    "maxResults": "1",
-                },
-            )
-            channel_rows = list(payload.get("items") or [])
-        else:
-            search_payload = _youtube_api_get(
-                access_token,
-                "/search",
-                params={
-                    "part": "snippet",
-                    "type": "channel",
-                    "q": value,
-                    "maxResults": "5",
-                },
-            )
-            candidate_ids = []
-            for item in search_payload.get("items") or []:
-                channel_id = str((((item.get("id") or {}).get("channelId")) or "")).strip()
-                if channel_id and channel_id not in candidate_ids:
-                    candidate_ids.append(channel_id)
-            if candidate_ids:
+        try:
+            if lookup == "id":
                 payload = _youtube_api_get(
                     access_token,
                     "/channels",
                     params={
                         "part": "snippet,contentDetails",
-                        "id": ",".join(candidate_ids[:5]),
-                        "maxResults": str(min(len(candidate_ids), 5)),
+                        "id": value,
+                        "maxResults": "1",
                     },
                 )
                 channel_rows = list(payload.get("items") or [])
+            elif lookup == "handle":
+                payload = _youtube_api_get(
+                    access_token,
+                    "/channels",
+                    params={
+                        "part": "snippet,contentDetails",
+                        "forHandle": value,
+                        "maxResults": "1",
+                    },
+                )
+                channel_rows = list(payload.get("items") or [])
+            else:
+                handle_payload = _youtube_api_get(
+                    access_token,
+                    "/channels",
+                    params={
+                        "part": "snippet,contentDetails",
+                        "forHandle": value,
+                        "maxResults": "1",
+                    },
+                )
+                channel_rows = list(handle_payload.get("items") or [])
+                if not channel_rows:
+                    search_payload = _youtube_api_get(
+                        access_token,
+                        "/search",
+                        params={
+                            "part": "snippet",
+                            "type": "channel",
+                            "q": value,
+                            "maxResults": "3",
+                        },
+                    )
+                    candidate_ids = []
+                    for item in search_payload.get("items") or []:
+                        cid = str((((item.get("id") or {}).get("channelId")) or "")).strip()
+                        if cid and cid not in candidate_ids:
+                            candidate_ids.append(cid)
+                    if candidate_ids:
+                        payload = _youtube_api_get(
+                            access_token,
+                            "/channels",
+                            params={
+                                "part": "snippet,contentDetails",
+                                "id": ",".join(candidate_ids[:3]),
+                                "maxResults": str(min(len(candidate_ids), 3)),
+                            },
+                        )
+                        channel_rows = list(payload.get("items") or [])
+        except Exception:
+            channel_rows = []
 
         chosen: dict[str, Any] | None = None
         normalized_query = _normalize_search_text(value)
