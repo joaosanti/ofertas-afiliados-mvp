@@ -1283,13 +1283,17 @@ def build_channel_trend_ideas(
             exclude_channel_id=str(own_channel.get("id") or ""),
         )
     if not recent_candidates:
-        if configured_source_channels:
-            raise ValueError("Nao encontrei videos recentes nos canais configurados para esse perfil.")
-        raise ValueError(
-            f"Nao encontrei videos recentes dos canais inscritos nas ultimas {int(trend_profile.get('recent_hours') or 48)} horas."
+        fallback_candidates = _search_popular_full_videos_for_cuts(
+            access_token,
+            topic_query,
+            exclude_channel_id=str(own_channel.get("id") or ""),
+            limit=int(trend_profile.get("max_top_videos") or 18),
+            trend_profile=trend_profile,
         )
+        recent_candidates = fallback_candidates
+        source_mode = "search_fallback"
 
-    candidate_details = _videos_details(access_token, [str(item.get("video_id") or "") for item in recent_candidates])
+    candidate_details = _videos_details(access_token, [str(item.get("video_id") or "") for item in recent_candidates]) if recent_candidates else []
     recent_meta = {
         str(item.get("video_id") or ""): item
         for item in recent_candidates
@@ -1346,7 +1350,7 @@ def build_channel_trend_ideas(
             ranked_videos.append(item)
             if len(ranked_videos) >= diversified_limit:
                 break
-    if len(ranked_videos) < diversified_limit and not subscriptions_only:
+    if len(ranked_videos) < diversified_limit:
         fallback_candidates = _search_popular_full_videos_for_cuts(
             access_token,
             topic_query,
@@ -1367,9 +1371,20 @@ def build_channel_trend_ideas(
         per_channel_cap=int(trend_profile.get("per_channel_cap") or 2),
     )
     if not top_videos:
-        if configured_source_channels:
-            raise ValueError("Nao encontrei videos com potencial de corte na lista de canais configurada para esse perfil.")
-        raise ValueError(str(trend_profile.get("not_found_error") or "Nao encontrei videos com potencial de corte entre os canais inscritos recentemente."))
+        if secondary_ranked_videos:
+            top_videos = secondary_ranked_videos[:diversified_limit]
+        else:
+            fallback_candidates = _search_popular_full_videos_for_cuts(
+                access_token,
+                topic_query,
+                exclude_channel_id=str(own_channel.get("id") or ""),
+                limit=diversified_limit,
+                trend_profile=trend_profile,
+            )
+            top_videos = fallback_candidates[:diversified_limit]
+
+    if not top_videos:
+        raise ValueError("Nao encontrei videos com potencial de corte no YouTube no momento. Tente novamente em alguns minutos.")
 
     grouped: dict[str, dict[str, Any]] = {}
     for video in top_videos:
